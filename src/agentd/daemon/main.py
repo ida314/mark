@@ -91,6 +91,7 @@ async def consolidation_loop(cfg: Config, stop: asyncio.Event) -> None:
             ):
                 last_nightly = now
                 await nightly(cfg)
+                await _nightly_backup(cfg)
         except Exception as exc:
             await repo_agenda.notify(
                 source="daemon", level="error", title="Consolidation failed", body=str(exc)[:500]
@@ -99,6 +100,27 @@ async def consolidation_loop(cfg: Config, stop: asyncio.Event) -> None:
             await asyncio.wait_for(stop.wait(), timeout=300)
         except TimeoutError:
             pass
+
+
+async def _nightly_backup(cfg: Config) -> None:
+    """A failed backup is worth waking someone for; it is the one job whose whole point is
+    that you find out before you need it."""
+    from ..backup import create
+
+    try:
+        result = await create(cfg, keep=cfg.db.backup_keep)
+    except Exception as exc:
+        await repo_agenda.notify(
+            source="daemon", level="error", title="Backup failed", body=str(exc)[:500]
+        )
+        return
+    await repo_ops.write_action(
+        repo_ops.ActionRecord(
+            actor="daemon", kind="backup", name=result.path.name, status="ok",
+            output={"db_bytes": result.bytes_db, "repo_bytes": result.bytes_repo,
+                    "pruned": result.pruned},
+        )
+    )
 
 
 async def housekeeping_loop(cfg: Config, stop: asyncio.Event) -> None:

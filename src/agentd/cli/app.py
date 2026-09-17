@@ -248,6 +248,63 @@ def db_status() -> None:
     console.print(f"applied: {len(applied)}\npending: {pending or 'none'}")
 
 
+# --- backups -----------------------------------------------------------------
+
+
+@app.command()
+def backup(
+    keep: int | None = typer.Option(None, help="How many backups to retain"),
+    verify: bool = typer.Option(False, help="Restore into a scratch database and count rows"),
+) -> None:
+    """Snapshot the database and the memory repo."""
+    from .. import backup as backup_mod
+
+    cfg = get_config()
+    result = run(backup_mod.create(cfg, keep=keep if keep is not None else cfg.db.backup_keep))
+    console.print(
+        f"[green]{result.path}[/green]  db {result.bytes_db / 1e6:.1f} MB"
+        f"  repo {result.bytes_repo / 1e3:.0f} kB"
+        + (f"  [dim]pruned {len(result.pruned)}[/dim]" if result.pruned else "")
+    )
+    if verify:
+        counts = run(backup_mod.verify(result.path, cfg))
+        console.print("[green]restore verified[/green] " + "  ".join(
+            f"{k}={v}" for k, v in counts.items()
+        ))
+
+
+@app.command()
+def restore(
+    source: str | None = typer.Option(None, "--from", help="Backup directory (default: latest)"),
+    into: str = typer.Option("agent_restored", help="Database to restore into"),
+    force: bool = typer.Option(False, help="Allow restoring over the live database"),
+) -> None:
+    """Restore a backup. Defaults to a new database, not the live one."""
+    from .. import backup as backup_mod
+
+    cfg = get_config()
+    path = Path(source).expanduser() if source else backup_mod.latest(cfg)
+    if path is None:
+        console.print("[red]no backups found[/red]")
+        raise typer.Exit(1)
+
+    live = cfg.db.dsn.rsplit("/", 1)[-1]
+    if into == live and not force:
+        console.print(
+            f"[red]refusing to restore over the live database '{live}'[/red]\n"
+            "Restore somewhere else, look at it, then point the DSN at it — or pass --force."
+        )
+        raise typer.Exit(1)
+
+    name = run(backup_mod.restore(path, into=into, cfg=cfg, drop_existing=force))
+    console.print(f"[green]restored[/green] {path} -> database '{name}'")
+    bundle = path / backup_mod.BUNDLE
+    if bundle.exists():
+        console.print(
+            f"[dim]memory repo: git clone {bundle} <dir>  (or: git -C <repo> pull {bundle})[/dim]"
+        )
+
+
 # --- conversation ------------------------------------------------------------
 
 

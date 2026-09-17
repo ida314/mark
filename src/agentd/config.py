@@ -28,6 +28,10 @@ class DbConfig(BaseModel):
     dsn: str = "postgresql://agent:agent@127.0.0.1:55432/agent"
     min_size: int = 1
     max_size: int = 8
+    # pg_dump/pg_restore run inside the container: the host has no client, and a mismatched
+    # major version would refuse the dump anyway.
+    container: str = "agentd-postgres-1"
+    backup_keep: int = 14
 
 
 class RoleConfig(BaseModel):

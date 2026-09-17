@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+from pydantic import ValidationError
+
 from agentd.agent.loop import Session
 from agentd.agent.subagents import SubagentResult, run_subagent
 from agentd.db import repo_agenda, repo_archive, repo_memory
@@ -222,3 +225,51 @@ async def test_markdown_promotion_is_deterministic_and_committed(cfg):
 
     # idempotent: nothing changed, so no second commit
     assert await consolidate.regenerate_markdown(cfg) is None
+
+
+def test_the_extractor_must_choose_a_category():
+    """A defaulted free-string category is one the model never has to think about, and that is
+    exactly what happened: every fact came back 'other', which silently disabled both the
+    per-category recency half-lives and the review gate's identity rule."""
+    schema = ExtractedFact.model_json_schema()
+    category = schema["properties"]["category"]
+    assert set(category["enum"]) == {
+        "biographical", "preference", "relationship", "project",
+        "state", "belief", "constraint", "other",
+    }
+    assert "category" in schema["required"], "a default lets the model skip the decision"
+    with pytest.raises(ValidationError):
+        ExtractedFact(statement="Dylan lives in Queens")
+
+
+async def test_a_chosen_category_survives_into_the_fact_row(cfg):
+    """The taxonomy is only worth enforcing if it reaches the stored fact, because that is what
+    retrieval decays by and what the identity rule keys off."""
+    from agentd.llm.roles import set_provider
+
+    session_id = await repo_archive.create_session("test")
+    event_id = await repo_archive.append_event(
+        RawEvent(
+            kind="user_message", actor="user",
+            content="My sister Mara is a nurse in Boston.", session_id=session_id,
+        )
+    )
+    set_provider(
+        FakeProvider(
+            json_results=[
+                Extraction(
+                    facts=[
+                        ExtractedFact(
+                            statement="Mara is Dylan's sister and a nurse in Boston",
+                            category="relationship", confidence=0.9,
+                            evidence=[{"event_id": str(event_id), "quote": "My sister Mara"}],
+                        )
+                    ]
+                )
+            ]
+        )
+    )
+    await consolidate.post_session(session_id, cfg)
+    facts = await repo_memory.active_facts()
+    mara = next(f for f in facts if "Mara" in f["statement"])
+    assert mara["category"] == "relationship"

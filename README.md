@@ -132,8 +132,16 @@ server you control. A server's own `readOnlyHint` is ignored unless you set
   retries connection errors with backoff for exactly this reason.
 - **Docker is rootful here**, so the sandbox never mounts the docker socket and runs
   `--network none --read-only --cap-drop ALL` as an unprivileged user.
-- **Backups.** Everything durable is in the `agent_pgdata` volume and the memory git repo.
-  `pg_dump` and a git remote are worth adding.
+- **Backups.** `agent backup` snapshots both durable things — a `pg_dump -Fc` of the database
+  and a `git bundle` of the memory repo — into `~/.local/share/agent/backups`, keeping the last
+  14. The daemon runs it nightly after consolidation and notifies you if it fails, since a
+  backup job whose failures are silent is worse than none. `pg_dump` runs inside the database
+  container, because the host has no client and a mismatched major version would refuse anyway.
+
+  `agent backup --verify` restores into a scratch database and counts the rows back; `agent
+  restore --from <dir>` restores into a *new* database by default and refuses to overwrite the
+  live one without `--force`. Rehearse it — an untested backup is a rumour. A git remote on the
+  memory repo is still worth adding: it is the only copy that would survive this box.
 
 ## Tests
 
