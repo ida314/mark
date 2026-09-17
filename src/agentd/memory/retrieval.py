@@ -6,6 +6,7 @@ reranked, stripped of contradictions and duplicates, then packed into a token bu
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from ..ids import estimate_tokens, short_id, utcnow
 
 RRF_K = 60
 CHANNEL_WEIGHTS = {"keyword": 1.0, "vector": 1.0, "entity": 0.8, "raw": 0.5}
+VARIANT_DECAY = 0.6  # a rewritten query is a guess about the real one, so it counts for less
 TYPE_PRIOR = {"fact": 1.0, "procedure": 0.7, "episode": 0.6, "raw": 0.3}
 HALF_LIFE_DAYS = {
     "state": 30.0, "project": 30.0,
@@ -82,7 +84,9 @@ def rrf_fuse(channel_ranks: dict[str, list[str]]) -> dict[str, float]:
     """Reciprocal rank fusion across channels, normalized to the best score."""
     scores: dict[str, float] = {}
     for channel, ranked in channel_ranks.items():
-        weight = CHANNEL_WEIGHTS.get(channel, 1.0)
+        # "vector~1" is the vector channel run against the first rewritten query
+        base, _, variant = channel.partition("~")
+        weight = CHANNEL_WEIGHTS.get(base, 1.0) * (VARIANT_DECAY ** int(variant or 0))
         for rank, key in enumerate(ranked):
             scores[key] = scores.get(key, 0.0) + weight / (RRF_K + rank + 1)
     if not scores:
@@ -317,6 +321,55 @@ async def _channel_simple(
     return rows, ranks
 
 
+EXPAND_SYSTEM = """You rewrite a question into alternative search queries for a personal
+memory store, so that a vaguely worded question still finds the right records.
+
+Give short keyword-style variants that use different words for the same thing: likely
+synonyms, the proper noun the user might have used when they first said it, the topic it
+falls under. Do not answer the question, do not invent specifics the question does not
+imply, and do not simply repeat the question. If the question is already specific and
+concrete, return an empty list — that is a good answer."""
+
+
+async def expand_query(query: str, cfg: Config | None = None) -> list[str]:
+    """Rewrite a question into a few search variants. Best effort: failure means no variants."""
+    from pydantic import BaseModel, Field
+
+    from ..llm.roles import get_provider, params_for
+
+    cfg = cfg or get_config()
+    n = cfg.retrieval.expansion_variants
+    if n <= 0 or len(query.strip()) < 8:
+        return []
+
+    class Expansion(BaseModel):
+        queries: list[str] = Field(default_factory=list)
+
+    try:
+        result = await asyncio.wait_for(
+            get_provider(cfg).complete_json(
+                [
+                    {"role": "system", "content": EXPAND_SYSTEM},
+                    {"role": "user", "content": f"Question: {query}\nGive at most {n} variants."},
+                ],
+                Expansion,
+                params=params_for("rewrite", cfg),
+            ),
+            timeout=cfg.retrieval.expansion_timeout_s,
+        )
+    except Exception:
+        # Retrieval without the rewrite is merely worse; retrieval that hangs is broken.
+        return []
+    seen = {query.strip().lower()}
+    out: list[str] = []
+    for variant in result.queries:
+        text = variant.strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out[:n]
+
+
 async def pack(
     query: str,
     *,
@@ -357,6 +410,30 @@ async def pack(
     for source_ranks in (fact_ranks, ep_ranks, proc_ranks):
         for channel, keys in source_ranks.items():
             channel_ranks.setdefault(channel, []).extend(keys)
+
+    # Deep mode gets a second look at the question: the words the user used now are often
+    # not the words they used when the memory was written.
+    variants: list[str] = []
+    if mode == "deep" and cfg.retrieval.query_expansion:
+        variants = await expand_query(query, cfg)
+    for i, variant in enumerate(variants, start=1):
+        vterms = query_terms(variant)
+        vvec = (await embedder.embed([variant]))[0] if embedder else None
+        v_fact_rows, v_fact_ranks = await _channel_facts(
+            variant, vterms, as_of, known_as_of, include_history=include_history,
+            max_sensitivity=max_sensitivity, limit=limit, qvec=vvec, entity_ids=entity_ids,
+        )
+        v_ep_rows, v_ep_ranks = await _channel_simple("episodes", variant, vterms, limit, vvec)
+        v_proc_rows, v_proc_ranks = await _channel_simple(
+            "procedures", variant, vterms, limit, vvec
+        )
+        for rows_ in (v_fact_rows, v_ep_rows, v_proc_rows):
+            for key, row in rows_.items():
+                all_rows.setdefault(key, row)
+        for source_ranks in (v_fact_ranks, v_ep_ranks, v_proc_ranks):
+            for channel, keys in source_ranks.items():
+                channel_ranks.setdefault(f"{channel}~{i}", []).extend(keys)
+
     fused = rrf_fuse(channel_ranks)
 
     items: list[Item] = []
@@ -446,6 +523,7 @@ async def pack(
             "returned": len(used),
             "entities": len(entity_ids),
             "mode": mode,
+            "variants": variants,
         },
     )
 

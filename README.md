@@ -94,6 +94,14 @@ Retrieval stays small on purpose: keyword, vector and entity channels fused with
 with recency/importance/confidence priors, reranked, stripped of contradictions and
 duplicates, then packed into a token budget.
 
+Deep retrieval (`agent memory search --deep`, or the model asking for it) first rewrites the
+question into a couple of search variants, because the words you use to ask are rarely the
+words that were stored — "that thing I'm building with the GPU box" has nothing in common
+with "Dylan runs a DGX Spark homelab". Variants run the same channels and fuse into the same
+RRF, discounted so a guess never outweighs what you actually typed. It is a small
+non-thinking call on a timeout: if the model is slow or down, you get ordinary retrieval
+rather than a stall.
+
 ## Background work
 
 `agent daemon run` (or `agent daemon install-unit` for systemd) runs watchers, reminders,

@@ -28,6 +28,14 @@ top_p = 0.8
 thinking = false
 max_tokens = 4096
 
+# Rewriting a question into search variants sits on the critical path of a deep retrieval,
+# so it is deliberately a small, fast, non-thinking call.
+[llm.roles.rewrite]
+temperature = 0.3
+top_p = 0.8
+thinking = false
+max_tokens = 256
+
 [llm.roles.judge]
 temperature = 0.6
 top_p = 0.95

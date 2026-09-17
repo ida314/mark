@@ -122,3 +122,44 @@ def test_render_marks_conflicts_inline():
                 meta={"conflicts": ["lives in Brooklyn"]})
     text, _ = _render([item], budget_tokens=2000)
     assert "conflicting: lives in Brooklyn" in text
+
+
+def test_a_rewritten_query_counts_for_less_than_the_real_one():
+    """A hit found only by a variant should rank below one found by what the user typed."""
+    fused = rrf_fuse({"keyword": ["real"], "keyword~1": ["variant"]})
+    assert fused["real"] > fused["variant"]
+    # but it still contributes: agreement across the original and a variant beats either alone
+    agreed = rrf_fuse({"keyword": ["a", "b"], "keyword~1": ["a", "c"]})
+    assert agreed["a"] > agreed["b"] and agreed["a"] > agreed["c"]
+
+
+async def test_query_expansion_drops_echoes_of_the_question(cfg):
+    from agentd.llm.fake import FakeProvider
+    from agentd.llm.roles import set_provider
+    from agentd.memory.retrieval import expand_query
+
+    set_provider(
+        FakeProvider(json_results=[{"queries": ["Where do I live?", "home address", "city"]}])
+    )
+    try:
+        variants = await expand_query("Where do I live?", cfg)
+    finally:
+        set_provider(None)
+    assert variants == ["home address", "city"][: cfg.retrieval.expansion_variants]
+
+
+async def test_query_expansion_survives_a_model_that_is_down(cfg):
+    from agentd.llm.roles import set_provider
+    from agentd.memory.retrieval import expand_query
+
+    class Broken:
+        name = "broken"
+
+        async def complete_json(self, *a, **k):
+            raise RuntimeError("endpoint is down")
+
+    set_provider(Broken())
+    try:
+        assert await expand_query("something vague about the router", cfg) == []
+    finally:
+        set_provider(None)

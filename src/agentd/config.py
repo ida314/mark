@@ -71,6 +71,9 @@ class RetrievalConfig(BaseModel):
     channel_limit: int = 30
     rerank_top_k: int = 30
     ef_search: int = 80
+    query_expansion: bool = True  # deep mode only: rewrite vague questions before searching
+    expansion_variants: int = 2
+    expansion_timeout_s: float = 15.0
 
 
 class PathsConfig(BaseModel):

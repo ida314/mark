@@ -150,3 +150,35 @@ async def test_evidence_accumulates_and_cannot_be_rewritten(cfg):
     async with connection() as conn:
         with pytest.raises(psycopg.errors.RaiseException):
             await conn.execute("DELETE FROM fact_evidence WHERE fact_id = %s", (fact_id,))
+
+
+async def test_a_rewritten_query_finds_what_the_users_words_missed(cfg):
+    """The point of expansion: the user's words now need not match the words we stored."""
+    from agentd.llm.fake import FakeProvider
+    from agentd.llm.roles import set_provider
+    from agentd.memory.retrieval import pack
+
+    await repo_memory.insert_fact(
+        statement="Dylan runs a DGX Spark homelab", category="project",
+        confidence=0.9, proposed_by="user",
+    )
+    await repo_memory.insert_fact(
+        statement="Dylan's favourite pasta shape is rigatoni", category="preference",
+        confidence=0.9, proposed_by="user",
+    )
+    query = "the machine in the corner"  # matches neither statement lexically
+
+    fast = await pack(query, mode="fast", cfg=cfg)
+    assert not any("homelab" in i.text for i in fast.items)
+
+    set_provider(FakeProvider(json_results=[{"queries": ["DGX Spark homelab"]}]))
+    try:
+        deep = await pack(query, mode="deep", cfg=cfg)
+    finally:
+        set_provider(None)
+
+    assert deep.stats["variants"] == ["DGX Spark homelab"]
+    homelab = next(i for i in deep.items if "homelab" in i.text)
+    assert any(c.startswith("keyword~") for c in homelab.channels)
+    # and it stays selective: the unrelated fact is not dragged in with it
+    assert not any("rigatoni" in i.text for i in deep.items)
