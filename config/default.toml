@@ -113,3 +113,12 @@ http_port = 8770
 # trust_annotations = false   # true to believe the server's own readOnly/destructive hints
 # allow_tools = ["search"]    # omit to import everything the server offers
 # timeout_s = 30.0
+
+# Push, so a notification reaches you when no terminal is open. Self-host ntfy on this box and
+# reach it over Tailscale; nothing then leaves hardware you control. Disabled until you set up
+# the server, because a notifier pointed at nothing just accumulates failed attempts.
+[ntfy]
+enabled = false
+base_url = "http://127.0.0.1:8088"
+topic = "agent"
+min_level = "info"

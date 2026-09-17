@@ -127,6 +127,18 @@ class ObsConfig(BaseModel):
     jaeger_ui: str = "http://127.0.0.1:16686"
 
 
+class NtfyConfig(BaseModel):
+    """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never
+    leave hardware you control."""
+
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:8088"
+    topic: str = "agent"
+    timeout_s: float = 10.0
+    min_level: Literal["info", "warn", "error"] = "info"
+    sweep_s: int = 60
+
+
 class McpServerConfig(BaseModel):
     command: str | None = None
     args: list[str] = Field(default_factory=list)
@@ -156,6 +168,7 @@ class Config(BaseModel):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     obs: ObsConfig = Field(default_factory=ObsConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
+    ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
 
     policy_file: Path = POLICY_FILE
 

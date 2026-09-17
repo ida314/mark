@@ -18,6 +18,29 @@ services:
       timeout: 5s
       retries: 20
 
+  # Push delivery. Bound to the Tailscale address rather than published broadly: the phone
+  # reaches it over the tailnet and nothing about a notification leaves hardware you own.
+  # The agent itself cannot reach it — web_fetch's SSRF guard blocks 100.64/10 on purpose —
+  # which is the right way round, since this is the daemon's channel, not a tool.
+  ntfy:
+    image: binwiederhier/ntfy:v2.11.0
+    restart: unless-stopped
+    command: serve
+    environment:
+      NTFY_BASE_URL: http://gx10.tail2e282c.ts.net:8088
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BEHIND_PROXY: "false"
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+    volumes:
+      - ntfy:/var/lib/ntfy
+    ports:
+      - "127.0.0.1:8088:80"
+      - "100.91.112.107:8088:80"
+
 volumes:
   pgdata:
     name: agent_pgdata
+  ntfy:
+    name: agent_ntfy

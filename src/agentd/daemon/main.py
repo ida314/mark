@@ -18,6 +18,7 @@ from ..db.pool import close_pool, connection
 from ..ids import utcnow
 from ..obs import otel
 from .heartbeat import heartbeat_loop
+from .notifier import notifier_loop
 from .scheduler import scheduler_loop
 
 DAEMON_LOCK_KEY = 0x4147_4544  # "AGED"
@@ -211,6 +212,7 @@ async def run(cfg: Config | None = None) -> int:
             asyncio.create_task(supervise("consolidation", consolidation_loop, cfg, stop)),
             asyncio.create_task(supervise("heartbeat", heartbeat_loop, cfg, stop)),
             asyncio.create_task(supervise("housekeeping", housekeeping_loop, cfg, stop)),
+            asyncio.create_task(supervise("notifier", notifier_loop, cfg, stop)),
         ]
         print(f"agent daemon running (pid {os.getpid()}); Ctrl-C to stop")
         await stop.wait()
