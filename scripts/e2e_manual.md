@@ -138,3 +138,25 @@ output`. Ask for it in `agent chat` and note two things: it needs approval even 
 `--autonomy act` (rule `mcp-imported-default`), and its result comes back wrapped in
 `<untrusted_content>`, which taints the rest of the turn. That is the point — imported tools
 are someone else's code, and nothing about importing them is allowed to be quiet.
+
+## 11. Backups, rehearsed
+
+```bash
+agent backup --verify
+```
+
+The `--verify` is the whole point: it restores the dump into a scratch database and counts the
+rows back, so you learn the backup is real now rather than on the day you need it. Expect a
+line like `restore verified facts=6 raw_events=13 actions=26 goals=2 open_loops=2`.
+
+To rehearse the real thing:
+
+```bash
+agent restore --from ~/.local/share/agent/backups/<stamp> --into agent_rehearsal
+psql "postgresql://agent:agent@127.0.0.1:55432/agent_rehearsal" -c 'select count(*) from facts'
+git clone ~/.local/share/agent/backups/<stamp>/memory.bundle /tmp/memory-check
+```
+
+`restore` refuses to write over the live database without `--force`, so this is safe to do on a
+whim. The daemon runs `backup` nightly after consolidation and notifies you if it fails — a
+backup job whose failures are silent is worse than no backup at all, because you would trust it.
