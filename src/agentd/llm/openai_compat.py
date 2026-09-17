@@ -252,6 +252,36 @@ class OpenAICompatProvider:
             return False, str(exc)
 
 
+def _balanced(text: str, start: int) -> str | None:
+    """The balanced JSON value starting at `start`, ignoring delimiters inside strings."""
+    opener = text[start]
+    closer = {"{": "}", "[": "]"}.get(opener)
+    if closer is None:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _extract_json(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -259,4 +289,24 @@ def _extract_json(text: str) -> str:
     start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
     if start > 0:
         text = text[start:]
+    try:
+        json.loads(text)
+        return text
+    except ValueError:
+        pass
+    # Grammar-constrained decoding on this box occasionally emits a doubled opening delimiter
+    # ('{{"facts": ...'), which costs a whole consolidation run for one stray token. Walk the
+    # candidate starts and keep the first that parses; anything unsalvageable falls through
+    # unchanged so the caller still sees the model's real output in the error.
+    for i, ch in enumerate(text[:8]):
+        if ch not in "{[":
+            continue
+        candidate = _balanced(text, i)
+        if candidate is None:
+            continue
+        try:
+            json.loads(candidate)
+            return candidate
+        except ValueError:
+            continue
     return text

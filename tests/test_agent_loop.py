@@ -209,3 +209,39 @@ async def test_the_turn_is_archived_and_audited(cfg):
     actions = await repo_ops.actions_for_turn(UUID(turn_id))
     assert any(a["kind"] == "turn" for a in actions)
     assert any(a["kind"] == "llm_call" for a in actions)
+
+
+# --- salvaging JSON from a flaky local decoder --------------------------------
+
+
+def test_json_is_salvaged_from_what_the_local_model_actually_emits():
+    """Grammar-constrained decoding here occasionally emits a doubled opening delimiter.
+    Losing an entire consolidation run to one stray token is a bad trade."""
+    import json
+
+    from agentd.llm.openai_compat import _extract_json
+
+    cases = [
+        '{{"facts":[{"statement":"x"}],"procedures":[]}',   # the one observed in the wild
+        '{"a": 1}',
+        '```json\n{"a": 2}\n```',
+        'Classification{"a": 3}',
+        '{"a": 4} and then some chatter',
+        '[[{"a": 5}]',
+    ]
+    for raw in cases:
+        json.loads(_extract_json(raw))  # raises if the salvage failed
+
+
+def test_a_brace_inside_a_string_is_not_mistaken_for_structure():
+    import json
+
+    from agentd.llm.openai_compat import _extract_json
+
+    assert json.loads(_extract_json('{"a": "}{"}')) == {"a": "}{"}
+
+
+def test_unsalvageable_output_is_returned_untouched_so_the_error_shows_it():
+    from agentd.llm.openai_compat import _extract_json
+
+    assert _extract_json('{"a": ') == '{"a":'
