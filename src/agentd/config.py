@@ -130,6 +130,7 @@ class McpServerConfig(BaseModel):
     trust_output: bool = False
     trust_annotations: bool = False
     allow_tools: list[str] | None = None
+    timeout_s: float = 30.0
 
 
 class McpConfig(BaseModel):

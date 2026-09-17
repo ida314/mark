@@ -176,6 +176,13 @@ async def run(cfg: Config | None = None) -> int:
                 loop.add_signal_handler(sig, stop.set)
 
         await repo_ops.heartbeat("daemon", os.getpid(), socket.gethostname(), {"status": "starting"})
+
+        from ..mcp_client import close_external_tools, load_external_tools
+
+        clients = await load_external_tools(cfg)
+        for server, why in clients.failures.items():
+            print(f"mcp:{server} unavailable — {why}")
+
         tasks = [
             asyncio.create_task(supervise("scheduler", scheduler_loop, cfg, stop)),
             asyncio.create_task(supervise("filewatch", filewatch_loop, cfg, stop)),
@@ -188,6 +195,7 @@ async def run(cfg: Config | None = None) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await close_external_tools()
         await repo_ops.heartbeat("daemon", os.getpid(), socket.gethostname(), {"status": "stopped"})
     await close_pool()
     return 0

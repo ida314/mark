@@ -122,3 +122,19 @@ npx @modelcontextprotocol/inspector   # optional, to poke at it
 
 `memory_search`, `profile_read`, `goals_list` and friends should be listed. This is what a
 front end like OpenClaw would consume in pass 2.
+
+The seam runs both ways: the agent can also *import* tools from someone else's server. Add
+one to `~/.config/agent/config.toml` — the agent's own server makes a fine test subject —
+
+```toml
+[mcp.servers.self]
+command = "/home/you/Projects/agent/.venv/bin/agent"
+args = ["mcp", "serve"]
+allow_tools = ["memory_search"]
+```
+
+then `agent mcp tools` should print `mcp_self_memory_search  risk=external · untrusted
+output`. Ask for it in `agent chat` and note two things: it needs approval even at
+`--autonomy act` (rule `mcp-imported-default`), and its result comes back wrapped in
+`<untrusted_content>`, which taints the rest of the turn. That is the point — imported tools
+are someone else's code, and nothing about importing them is allowed to be quiet.

@@ -92,3 +92,16 @@ jaeger_ui = "http://127.0.0.1:16686"
 
 [mcp]
 http_port = 8770
+
+# External MCP servers whose tools this agent imports. They are foreign code, so imported
+# tools arrive as source="mcp:<name>", which the shipped policy sends to approval, and their
+# output is wrapped as untrusted unless you say otherwise. Add one per server, e.g.:
+#
+# [mcp.servers.notes]
+# command = "uvx"
+# args = ["mcp-server-notes"]
+# risk_default = "external"   # what the policy sees when the server has no usable hints
+# trust_output = false        # true only for a server you wrote and fully control
+# trust_annotations = false   # true to believe the server's own readOnly/destructive hints
+# allow_tools = ["search"]    # omit to import everything the server offers
+# timeout_s = 30.0

@@ -102,6 +102,19 @@ heartbeat builds a deterministic situation report first and only spends a model 
 something actually changed and is actionable — the infrastructure is always on, the model
 is not.
 
+## MCP, in both directions
+
+`agent mcp serve` exposes this agent's memory, goals and loops to other harnesses — that is
+the seam OpenClaw plugs into. The reverse is configuration only: list a server under
+`[mcp.servers.<name>]` in `config.toml` and its tools are imported at startup as
+`mcp_<server>_<tool>`, with `agent mcp tools` to see what arrived.
+
+Imported tools are foreign code, and the runtime treats them that way. They carry
+`source="mcp:<server>"`, which the shipped policy routes to approval at *every* autonomy
+level, and their output is wrapped as untrusted unless you set `trust_output = true` for a
+server you control. A server's own `readOnlyHint` is ignored unless you set
+`trust_annotations = true` — a server should not get to grade its own homework.
+
 ## Operating notes
 
 - **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint. The SIR router

@@ -161,6 +161,21 @@ async def _doctor() -> None:
     except Exception as exc:
         row("policy", False, str(exc)[:200])
 
+    # external MCP servers (only worth reporting if any are configured)
+    if cfg.mcp.servers:
+        from ..mcp_client import close_external_tools, load_external_tools
+
+        clients = await load_external_tools(cfg)
+        try:
+            imported = sum(len(v) for v in clients.loaded.values())
+            detail = f"{len(clients.loaded)}/{len(cfg.mcp.servers)} connected, {imported} tools"
+            if clients.failures:
+                detail += " · " + "; ".join(f"{k}: {v}" for k, v in clients.failures.items())
+            detail += "".join(f" · {w}" for w in clients.warnings)
+            row("mcp servers", not clients.failures, detail[:200])
+        finally:
+            await close_external_tools()
+
     # daemon
     if db_ok:
         from ..db import repo_ops
@@ -255,10 +270,19 @@ def ask(
 ) -> None:
     """One question, one answer, no REPL."""
     from ..agent.loop import one_shot
+    from ..mcp_client import close_external_tools, load_external_tools
     from ..policy.approvals import QueueApprover
 
-    answer = run(one_shot(prompt, autonomy=autonomy, approver=QueueApprover(origin="interactive")))
-    console.print(answer)
+    async def _ask() -> str:
+        await load_external_tools()
+        try:
+            return await one_shot(
+                prompt, autonomy=autonomy, approver=QueueApprover(origin="interactive")
+            )
+        finally:
+            await close_external_tools()
+
+    console.print(run(_ask()))
 
 
 @app.command()
@@ -974,6 +998,36 @@ def mcp_list() -> None:
         state = "enabled" if server.enabled else "disabled"
         target = server.url or f"{server.command} {' '.join(server.args)}"
         console.print(f"[bold]{name}[/bold] [dim]{state} · {target}[/dim]")
+    console.print("[dim]`agent mcp tools` connects and shows what they actually offer.[/dim]")
+
+
+@mcp_app.command("tools")
+def mcp_tools() -> None:
+    """Connect to the configured servers and show the tools they import."""
+    from ..mcp_client import close_external_tools, load_external_tools
+    from ..tools.registry import get_registry
+
+    async def _probe() -> None:
+        registry = get_registry()
+        clients = await load_external_tools(registry=registry)
+        try:
+            if not clients.loaded and not clients.failures:
+                console.print("[dim]no external MCP servers configured[/dim]")
+            for server, names in clients.loaded.items():
+                console.print(f"[bold]mcp:{server}[/bold] [dim]{len(names)} tools[/dim]")
+                for tool_name in names:
+                    t = registry.get(tool_name)
+                    if t is not None:
+                        trust = "trusted" if t.trust_output else "untrusted output"
+                        console.print(f"  {t.name} [dim]risk={t.risk} · {trust}[/dim]")
+            for server, why in clients.failures.items():
+                console.print(f"[red]mcp:{server}[/red] [dim]{why}[/dim]")
+            for warning in clients.warnings:
+                console.print(f"[yellow]{warning}[/yellow]")
+        finally:
+            await close_external_tools()
+
+    run(_probe())
 
 
 def main() -> None:

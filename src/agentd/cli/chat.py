@@ -123,6 +123,14 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
     stop = asyncio.Event()
     inbox_task = asyncio.create_task(_inbox_watcher(stop))
 
+    from ..mcp_client import close_external_tools, load_external_tools
+
+    clients = await load_external_tools(cfg, loop.registry)
+    for server, names in clients.loaded.items():
+        console.print(f"[dim]mcp:{server} — {len(names)} tools[/dim]")
+    for server, why in clients.failures.items():
+        console.print(f"[yellow]mcp:{server} unavailable — {why}[/yellow]")
+
     console.print(
         f"[bold]agent[/bold]  session {str(session.id)[:8]}  autonomy=[cyan]{autonomy}[/cyan]"
         "   /help for commands"
@@ -177,6 +185,7 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
                     console.print()
     finally:
         stop.set()
+        await close_external_tools()
         inbox_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await inbox_task
