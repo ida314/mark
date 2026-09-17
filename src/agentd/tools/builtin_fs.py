@@ -15,7 +15,11 @@ MAX_READ_BYTES = 400_000
 
 
 def _p(path: str) -> Path:
-    return Path(path).expanduser()
+    """Relative paths mean the agent's workspace, never whatever directory it was started in."""
+    expanded = Path(path).expanduser()
+    if not expanded.is_absolute():
+        return get_config().paths.workspace / expanded
+    return expanded
 
 
 @tool(

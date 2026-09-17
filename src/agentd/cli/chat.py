@@ -62,8 +62,12 @@ class CliApprover:
         console.print(Panel("\n".join(body), title="Approval needed", border_style="yellow"))
         if req.preview:
             console.print(
-                Syntax(req.preview[:2000], "diff" if req.preview.startswith(("---", "+++", "@@", "-", "+")) else "bash",
-                       theme="ansi_dark", word_wrap=True)
+                Syntax(
+                    req.preview[:2000],
+                    "diff" if req.preview.startswith(("---", "+++", "@@", "-", "+")) else "bash",
+                    theme="ansi_dark",
+                    word_wrap=True,
+                )
             )
 
         answer = (
@@ -192,7 +196,7 @@ async def _slash(
     rest = rest.strip()
 
     if command == "/help":
-        console.print(HELP)
+        console.print(HELP, markup=False)  # the option lists contain [brackets]
     elif command == "/autonomy":
         if rest in ("observe", "assist", "act"):
             autonomy = rest

@@ -9,12 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .config import get_config
 from .db import repo_agenda, repo_memory, repo_ops
 
-mcp = FastMCP("agent-core")
+mcp = MCPServer(
+    "agent-core",
+    instructions="Durable memory, goals and open loops for this user's personal agent.",
+)
 
 
 @mcp.tool()
@@ -127,9 +130,7 @@ async def agent_context(query: str) -> str:
 
 def serve(*, http: bool = False, port: int = 8770) -> None:
     if http:
-        mcp.settings.host = "127.0.0.1"
-        mcp.settings.port = port
-        mcp.run(transport="streamable-http")
+        mcp.run(transport="streamable-http", host="127.0.0.1", port=port)
     else:
         mcp.run(transport="stdio")
 

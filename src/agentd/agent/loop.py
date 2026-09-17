@@ -241,7 +241,9 @@ class AgentLoop:
                     yield ToolStarted(name=call.name, args=args_preview)
                     if call.name not in exposed and call.name in self.registry.tools:
                         exposed[call.name] = self.registry.tools[call.name]
-                    result = await self.executor.run(call.name, call.arguments, tctx)
+                    result = await self.executor.run(
+                        call.name, call.arguments, tctx, parent_id=turn_id
+                    )
                     session.tools_used.add(call.name)
                     if result.trust == "untrusted":
                         session.tainted = True

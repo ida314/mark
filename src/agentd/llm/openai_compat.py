@@ -200,8 +200,8 @@ class OpenAICompatProvider:
         for attempt in range(2):
             try:
                 resp = await self._with_retries(
-                    lambda: self.client.chat.completions.create(
-                        messages=attempt_messages, **kwargs
+                    lambda msgs=attempt_messages: self.client.chat.completions.create(
+                        messages=msgs, **kwargs
                     )
                 )
             except Exception as exc:

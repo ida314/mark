@@ -435,7 +435,11 @@ async def _memory_retract(fact_id: str, reason: str) -> None:
     from ..db import repo_memory
     from ..db.repo_ops import ActionRecord, write_action
 
-    row = await repo_memory.fact_by_short_id(fact_id.replace("-", "")) if len(fact_id) < 32 else await repo_memory.get_fact(UUID(fact_id))
+    row = (
+        await repo_memory.fact_by_short_id(fact_id.replace("-", ""))
+        if len(fact_id) < 32
+        else await repo_memory.get_fact(UUID(fact_id))
+    )
     if row is None:
         console.print("[red]no such fact[/red]")
         raise typer.Exit(1)

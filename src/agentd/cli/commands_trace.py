@@ -82,6 +82,8 @@ async def render_trace(turn_or_action: str, console: Console) -> None:
                 child.add(f"[yellow]undo:[/yellow] agent undo {row['id']}")
             attach(child, str(row["id"]))
 
+    # rows parented to the turn, plus any that never recorded a parent
+    attach(tree, str(root["id"]))
     attach(tree, None)
     console.print(tree)
     if root.get("trace_id"):

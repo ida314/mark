@@ -85,6 +85,7 @@ async def insert_fact(
     sensitivity: str = "normal",
     valid_from: datetime | None = None,
     valid_to: datetime | None = None,
+    recorded_at: datetime | None = None,
     supersedes: UUID | None = None,
     source_candidate_id: UUID | None = None,
     embedding: list[float] | None = None,
@@ -95,14 +96,14 @@ async def insert_fact(
     sql = """
         INSERT INTO facts (id, statement, subject_entity_id, predicate, object_text,
                            object_entity_id, category, confidence, importance, sensitivity,
-                           valid_from, valid_to, supersedes, source_candidate_id, proposed_by,
-                           embedding, embedding_model)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           valid_from, valid_to, recorded_at, supersedes, source_candidate_id,
+                           proposed_by, embedding, embedding_model)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s, now()),%s,%s,%s,%s,%s)
     """
     params = (
         fact_id, statement, subject_entity_id, predicate, object_text, object_entity_id,
-        category, confidence, importance, sensitivity, valid_from, valid_to, supersedes,
-        source_candidate_id, proposed_by, embedding, embedding_model,
+        category, confidence, importance, sensitivity, valid_from, valid_to, recorded_at,
+        supersedes, source_candidate_id, proposed_by, embedding, embedding_model,
     )
     if conn is not None:
         await conn.execute(sql, params)
