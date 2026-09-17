@@ -37,6 +37,7 @@ policy_app = typer.Typer(help="The rules that gate every tool call.")
 tools_app = typer.Typer(help="Tool registry.")
 mcp_app = typer.Typer(help="Model Context Protocol server.")
 watchers_app = typer.Typer(help="Timers, intervals and file watchers.")
+secrets_app = typer.Typer(help="Credentials the agent itself cannot read.")
 
 app.add_typer(db_app, name="db")
 app.add_typer(memory_app, name="memory")
@@ -49,6 +50,7 @@ app.add_typer(policy_app, name="policy")
 app.add_typer(tools_app, name="tools")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(watchers_app, name="watchers")
+app.add_typer(secrets_app, name="secrets")
 
 console = Console()
 
@@ -161,6 +163,17 @@ async def _doctor() -> None:
     except Exception as exc:
         row("policy", False, str(exc)[:200])
 
+    # secrets vault: only its permissions, never its contents
+    from .. import secrets as vault
+
+    problem = vault.check_permissions()
+    if vault.SECRETS_FILE.exists():
+        try:
+            entries = len(vault.describe())
+        except vault.VaultPermissionError:
+            entries = 0
+        row("secrets", problem is None, problem or f"{entries} entries, mode 0600")
+
     # external MCP servers (only worth reporting if any are configured)
     if cfg.mcp.servers:
         from ..mcp_client import close_external_tools, load_external_tools
@@ -246,6 +259,62 @@ def db_status() -> None:
 
     applied, pending = run(migrate_mod.status(get_config()))
     console.print(f"applied: {len(applied)}\npending: {pending or 'none'}")
+
+
+# --- secrets -----------------------------------------------------------------
+
+
+@secrets_app.command("set")
+def secrets_set(
+    ref: str = typer.Argument(..., help="e.g. github/dyd2008 or google/you@example.com"),
+    field: str = typer.Argument(..., help="e.g. token, refresh_token"),
+    value: str | None = typer.Argument(None, help="omit to read from stdin, keeping it out of history"),
+) -> None:
+    """Store a credential. The agent cannot read this file: the policy hard-denies the path."""
+    from .. import secrets as vault
+
+    if value is None or value == "-":
+        import sys
+
+        value = (sys.stdin.read() if not sys.stdin.isatty() else typer.prompt(field, hide_input=True))
+        value = value.strip()
+    if not value:
+        console.print("[red]empty value[/red]")
+        raise typer.Exit(1)
+    vault.put(ref, **{field: value})
+    console.print(
+        f"[green]stored[/green] {ref}.{field} "
+        f"[dim]({vault.Secret(value).fingerprint()}) in {vault.SECRETS_FILE}[/dim]"
+    )
+
+
+@secrets_app.command("list")
+def secrets_list() -> None:
+    """Show what is stored — names and fingerprints only, never values."""
+    from .. import secrets as vault
+
+    try:
+        entries = vault.describe()
+    except vault.VaultPermissionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if not entries:
+        console.print(f"[dim]nothing stored in {vault.SECRETS_FILE}[/dim]")
+        return
+    for ref, fields in entries:
+        marks = []
+        for field in fields:
+            got = vault.get(ref, field)
+            marks.append(f"{field}={got.fingerprint()}" if got else field)
+        console.print(f"[bold]{ref}[/bold] [dim]{'  '.join(marks)}[/dim]")
+
+
+@secrets_app.command("rm")
+def secrets_rm(ref: str) -> None:
+    """Forget a credential."""
+    from .. import secrets as vault
+
+    console.print("[green]removed[/green]" if vault.remove(ref) else f"[yellow]no such entry[/yellow] {ref}")
 
 
 # --- backups -----------------------------------------------------------------
