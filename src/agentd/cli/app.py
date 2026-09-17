@@ -166,8 +166,20 @@ async def _doctor() -> None:
         from ..db import repo_ops
 
         status = await repo_ops.daemon_status()
-        if status and status.get("heartbeat_at"):
-            row("daemon", True, f"pid {status['pid']}, last beat {status['heartbeat_at']:%H:%M:%S}")
+        beat = status.get("heartbeat_at") if status else None
+        if beat:
+            from ..ids import utcnow
+
+            # the row outlives the process, so a stale beat means it is gone, not healthy
+            age = (utcnow() - beat).total_seconds()
+            stopped = (status.get("info") or {}).get("status") == "stopped"
+            fresh = not stopped and age < 2 * cfg.daemon.scheduler_poll_s + 3600
+            row(
+                "daemon",
+                fresh or None,
+                f"pid {status['pid']}, last beat {beat:%H:%M:%S}"
+                + ("" if fresh else f" ({int(age / 60)} min ago — not running?)"),
+            )
         else:
             row("daemon", None, "not running (agent daemon run)")
 
