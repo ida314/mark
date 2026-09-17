@@ -123,6 +123,29 @@ level, and their output is wrapped as untrusted unless you set `trust_output = t
 server you control. A server's own `readOnlyHint` is ignored unless you set
 `trust_annotations = true` — a server should not get to grade its own homework.
 
+## Notifications, and credentials
+
+`agent daemon run` pushes every notification to [ntfy](https://ntfy.sh) as well as to any open
+chat, so a reminder that fires while no terminal is open still reaches you. The server is in
+`compose.yaml`, bound to this box's Tailscale address — your phone reaches it over the tailnet
+and nothing about a notification leaves hardware you own. Set `[ntfy] enabled = true` once the
+server is up; it ships disabled, because a notifier pointed at nothing just accumulates failed
+attempts. Quiet hours hold `info` and `warn` and flush them in the morning rather than dropping
+them, and delivery state lives in the database, so a notification raised while the daemon was
+restarting is delivered when it comes back rather than lost.
+
+Credentials go in `~/.config/agent/secrets.toml` via `agent secrets set <ref> <field>`, which
+reads from stdin if you leave the value off, keeping it out of your shell history. `agent
+secrets list` shows names and fingerprints, never values.
+
+Be clear about what that file is: a 0600 file read unattended by a daemon that starts at boot,
+so it is access control, not encryption. The *agent* is fenced out of it three ways — the path
+is outside `allowed_roots`, a named `hard_deny` rule covers it, and the sandboxed shell mounts
+only the workspace, so there is no route to `~/.config` from a sandboxed command at all. None of
+that helps against code running as you. If that ever needs to be a real boundary, the answer is
+a separate uid for the daemon and a broker socket, not a cipher stored next to the thing it
+encrypts.
+
 ## Operating notes
 
 - **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint. The SIR router
