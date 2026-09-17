@@ -1,0 +1,94 @@
+# Default configuration for the personal agent runtime.
+# Copied to ~/.config/agent/config.toml by `agent init`.
+# Every value can be overridden by an AGENT_<SECTION>__<KEY> environment variable.
+
+[db]
+dsn = "postgresql://agent:agent@127.0.0.1:55432/agent"
+min_size = 1
+max_size = 8
+
+[llm]
+# SIR router lives on :8000 but drops tool calls until the passthrough fix is deployed.
+# Until then point at vLLM directly on :8001. One-line switch back to :8000 afterwards.
+base_url = "http://127.0.0.1:8001/v1"
+api_key = "not-needed"
+model = "Qwen/Qwen3.8-27B-FP8"
+timeout_s = 300.0
+max_context_tokens = 262144
+
+[llm.roles.main]
+temperature = 0.7
+top_p = 0.8
+thinking = false
+max_tokens = 4096
+
+[llm.roles.subagent]
+temperature = 0.7
+top_p = 0.8
+thinking = false
+max_tokens = 4096
+
+[llm.roles.judge]
+temperature = 0.6
+top_p = 0.95
+thinking = true
+max_tokens = 2048
+
+[llm.roles.consolidate]
+temperature = 0.6
+top_p = 0.95
+thinking = true
+max_tokens = 8192
+
+[embed]
+model = "BAAI/bge-small-en-v1.5"
+dim = 384
+rerank_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+enabled = true
+
+[agent]
+max_steps = 12
+history_tokens = 24000
+context_budget_tokens = 2000
+tool_result_max_chars = 8000
+autonomy = "assist"
+
+[retrieval]
+fast_budget_tokens = 2000
+deep_budget_tokens = 4000
+channel_limit = 30
+rerank_top_k = 30
+ef_search = 80
+
+[paths]
+# ~ is expanded at load time
+data_dir = "~/.local/share/agent"
+allowed_roots = [
+    "~/Projects",
+    "~/Documents",
+    "~/.local/share/agent/workspace",
+    "~/.local/share/agent/memory",
+]
+
+[sandbox]
+image = "agent-sandbox:local"
+memory = "2g"
+cpus = "2"
+default_timeout_s = 120
+max_timeout_s = 600
+
+[daemon]
+heartbeat_interval_s = 1800
+quiet_hours = [23, 8]
+idle_consolidate_after_s = 900
+nightly_at = "03:30"
+scheduler_poll_s = 10
+
+[obs]
+otlp_endpoint = "localhost:4317"
+enabled = true
+capture_content = false
+jaeger_ui = "http://127.0.0.1:16686"
+
+[mcp]
+http_port = 8770

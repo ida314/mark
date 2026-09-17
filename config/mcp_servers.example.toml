@@ -1,0 +1,9 @@
+# Copy the blocks you want into ~/.config/agent/config.toml.
+# Imported tools are namespaced "<server>__<tool>" and default to requiring approval.
+
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/dylan/Projects"]
+enabled = false
+risk_default = "read"
+trust_output = false

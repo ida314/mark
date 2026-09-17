@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal agent daemon
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/agent
+ExecStartPre=%h/Projects/agent/.venv/bin/agent db wait --timeout 120
+ExecStart=%h/Projects/agent/.venv/bin/agent daemon run
+Restart=on-failure
+RestartSec=10
+Environment=OTEL_SERVICE_NAME=agent-daemon
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,77 @@
+# Deterministic policy engine rules. The LLM proposes actions; this file decides.
+# Evaluation order: hard_deny -> rules (first match wins) -> risk_matrix default,
+# then post-rules that can only tighten the outcome (taint, origin, subagent caps).
+version: 1
+
+defaults:
+  autonomy: assist
+  unknown_risk: external
+
+risk_matrix:
+  read:        {observe: allow, assist: allow,            act: allow,            trusted: allow}
+  draft:       {observe: deny,  assist: allow,            act: allow,            trusted: allow}
+  write:       {observe: deny,  assist: require_approval, act: require_approval, trusted: allow}
+  external:    {observe: deny,  assist: require_approval, act: require_approval, trusted: require_approval}
+  destructive: {observe: deny,  assist: require_approval, act: require_approval, trusted: require_approval}
+
+hard_deny:
+  - id: secrets-paths
+    reason: credential material is never readable or writable by the agent
+    match:
+      args:
+        path:
+          glob:
+            - "~/.ssh/**"
+            - "~/.aws/**"
+            - "~/.gnupg/**"
+            - "~/.config/agent/secrets.toml"
+            - "**/.env"
+            - "**/*_rsa"
+            - "**/id_ed25519*"
+  - id: fs-outside-roots
+    reason: filesystem access is confined to the allowed roots
+    match:
+      tags: [fs]
+      args:
+        path:
+          not_under: ["${allowed_roots}"]
+  - id: shell-docker-socket
+    reason: the docker socket is root on this host
+    match:
+      tool: shell_exec
+      args:
+        command:
+          regex: "docker\\.sock|/var/run/docker"
+
+rules:
+  - id: workspace-writes-auto-in-act
+    match:
+      tool: fs_write
+      autonomy: [act]
+      args:
+        path:
+          under: ["${workspace}"]
+    outcome: allow
+  - id: sandbox-shell-no-net-auto-in-act
+    match:
+      tool: shell_exec
+      autonomy: [act]
+      args:
+        network: {equals: false}
+    outcome: allow
+  - id: watchers-need-approval
+    reason: creates autonomous behaviour that outlives this turn
+    match:
+      tool: watcher_add
+    outcome: require_approval
+  - id: daemon-never-external
+    reason: background turns never reach the outside world unattended
+    match:
+      origin: [daemon]
+      risk: [external, destructive]
+    outcome: deny
+  - id: mcp-imported-default
+    reason: tools imported from external MCP servers are not trusted by default
+    match:
+      source: "mcp:*"
+    outcome: require_approval
