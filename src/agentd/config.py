@@ -139,6 +139,39 @@ class NtfyConfig(BaseModel):
     sweep_s: int = 60
 
 
+class GithubConnectorConfig(BaseModel):
+    enabled: bool = False
+    user: str = ""  # your login. The token lives in the vault at github/<user>, never here.
+    api_base: str = "https://api.github.com"
+    poll_interval_s: float = 60.0  # a floor; GitHub's X-Poll-Interval may raise it
+    sweep_interval_s: float = 3600.0  # the unconditional listing that closes finished loops
+    # 0 means "invent no deadlines". The consequence is worth knowing: overdue_loops() only
+    # returns loops with a due_at, so at 0 the heartbeat never mentions GitHub and delivery
+    # is entirely via push. Set 24 to turn the heartbeat path on.
+    review_due_in_h: int = 0
+    # Your noise budget, and the only part of this that is yours to tune. Titles stay in
+    # code because they are an injection boundary, not formatting.
+    include_reasons: list[str] = Field(
+        default_factory=lambda: ["review_requested", "assign", "mention"]
+    )
+    notify_reasons: list[str] = Field(
+        default_factory=lambda: ["review_requested", "mention"]
+    )
+
+
+class ConnectorsConfig(BaseModel):
+    """Daemon-side feeds. Not tools: the agent cannot call these and never sees their
+    credentials."""
+
+    enabled: bool = False  # the one-line kill switch for all of them
+    timeout_s: float = 20.0
+    max_items_per_poll: int = 50
+    max_backoff_s: float = 1800.0
+    notify_after_failures: int = 5
+    disabled_recheck_s: float = 300.0
+    github: GithubConnectorConfig = Field(default_factory=GithubConnectorConfig)
+
+
 class McpServerConfig(BaseModel):
     command: str | None = None
     args: list[str] = Field(default_factory=list)
@@ -169,6 +202,7 @@ class Config(BaseModel):
     obs: ObsConfig = Field(default_factory=ObsConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
+    connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig)
 
     policy_file: Path = POLICY_FILE
 

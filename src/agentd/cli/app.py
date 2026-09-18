@@ -38,6 +38,7 @@ tools_app = typer.Typer(help="Tool registry.")
 mcp_app = typer.Typer(help="Model Context Protocol server.")
 watchers_app = typer.Typer(help="Timers, intervals and file watchers.")
 secrets_app = typer.Typer(help="Credentials the agent itself cannot read.")
+connectors_app = typer.Typer(help="Daemon-side feeds. They hold credentials the agent cannot read.")
 
 app.add_typer(db_app, name="db")
 app.add_typer(memory_app, name="memory")
@@ -51,6 +52,7 @@ app.add_typer(tools_app, name="tools")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(watchers_app, name="watchers")
 app.add_typer(secrets_app, name="secrets")
+app.add_typer(connectors_app, name="connectors")
 
 console = Console()
 
@@ -173,6 +175,15 @@ async def _doctor() -> None:
         except vault.VaultPermissionError:
             entries = 0
         row("secrets", problem is None, problem or f"{entries} entries, mode 0600")
+
+    # connectors: status only, never a credential
+    if db_ok and cfg.connectors.enabled:
+        from . import commands_connect
+
+        try:
+            await commands_connect.doctor_rows(cfg, row)
+        except Exception as exc:
+            row("connectors", False, str(exc)[:200])
 
     # external MCP servers (only worth reporting if any are configured)
     if cfg.mcp.servers:
@@ -315,6 +326,49 @@ def secrets_rm(ref: str) -> None:
     from .. import secrets as vault
 
     console.print("[green]removed[/green]" if vault.remove(ref) else f"[yellow]no such entry[/yellow] {ref}")
+
+
+# --- connectors --------------------------------------------------------------
+
+
+@connectors_app.command("list")
+def connectors_list() -> None:
+    """What the daemon is watching, and whether it is actually working."""
+    from . import commands_connect
+
+    run(commands_connect.render_list(get_config(), console))
+
+
+@connectors_app.command("poll")
+def connectors_poll(name: str) -> None:
+    """Poll one connector now, in the foreground."""
+    from . import commands_connect
+
+    raise typer.Exit(run(commands_connect.poll_now(get_config(), name, console)))
+
+
+@connectors_app.command("enable")
+def connectors_enable(name: str) -> None:
+    """Turn a connector back on after fixing whatever stopped it."""
+    from . import commands_connect
+
+    raise typer.Exit(run(commands_connect.set_enabled(get_config(), name, True, console)))
+
+
+@connectors_app.command("disable")
+def connectors_disable(name: str) -> None:
+    """Stop a connector without editing config."""
+    from . import commands_connect
+
+    raise typer.Exit(run(commands_connect.set_enabled(get_config(), name, False, console)))
+
+
+@connectors_app.command("reset")
+def connectors_reset(name: str) -> None:
+    """Clear the cursor so the next poll re-reads everything."""
+    from . import commands_connect
+
+    raise typer.Exit(run(commands_connect.reset(get_config(), name, console)))
 
 
 # --- backups -----------------------------------------------------------------
@@ -756,6 +810,37 @@ async def _loops_list(status: str) -> None:
         console.print("[dim]no open loops[/dim]")
 
 
+@loops_app.command("show")
+def loops_show(loop_id: str) -> None:
+    """Everything about one loop, including the detail no tool shows the model."""
+    run(_loops_show(loop_id))
+
+
+async def _loops_show(loop_id: str) -> None:
+    from ..db.pool import fetch_one
+
+    row = await fetch_one(
+        "SELECT * FROM open_loops WHERE id::text LIKE %s ORDER BY created_at LIMIT 1",
+        (loop_id + "%",),
+    )
+    if not row:
+        console.print(f"[yellow]no loop matching[/yellow] {loop_id}")
+        raise typer.Exit(1)
+    console.print(f"[bold]{row['title']}[/bold]")
+    console.print(f"[dim]{row['id']}  {row['status']}[/dim]")
+    if row.get("due_at"):
+        console.print(f"due {row['due_at']:%Y-%m-%d %H:%M}")
+    if row.get("waiting_on"):
+        console.print(f"waiting on {row['waiting_on']}")
+    if row.get("detail"):
+        # Deliberately only here. This is where a connector puts the other end's own words,
+        # and no tool renders it to the model -- see tools/builtin_agenda.open_loops_list.
+        console.print()
+        console.print(row["detail"])
+    if row.get("source_event_id"):
+        console.print(f"[dim]from event {row['source_event_id']}[/dim]")
+
+
 @loops_app.command("add")
 def loops_add(title: str, due: str | None = typer.Option(None)) -> None:
     from ..db import repo_agenda
@@ -993,6 +1078,41 @@ def policy_check() -> None:
         f"[green]ok[/green] {len(engine.policy.hard_deny)} hard denies, "
         f"{len(engine.policy.rules)} rules"
     )
+
+
+@policy_app.command("diff")
+def policy_diff() -> None:
+    """Show how your policy file differs from the one this version ships.
+
+    Deliberately not a `sync --force`: silently overwriting a security file is exactly what
+    you do not want. Read the diff, then copy it across yourself if you agree with it.
+    """
+    import difflib
+
+    from ..config import DEFAULT_POLICY
+
+    cfg = get_config()
+    if cfg.policy_file == DEFAULT_POLICY:
+        console.print("[dim]using the shipped policy directly[/dim]")
+        return
+    if not cfg.policy_file.exists():
+        console.print(f"[yellow]no policy file at[/yellow] {cfg.policy_file}")
+        raise typer.Exit(1)
+
+    lines = list(
+        difflib.unified_diff(
+            DEFAULT_POLICY.read_text().splitlines(keepends=True),
+            cfg.policy_file.read_text().splitlines(keepends=True),
+            fromfile=f"shipped ({DEFAULT_POLICY})",
+            tofile=f"yours ({cfg.policy_file})",
+        )
+    )
+    if not lines:
+        console.print("[green]identical[/green] to the shipped policy")
+        return
+    for line in lines:
+        colour = "green" if line.startswith("+") else "red" if line.startswith("-") else "dim"
+        console.print(f"[{colour}]{line.rstrip()}[/{colour}]")
 
 
 @policy_app.command("explain")

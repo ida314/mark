@@ -42,6 +42,18 @@ hard_deny:
       args:
         command:
           regex: "docker\\.sock|/var/run/docker"
+  # Tripwires for tools that deliberately do not exist. A mail connector drafts; a human
+  # presses send. An absent code path is a stronger guarantee than a policy line, so these
+  # exist to make adding one fail loudly rather than quietly — if you are reading this because
+  # a rule fired, the tool you just wrote was not designed here.
+  - id: no-mail-send-tool
+    reason: there is no send tool by design; drafts are for a human to send
+    match:
+      tool: mail_send
+  - id: no-mail-forward-tool
+    reason: forwarding is the cheapest way to exfiltrate a mailbox, so it has no tool at all
+    match:
+      tool: mail_forward
 
 rules:
   - id: workspace-writes-auto-in-act
@@ -63,6 +75,28 @@ rules:
     reason: creates autonomous behaviour that outlives this turn
     match:
       tool: watcher_add
+    outcome: require_approval
+  # Connectors are daemon-side code and are not tools, so nothing that exists today matches
+  # either of these. They are for the outbound half that comes later: the moment a tool tagged
+  # `connector` can send something — a reply, a mail, an invite — it has to stop at an approval
+  # rather than be refused outright by daemon-never-external below. A denial in a background
+  # turn is silent, and silence is how a prepared draft gets lost. Written and tested now so
+  # that adding one later is not an edit to a security file under delivery pressure.
+  - id: connector-drafts-queue-in-background
+    reason: a background turn may prepare something outbound, but you decide whether it leaves
+    match:
+      tags: [connector]
+      origin: [daemon]
+      risk: [external]
+    outcome: require_approval
+  # Unreachable for origin: daemon, since the rule above catches that first. It earns its place
+  # at interactive and trusted, where the risk matrix happens to agree today — this states the
+  # intent directly, so a future loosening of that matrix cannot quietly take it away.
+  - id: outbound-connector-always-asks
+    reason: anything leaving this machine on your behalf is confirmed first, at every autonomy
+    match:
+      tags: [connector]
+      risk: [external]
     outcome: require_approval
   - id: daemon-never-external
     reason: background turns never reach the outside world unattended

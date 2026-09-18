@@ -233,3 +233,62 @@ def test_shipped_policy_denies_reading_ssh_keys():
         PolicyContext(autonomy="act"),
     )
     assert decision.outcome == "deny"
+
+
+def _shipped():
+    from agentd.config import DEFAULT_POLICY
+    from agentd.policy.engine import load_engine
+
+    return load_engine(
+        DEFAULT_POLICY,
+        {"allowed_roots": [str(Path.home() / "Projects")], "workspace": ["/tmp/ws"],
+         "memory_repo": ["/tmp/mem"]},
+    )
+
+
+def test_a_connector_draft_in_the_background_asks_rather_than_dies():
+    """daemon-never-external denies outright, and a denial in a background turn is silent.
+    A connector's outbound work has to queue instead, or the central feature of having
+    connectors at all — prepare it while you are away, you decide when you are back — is dead
+    on arrival."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="mail_draft", risk="external", tags=("connector",)),
+        PolicyContext(origin="daemon", autonomy="act"),
+    )
+    assert decision.outcome == "require_approval"
+    assert decision.rule_id == "connector-drafts-queue-in-background"
+
+
+def test_a_daemon_tool_without_the_connector_tag_is_still_denied():
+    """The regression test that matters: the two rules inserted above daemon-never-external
+    must not have punched a hole in it."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="web_post", risk="external"),
+        PolicyContext(origin="daemon", autonomy="act"),
+    )
+    assert decision.outcome == "deny"
+    assert decision.rule_id == "daemon-never-external"
+
+
+def test_an_outbound_connector_asks_even_at_trusted_autonomy():
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="mail_draft", risk="external", tags=("connector",)),
+        PolicyContext(origin="interactive", autonomy="trusted"),
+    )
+    assert decision.outcome == "require_approval"
+    assert decision.rule_id == "outbound-connector-always-asks"
+
+
+@pytest.mark.parametrize("name", ["mail_send", "mail_forward"])
+def test_there_is_no_tool_that_sends_mail(name):
+    """Two halves. The policy half says a send tool would be refused even at trusted with an
+    approval in hand; the registry half is the one that actually catches somebody adding it."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name=name, risk="external", tags=("connector",)),
+        PolicyContext(autonomy="trusted", approved=True),
+    )
+    assert decision.outcome == "deny"
+
+    from agentd.tools.registry import build_registry
+
+    assert name not in build_registry().tools

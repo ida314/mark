@@ -92,6 +92,51 @@ async def append_event(event: RawEvent) -> UUID:
     return event.event_id
 
 
+async def append_event_once(event: RawEvent) -> UUID | None:
+    """Archive one thing, unless `payload['dedup_key']` is already in the archive.
+
+    Returns the event id, or None when it was already there. That distinction is the whole
+    point: a connector uses it to decide whether this is the first time it has seen
+    something, and therefore whether to act on it. Doing the check in one statement rather
+    than a SELECT followed by an INSERT is what makes an overlapping poll harmless.
+
+    `DO NOTHING` is also the only conflict action the schema permits here: `forbid_mutation()`
+    fires BEFORE UPDATE OR DELETE, so a `DO UPDATE` would be refused by the append-only
+    trigger. The archive stays append-only by construction rather than by convention.
+    """
+    sha = (
+        hashlib.sha256(event.content.encode()).hexdigest()
+        if event.content is not None
+        else None
+    )
+    async with connection() as conn:
+        cur = await conn.execute(
+            """
+            INSERT INTO raw_events
+              (event_id, occurred_at, session_id, turn_id, kind, actor, content, payload,
+               trust, content_sha256)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT ((payload->>'dedup_key')) WHERE (payload->>'dedup_key') IS NOT NULL
+            DO NOTHING
+            RETURNING event_id
+            """,
+            (
+                event.event_id,
+                event.occurred_at,
+                event.session_id,
+                event.turn_id,
+                event.kind,
+                event.actor,
+                event.content,
+                json.dumps(event.payload),
+                event.trust,
+                sha,
+            ),
+        )
+        row = await cur.fetchone()
+    return event.event_id if row else None
+
+
 async def events_for_session(
     session_id: UUID, *, after_id: int = 0, limit: int = 2000
 ) -> list[dict]:

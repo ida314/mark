@@ -96,7 +96,7 @@ TABLES = [
     "fact_evidence", "fact_entities", "facts", "entities", "episodes",
     "candidate_memories", "procedures", "raw_event_embeddings", "raw_events", "sessions",
     "goals", "open_loops", "watchers", "notifications", "approvals", "actions", "tools",
-    "consolidation_runs", "daemon_status",
+    "consolidation_runs", "daemon_status", "connector_state",
 ]
 
 

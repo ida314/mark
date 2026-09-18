@@ -122,3 +122,28 @@ enabled = false
 base_url = "http://127.0.0.1:8088"
 topic = "agent"
 min_level = "info"
+
+# Connectors are daemon-side code, not tools. They hold the credential, the agent never sees it,
+# and nothing the agent can call reaches them — that is the whole reason this is a connector and
+# not a `github_search` tool. Everything a connector ingests is archived as an untrusted raw
+# event; there is no trusted-sender list, because a sender is a claim and not a credential. Any
+# open loop one opens has a title this code composed, and the remote system's own words land only
+# in `detail`, which is where they stay.
+#
+# Ships disabled. To turn GitHub on:
+#   agent secrets set github/<your-login> token   # a PAT; stdin keeps it out of your history
+#   agent connectors poll github                  # one poll, in the foreground, with output
+[connectors]
+enabled = false
+notify_after_failures = 5
+
+[connectors.github]
+enabled = false
+user = ""                 # your GitHub login; the token lives in the vault at github/<user>
+poll_interval_s = 60      # a floor: GitHub's X-Poll-Interval can raise it, never lower it
+review_due_in_h = 0       # 0 invents no deadlines — and so the heartbeat stays quiet about
+                          # GitHub, since overdue_loops() only sees loops that have a due_at.
+                          # Set 24 if you would rather it spoke up.
+# Which notification reasons become an open loop, and which of those also reach your phone.
+include_reasons = ["review_requested", "assign", "mention"]
+notify_reasons = ["review_requested", "mention"]

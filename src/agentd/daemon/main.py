@@ -9,10 +9,13 @@ import signal
 import socket
 from datetime import datetime
 from datetime import time as dtime
+from functools import partial
 
 import psycopg
 
 from ..config import Config, get_config
+from ..connectors import all_connectors
+from ..connectors.base import run_connector
 from ..db import repo_agenda, repo_ops
 from ..db.pool import close_pool, connection
 from ..ids import utcnow
@@ -213,6 +216,15 @@ async def run(cfg: Config | None = None) -> int:
             asyncio.create_task(supervise("heartbeat", heartbeat_loop, cfg, stop)),
             asyncio.create_task(supervise("housekeeping", housekeeping_loop, cfg, stop)),
             asyncio.create_task(supervise("notifier", notifier_loop, cfg, stop)),
+        ]
+        # One supervised task per connector rather than one loop fanning out: supervise()
+        # names the failing task in its crash notification, so a broken Gmail poller reports
+        # as "connector:gmail" instead of taking GitHub down with it.
+        tasks += [
+            asyncio.create_task(
+                supervise(f"connector:{c.name}", partial(run_connector, c), cfg, stop)
+            )
+            for c in all_connectors(cfg)
         ]
         print(f"agent daemon running (pid {os.getpid()}); Ctrl-C to stop")
         await stop.wait()

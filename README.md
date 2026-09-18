@@ -146,13 +146,53 @@ that helps against code running as you. If that ever needs to be a real boundary
 a separate uid for the daemon and a broker socket, not a cipher stored next to the thing it
 encrypts.
 
+## Connectors
+
+A connector is daemon-side code that watches something outside this machine. It is emphatically
+not a tool: it is never in the registry, the model cannot call it, and it holds a credential the
+agent is fenced out of. That is the whole reason this is a connector and not a `github_search`
+tool — the credential and the untrusted text it fetches end up on the opposite side of the
+boundary from the thing that could be talked into misusing them.
+
+Everything a connector ingests is archived as a `raw_events` row marked `untrusted`. There is no
+trusted-sender list and there will not be one, because a sender is a claim and not a credential.
+
+The GitHub connector turns review requests, mentions and assignments into open loops. A review
+request becomes a loop titled `Review requested: PR #412 in org/repo` — a sentence this code
+composed, whose only variable parts are a dictionary lookup, an integer, and a repository name
+checked against GitHub's own charset for owner/repo. The pull request's *own* title, which
+anybody with an account can write, goes into `detail`, and nothing renders `detail` to the model.
+That asymmetry is deliberate: open-loop titles reach an LLM prompt through the heartbeat's
+situation report, so a title is model-visible input and composing one is an injection boundary,
+not formatting. `agent loops show <id>` is how a human reads the other half.
+
+```bash
+agent secrets set github/<your-login> token   # a PAT; stdin keeps it out of your history
+# then [connectors] enabled = true and [connectors.github] enabled/user in config.toml
+agent connectors poll github                  # one poll, in the foreground, with output
+agent connectors list                         # is it working, and when did it last succeed
+```
+
+The token needs the account-level **Notifications** read permission, which on a fine-grained PAT
+is separate from repository access. If it is missing, GitHub answers 403 with no rate-limit
+headers; the connector reads that as a permissions problem, disables itself and tells you,
+rather than retrying forever.
+
+Two limitations worth knowing rather than discovering. It reads the *unread* notification feed,
+so a review request you dismissed on your phone never reaches it — fixing that means
+`/search/issues`, a second cursor and a second rate limit, and it is deferred. And it is strictly
+read-only: it never marks anything read on GitHub, so your inbox is untouched and a read-only
+token is enough. An hourly unconditional sweep closes loops whose thread has left your unread
+list; the minute-by-minute poll is conditional and deliberately never closes anything, because a
+304 means "nothing changed", not "everything is finished".
+
 ## Operating notes
 
-- **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint. The SIR router
-  on `:8000` is the right long-term target because it schedules GPU residency; it needs the
-  tool-call passthrough fix deployed first. Pointing straight at vLLM on `:8001` works but
-  bypasses that scheduler, so requests fail when the backend is swapped. The provider
-  retries connection errors with backoff for exactly this reason.
+- **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint: the SIR router on
+  `:8000`, which schedules GPU residency and queues across models. Its tool-call passthrough
+  fix is deployed, so there is no longer any reason to talk to vLLM directly — doing so
+  bypasses the scheduler, and requests then fail when the backend is swapped. The provider
+  retries connection errors with backoff for exactly that reason.
 - **Docker is rootful here**, so the sandbox never mounts the docker socket and runs
   `--network none --read-only --cap-drop ALL` as an unprivileged user.
 - **Backups.** `agent backup` snapshots both durable things — a `pg_dump -Fc` of the database
