@@ -42,11 +42,16 @@ never break your conversation.
 
 ```bash
 uv sync
+ln -sfn "$PWD/.venv/bin/agent" ~/.local/bin/agent   # or activate the venv, or use `uv run agent`
 agent init                      # config + data dirs + git memory repo
 agent db up && agent db migrate # postgres+pgvector on 127.0.0.1:55432
 agent sandbox build             # container image for shell_exec
 agent doctor                    # checks everything, including that tool calling really works
 ```
+
+`uv sync` installs the `agent` entry point inside `.venv`, which is not on your PATH — hence
+the symlink. It carries an absolute shebang, so it works from any directory with no
+activation.
 
 `agent doctor` is the one to trust: it probes the model endpoint with a real tool call,
 because an endpoint that silently drops `tool_calls` looks healthy and breaks everything.
