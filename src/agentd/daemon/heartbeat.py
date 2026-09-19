@@ -12,7 +12,6 @@ from datetime import datetime
 
 from ..config import Config
 from ..db import repo_agenda, repo_ops
-from ..db.pool import fetch_one
 from ..obs import otel
 
 HEARTBEAT_PROMPT = """Here is the current situation report.
@@ -61,11 +60,21 @@ async def situation_report() -> tuple[str, bool]:
     if unread:
         lines.append(f"{len(unread)} unread notifications.")
 
-    row = await fetch_one(
-        "SELECT count(*) AS c FROM candidate_memories WHERE status = 'needs_review'"
-    )
-    if row and row["c"]:
-        lines.append(f"{row['c']} memories need your review.")
+    from ..db import repo_memory
+    from ..ids import utcnow
+
+    health = await repo_memory.queue_health()
+    if health["needs_review"]:
+        lines.append(f"{health['needs_review']} memories need your review.")
+    # A correction the user typed is not a backlog item; it is a belief they think the agent
+    # already holds. Say so loudly enough to be actionable.
+    if health["oldest_user_at"]:
+        waited = int((utcnow() - health["oldest_user_at"]).total_seconds() // 60)
+        actionable = True
+        lines.append(
+            f"A memory you corrected {waited}m ago is still unadjudicated "
+            f"({health['pending']} pending in total)."
+        )
 
     return ("\n".join(lines) or "Nothing pending."), actionable
 

@@ -18,19 +18,19 @@ from ..config import Config, get_config
 from ..db import repo_memory
 from ..db.pool import connection
 from ..embed import get_embedder
-from ..ids import estimate_tokens, short_id, utcnow
+from ..ids import estimate_tokens, parse_when, short_id, utcnow
 
 RRF_K = 60
 CHANNEL_WEIGHTS = {"keyword": 1.0, "vector": 1.0, "entity": 0.8, "raw": 0.5}
 VARIANT_DECAY = 0.6  # a rewritten query is a guess about the real one, so it counts for less
-TYPE_PRIOR = {"fact": 1.0, "procedure": 0.7, "episode": 0.6, "raw": 0.3}
+TYPE_PRIOR = {"fact": 1.0, "claim": 0.8, "procedure": 0.7, "episode": 0.6, "raw": 0.3}
 HALF_LIFE_DAYS = {
     "state": 30.0, "project": 30.0,
     "preference": 365.0, "biographical": 365.0, "relationship": 365.0,
     "constraint": 365.0, "belief": 180.0, "other": 90.0,
     "_episode": 21.0, "_raw": 7.0,
 }
-SECTION_SHARE = {"facts": 0.50, "procedures": 0.15, "episodes": 0.35}
+SECTION_SHARE = {"facts": 0.45, "claims": 0.10, "procedures": 0.10, "episodes": 0.35}
 STOPWORDS = {
     "what", "when", "where", "which", "about", "with", "that", "this", "from", "have",
     "does", "did", "the", "and", "for", "you", "your", "are", "was", "how", "who", "why",
@@ -56,6 +56,9 @@ class ContextPack:
     items: list[Item] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+    # Set when a provisional claim outranked an adjudicated fact: the review queue owes
+    # the user an answer, and that is not something to resolve silently.
+    needs_user: bool = False
 
 
 def to_list(vector) -> list[float] | None:
@@ -120,45 +123,96 @@ def mmr(items: list[Item], lambda_: float = 0.7, limit: int = 40) -> list[Item]:
     return selected
 
 
-def resolve_conflicts(items: list[Item]) -> tuple[list[Item], list[str]]:
-    """One answer per (subject, predicate): newest valid_from wins, rest are noted."""
+def _is_volatile(category: str | None) -> bool:
+    """Category *is* the volatility proxy here — there is no predicate-policy table yet."""
+    return HALF_LIFE_DAYS.get(category or "other", 90.0) <= 30.0
+
+
+def _claim_when(item: Item) -> datetime:
+    return (
+        item.meta.get("valid_from")
+        or item.meta.get("recorded_at")
+        or item.meta.get("created_at")
+        or datetime.min
+    )
+
+
+def _group_winner_key(item: Item, *, volatile_group: bool) -> tuple:
+    """Total ordering key for one item within its (subject, predicate) group.
+
+    Volatility has to be decided once for the whole group, not pairwise per comparison:
+    the override reads *the other side's* category, which has no well-defined meaning once
+    you are comparing more than two items (a pairwise comparator built that way is not
+    transitive, and a reduce over it makes the winner depend on input order). With
+    volatility fixed per group, the remaining order is a plain lexicographic key:
+
+    - volatile group: temporal applicability dominates, origin only breaks a tie between
+      items of the same age (recency, not confidence, is what "volatile" is buying).
+    - non-volatile group: origin dominates, temporal applicability is the tiebreak.
+    Support (confidence) is the final tiebreak either way.
+    """
+    is_user = item.meta.get("proposed_by") == "user"
+    when = _claim_when(item)
+    confidence = item.meta.get("confidence", 0.0)
+    if volatile_group:
+        return (when, is_user, confidence)
+    return (is_user, when, confidence)
+
+
+def resolve_conflicts(items: list[Item]) -> tuple[list[Item], list[str], bool]:
+    """One answer per (subject, predicate), across adjudicated facts and pending claims.
+
+    Winner selection is origin -> temporal applicability -> support, not recency alone
+    (see `_group_winner_key`). Losers are never dropped — they ride along as challenger
+    lines on the winner's `conflicts` meta, which `_render` shows inline. When a still-
+    pending claim outranks an adjudicated fact, that is the review queue owing the user an
+    answer, not something to resolve silently: the caller gets that back as `needs_user`.
+    """
     groups: dict[tuple[str, str], list[Item]] = {}
     passthrough: list[Item] = []
     for item in items:
         subject = item.meta.get("subject_entity_id")
         predicate = item.meta.get("predicate")
-        if item.kind == "fact" and subject and predicate:
+        if item.kind in ("fact", "claim") and subject and predicate:
             groups.setdefault((str(subject), predicate), []).append(item)
         else:
             passthrough.append(item)
 
     kept: list[Item] = []
     notes: list[str] = []
+    needs_user = False
     for (_subject, predicate), group in groups.items():
         if len(group) == 1:
             kept.append(group[0])
             continue
         objects = {str(g.meta.get("object") or g.text) for g in group}
         if len(objects) == 1:
-            kept.append(max(group, key=lambda g: g.score))
+            # No dispute to surface, so prefer an adjudicated fact over a pending claim
+            # that merely agrees with it -- showing the provisional line here would lose
+            # the adjudication status for no benefit. Score only breaks ties within a kind.
+            facts = [g for g in group if g.kind == "fact"]
+            pool = facts or group
+            kept.append(max(pool, key=lambda g: g.score))
             continue
-        ordered = sorted(
-            group,
-            key=lambda g: (
-                g.meta.get("valid_from") or g.meta.get("recorded_at") or datetime.min,
-                g.meta.get("confidence", 0.0),
-                g.meta.get("recorded_at") or datetime.min,
-            ),
-            reverse=True,
-        )
-        winner, losers = ordered[0], ordered[1:]
-        winner.meta["conflicts"] = [loser.text for loser in losers]
+        # `all`, not `any`: one inferred volatile-category claim must not make the whole
+        # topic volatile and let it override the user's otherwise long-lived statement --
+        # that is exactly the laundering path this stage is careful to avoid. A mixed group
+        # falls back to the conservative, origin-dominant ordering.
+        volatile_group = all(_is_volatile(g.meta.get("category")) for g in group)
+        winner = max(group, key=lambda g: _group_winner_key(g, volatile_group=volatile_group))
+        losers = [g for g in group if g is not winner]
+        # Carry the loser's own ref alongside its text so a challenger line can name
+        # itself (`[C:1f30] ... · disputed by F:8c1e`) instead of appearing as an
+        # unaddressable nested string, as it used to.
+        winner.meta["conflicts"] = [{"ref": loser.ref, "text": loser.text} for loser in losers]
         kept.append(winner)
         notes.append(
             f"{predicate}: kept '{winner.text}' over "
             + "; ".join(f"'{loser.text}'" for loser in losers)
         )
-    return kept + passthrough, notes
+        if winner.kind == "claim" and any(loser.kind == "fact" for loser in losers):
+            needs_user = True
+    return kept + passthrough, notes, needs_user
 
 
 def dedupe(items: list[Item], threshold: float = 0.92) -> list[Item]:
@@ -174,17 +228,83 @@ def dedupe(items: list[Item], threshold: float = 0.92) -> list[Item]:
     return kept
 
 
-def _fact_line(row: dict) -> str:
-    bits = []
+_ORIGIN_LABELS: dict[str, str] = {
+    "user": "direct user correction",
+    "consolidator": "inferred from conversation",
+    "md_watcher": "from your notes",
+}
+
+
+def _origin_label(proposed_by: str | None, source_trust: str | None = None) -> str:
+    """Human label for where a claim or fact came from.
+
+    Facts have no `source_trust` column (migrations/0003_memory.sql) -- it exists only on
+    `candidate_memories` -- so the label is `proposed_by` alone for a fact, and `proposed_by`
+    plus `source_trust` for a claim, never a joined lookup.
+    """
+    if not proposed_by:
+        return "unknown origin"
+    label = _ORIGIN_LABELS.get(proposed_by, f"agent inference ({proposed_by})")
+    if source_trust == "untrusted":
+        label = f"{label}, untrusted source"
+    return label
+
+
+def _humanize_age(when: datetime | None, *, now: datetime | None = None) -> str:
+    """Short recency phrase ("today", "3 weeks ago") in place of a raw timestamp."""
+    if when is None:
+        return "unknown date"
+    now = now or utcnow()
+    days = max(0.0, (now - when).total_seconds() / 86400.0)
+    if days < 1:
+        return "today"
+    if days < 2:
+        return "yesterday"
+    if days < 14:
+        return f"{int(days)} days ago"
+    if days < 60:
+        return f"{max(1, int(days / 7))} weeks ago"
+    if days < 365:
+        return f"{max(1, int(days / 30))} months ago"
+    years = max(1, int(days / 365))
+    return f"{years} year{'s' if years != 1 else ''} ago"
+
+
+def _claim_line(row: dict, *, kind: str = "fact", now: datetime | None = None) -> str:
+    """Render source type, recency and adjudication for a fact or a still-pending claim.
+
+    Raw confidence used to live here (`conf 0.87`). It is not calibrated well enough to show
+    the model -- what it actually needs is where this came from, how old it is, and whether
+    anyone adjudicated it. The `disputed by <ref>` suffix, when there is one, is appended by
+    `_render`, which is the only place that knows about the winner a challenger lost to.
+    """
+    structured = row.get("structured") or {}
     valid_from = row.get("valid_from")
+    if kind == "claim" and valid_from is None and structured.get("valid_from"):
+        valid_from = parse_when(structured["valid_from"])
+
+    bits = []
     if valid_from:
         bits.append(f"since {valid_from:%Y-%m}")
     if row.get("valid_to"):
         bits.append(f"until {row['valid_to']:%Y-%m}")
-    bits.append(f"conf {row.get('confidence', 0):.2f}")
-    suffix = f" ({', '.join(bits)})" if bits else ""
+    window = f" ({', '.join(bits)})" if bits else ""
+
+    # Recency is transaction time (when we learned it), not valid time (when it became
+    # true in the world) -- the window above already states valid time via `since`/`until`.
+    # A correction stated this turn about a move from three weeks ago must read as a fresh
+    # belief, not a three-week-old one; falling back to `valid_from` only when neither
+    # `recorded_at` nor `created_at` is present keeps the two clocks from collapsing into one.
+    when = row.get("recorded_at") or row.get("created_at") or valid_from
+    recency = _humanize_age(when, now=now)
+    origin = _origin_label(
+        row.get("proposed_by"), row.get("source_trust") if kind == "claim" else None
+    )
+    adjudication = "adjudicated" if kind == "fact" else "provisional"
+    provenance = f"{origin} • {recency} • {adjudication}"
+
     prefix = "[former] " if row.get("status") == "superseded" else ""
-    return f"{prefix}{row['statement']}{suffix}"
+    return f"{prefix}{row['statement']}{window} · {provenance}"
 
 
 async def _channel_facts(
@@ -321,6 +441,57 @@ async def _channel_simple(
     return rows, ranks
 
 
+async def _channel_claims(
+    query: str, terms: list[str], known_as_of: datetime, *, limit: int, qvec: list[float] | None,
+) -> tuple[dict[str, dict], dict[str, list[str]]]:
+    """Pending/needs_review candidates: keyword + vector only, no entity channel.
+
+    Candidates carry no entity links, and unlike `facts` there is no valid-time window to
+    filter on — only transaction time. `created_at <= known_as_of` is the only clock that
+    applies; whether a claim is excluded for an `as_of` in the past is decided by the caller.
+    """
+    rows: dict[str, dict] = {}
+    ranks: dict[str, list[str]] = {}
+    where = "status IN ('pending', 'needs_review') AND created_at <= %(known)s"
+    params = {
+        "known": known_as_of,
+        "limit": limit,
+        "q": " ".join(terms) or query,
+        "qvec": qvec,
+    }
+    async with connection() as conn:
+        if terms:
+            cur = await conn.execute(
+                f"""
+                SELECT *, ts_rank_cd(tsv, websearch_to_tsquery('english', %(q)s)) AS rank
+                FROM candidate_memories
+                WHERE {where} AND tsv @@ websearch_to_tsquery('english', %(q)s)
+                ORDER BY rank DESC LIMIT %(limit)s
+                """,
+                params,
+            )
+            ranks["keyword"] = []
+            for row in await cur.fetchall():
+                key = f"claim:{row['id']}"
+                rows[key] = row
+                ranks["keyword"].append(key)
+        if qvec is not None:
+            cur = await conn.execute(
+                f"""
+                SELECT * FROM candidate_memories
+                WHERE {where} AND embedding IS NOT NULL
+                ORDER BY embedding <=> %(qvec)s::vector LIMIT %(limit)s
+                """,
+                params,
+            )
+            ranks["vector"] = []
+            for row in await cur.fetchall():
+                key = f"claim:{row['id']}"
+                rows.setdefault(key, row)
+                ranks["vector"].append(key)
+    return rows, ranks
+
+
 EXPAND_SYSTEM = """You rewrite a question into alternative search queries for a personal
 memory store, so that a vaguely worded question still finds the right records.
 
@@ -384,8 +555,15 @@ async def pack(
     cfg: Config | None = None,
 ) -> ContextPack:
     cfg = cfg or get_config()
-    as_of = as_of or utcnow()
-    known_as_of = known_as_of or utcnow()
+    now = utcnow()
+    explicit_as_of = as_of is not None
+    as_of = as_of or now
+    known_as_of = known_as_of or now
+    # An unadjudicated claim makes no assertion about what was believed at an earlier
+    # time, so an `as_of` that reaches into the past excludes the claims channel entirely.
+    # An unspecified `as_of` means "now" regardless of the microseconds `now` moved between
+    # here and the default above.
+    claims_applicable = not explicit_as_of or as_of >= now
     terms = query_terms(query)
     embedder = get_embedder(cfg)
     qvec = (await embedder.embed([query]))[0] if embedder and query.strip() else None
@@ -404,10 +582,16 @@ async def pack(
     )
     ep_rows, ep_ranks = await _channel_simple("episodes", query, terms, limit, qvec)
     proc_rows, proc_ranks = await _channel_simple("procedures", query, terms, limit, qvec)
+    claim_rows: dict[str, dict] = {}
+    claim_ranks: dict[str, list[str]] = {}
+    if claims_applicable:
+        claim_rows, claim_ranks = await _channel_claims(
+            query, terms, known_as_of, limit=limit, qvec=qvec,
+        )
 
-    all_rows = {**fact_rows, **ep_rows, **proc_rows}
+    all_rows = {**fact_rows, **ep_rows, **proc_rows, **claim_rows}
     channel_ranks: dict[str, list[str]] = {}
-    for source_ranks in (fact_ranks, ep_ranks, proc_ranks):
+    for source_ranks in (fact_ranks, ep_ranks, proc_ranks, claim_ranks):
         for channel, keys in source_ranks.items():
             channel_ranks.setdefault(channel, []).extend(keys)
 
@@ -427,14 +611,29 @@ async def pack(
         v_proc_rows, v_proc_ranks = await _channel_simple(
             "procedures", variant, vterms, limit, vvec
         )
-        for rows_ in (v_fact_rows, v_ep_rows, v_proc_rows):
+        v_claim_rows: dict[str, dict] = {}
+        v_claim_ranks: dict[str, list[str]] = {}
+        if claims_applicable:
+            v_claim_rows, v_claim_ranks = await _channel_claims(
+                variant, vterms, known_as_of, limit=limit, qvec=vvec,
+            )
+        for rows_ in (v_fact_rows, v_ep_rows, v_proc_rows, v_claim_rows):
             for key, row in rows_.items():
                 all_rows.setdefault(key, row)
-        for source_ranks in (v_fact_ranks, v_ep_ranks, v_proc_ranks):
+        for source_ranks in (v_fact_ranks, v_ep_ranks, v_proc_ranks, v_claim_ranks):
             for channel, keys in source_ranks.items():
                 channel_ranks.setdefault(f"{channel}~{i}", []).extend(keys)
 
     fused = rrf_fuse(channel_ranks)
+
+    subject_cache: dict[str, UUID | None] = {}
+
+    async def _resolve_claim_subject(name: str) -> UUID | None:
+        cache_key = name.strip().lower()
+        if cache_key not in subject_cache:
+            rows = await repo_memory.find_entities(name, limit=1)
+            subject_cache[cache_key] = rows[0]["id"] if rows else None
+        return subject_cache[cache_key]
 
     items: list[Item] = []
     for key, rrf in fused.items():
@@ -446,7 +645,7 @@ async def pack(
             kind, prior = "fact", TYPE_PRIOR["fact"]
             half_life = HALF_LIFE_DAYS.get(row.get("category", "other"), 90.0)
             when = row.get("valid_from") or row.get("recorded_at")
-            text = _fact_line(row)
+            text = _claim_line(row, kind="fact")
             confidence = float(row.get("confidence", 0.7))
             importance = float(row.get("importance", 0.5))
             meta = {
@@ -457,6 +656,8 @@ async def pack(
                 "recorded_at": row.get("recorded_at"),
                 "confidence": confidence,
                 "category": row.get("category"),
+                "status": row.get("status"),
+                "proposed_by": row.get("proposed_by"),
             }
             ref = f"F:{short_id(row['id'])}"
         elif table == "episodes":
@@ -467,6 +668,35 @@ async def pack(
             confidence, importance = 1.0, float(row.get("importance", 0.5))
             meta = {"ended_at": when}
             ref = f"E:{short_id(row['id'])}"
+        elif table == "claim":
+            structured = row.get("structured") or {}
+            kind, prior = "claim", TYPE_PRIOR["claim"]
+            category = structured.get("category", "other")
+            half_life = HALF_LIFE_DAYS.get(category, HALF_LIFE_DAYS["other"])
+            valid_from = parse_when(structured["valid_from"]) if structured.get("valid_from") else None
+            when = valid_from or row.get("created_at")
+            text = _claim_line(row, kind="claim")
+            confidence = float(row.get("confidence", 0.5))
+            importance = float(structured.get("importance", 0.5))
+            # Nothing has resolved this candidate's `structured["subject"]` name to an entity
+            # row yet -- that only happens inside `review.process_candidate`, which a still
+            # pending/needs_review claim has by definition not been through. Best-effort
+            # lookup only; retrieval never mints an entity the way the review gate would.
+            subject_entity_id = structured.get("subject_entity_id")
+            if subject_entity_id is None and structured.get("subject"):
+                subject_entity_id = await _resolve_claim_subject(structured["subject"])
+            meta = {
+                "subject_entity_id": subject_entity_id,
+                "predicate": structured.get("predicate"),
+                "object": structured.get("object"),
+                "valid_from": valid_from,
+                "created_at": row.get("created_at"),
+                "proposed_by": row.get("proposed_by"),
+                "confidence": confidence,
+                "status": row.get("status"),
+                "category": category,
+            }
+            ref = f"C:{short_id(row['id'])}"
         else:
             kind, prior = "procedure", TYPE_PRIOR["procedure"]
             half_life = 1e9
@@ -505,7 +735,7 @@ async def pack(
         except Exception:
             pass
 
-    items, conflicts = resolve_conflicts(items)
+    items, conflicts, needs_user = resolve_conflicts(items)
     items = dedupe(items)
     items.sort(key=lambda i: i.score, reverse=True)
     items = mmr(items, limit=40)
@@ -518,6 +748,7 @@ async def pack(
         text=text,
         items=used,
         conflicts=conflicts,
+        needs_user=needs_user,
         stats={
             "candidates": len(all_rows),
             "returned": len(used),
@@ -530,9 +761,13 @@ async def pack(
 
 def _render(items: list[Item], budget_tokens: int) -> tuple[str, list[Item]]:
     """Fixed section shares; unused room flows to the next section."""
-    sections = {"facts": [], "procedures": [], "episodes": []}
+    sections = {"facts": [], "claims": [], "procedures": [], "episodes": []}
     for item in items:
-        sections[{"fact": "facts", "procedure": "procedures", "episode": "episodes"}[item.kind]].append(item)
+        sections[
+            {"fact": "facts", "claim": "claims", "procedure": "procedures", "episode": "episodes"}[
+                item.kind
+            ]
+        ].append(item)
 
     lines: list[str] = []
     used: list[Item] = []
@@ -544,7 +779,7 @@ def _render(items: list[Item], budget_tokens: int) -> tuple[str, list[Item]]:
         for item in sections[name]:
             line = f"- [{item.ref}] {item.text}"
             for conflict in item.meta.get("conflicts", []):
-                line += f"\n    (conflicting: {conflict})"
+                line += f"\n    - [{conflict['ref']}] {conflict['text']} · disputed by {item.ref}"
             cost = estimate_tokens(line)
             if spent + cost > allowance or cost > remaining:
                 continue
@@ -553,7 +788,8 @@ def _render(items: list[Item], budget_tokens: int) -> tuple[str, list[Item]]:
             spent += cost
             remaining -= cost
         if chosen:
-            title = {"facts": "Facts", "procedures": "How you have helped before",
+            title = {"facts": "Facts", "claims": "Unadjudicated claims",
+                     "procedures": "How you have helped before",
                      "episodes": "Recent episodes"}[name]
             lines.append(f"### {title}\n" + "\n".join(chosen))
         remaining += allowance - spent if allowance > spent else 0

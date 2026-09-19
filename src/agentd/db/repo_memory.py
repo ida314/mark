@@ -364,6 +364,33 @@ async def pending_candidates(limit: int = 200) -> list[dict]:
     )
 
 
+async def candidate_by_id(candidate_id: UUID) -> dict | None:
+    return await fetch_one("SELECT * FROM candidate_memories WHERE id = %s", (candidate_id,))
+
+
+async def queue_health() -> dict:
+    """How deep the review queue is and how long the oldest thing has waited.
+
+    The 2026-09-18 incident was invisible because nothing reported this: five candidates sat
+    `pending` indefinitely while postgres, ntfy and the model endpoint were all healthy. A
+    user-origin candidate is broken out separately because a correction someone typed has a
+    very different expected latency from an inference the consolidator volunteered.
+    """
+    return await fetch_one(
+        """
+        SELECT
+          count(*) FILTER (WHERE status = 'pending')                          AS pending,
+          count(*) FILTER (WHERE status = 'needs_review')                     AS needs_review,
+          min(created_at) FILTER (WHERE status = 'pending')                   AS oldest_pending_at,
+          min(created_at) FILTER (WHERE status = 'pending'
+                                    AND proposed_by = 'user')                 AS oldest_user_at,
+          count(*) FILTER (WHERE status = 'rejected'
+                             AND decided_at > now() - interval '7 days')      AS rejected_7d
+        FROM candidate_memories
+        """
+    )
+
+
 async def candidates_by_status(status: str, limit: int = 100) -> list[dict]:
     return await fetch_all(
         "SELECT * FROM candidate_memories WHERE status = %s ORDER BY created_at LIMIT %s",

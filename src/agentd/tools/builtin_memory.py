@@ -10,6 +10,7 @@ import json
 
 from ..config import get_config
 from ..db import repo_memory
+from ..embed import get_embedder
 from ..ids import parse_when, utcnow
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
 
@@ -77,6 +78,19 @@ async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
             confidence={"type": "number", "minimum": 0, "maximum": 1},
             valid_from={"type": "string", "description": "ISO date this became true"},
             importance={"type": "number", "minimum": 0, "maximum": 1},
+            relation={
+                "type": "string",
+                "enum": ["corrects", "updates", "refines"],
+                "description": (
+                    "How this relates to what you already believe, if you know: 'corrects' "
+                    "(the old one was always wrong), 'updates' (the world changed), "
+                    "'refines' (adds detail, no contradiction)."
+                ),
+            },
+            supersedes_ref={
+                "type": "string",
+                "description": "The [F:xxxx] handle of the fact this one replaces or refines, if known",
+            },
         ),
         "statement",
     ),
@@ -94,6 +108,56 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
     evidence = []
     if ctx.turn_id:
         evidence.append({"turn_id": str(ctx.turn_id)})
+
+    relation_hint = args.get("relation")
+    supersedes_hint = None
+    if args.get("supersedes_ref"):
+        ref = args["supersedes_ref"].strip()
+        if ref.upper().startswith("F:"):
+            ref = ref[2:]
+        fact = await repo_memory.fact_by_short_id(ref)
+        if fact is not None:
+            supersedes_hint = fact["id"]
+
+    # A correction cue only ever buys synchronicity: adjudicate inline instead of leaving
+    # this to sit in the queue. Untainted only — untrusted content must never take the fast
+    # path, whatever the turn's discourse looked like. `proposed_by` stays `ctx.actor` on
+    # both paths; promoting it to "user" here would launder the model's own inference
+    # through the user's evidence exemption and lower confidence floor.
+    if ctx.extra.get("correction_cue") is not None and not ctx.tainted:
+        from ..memory import review
+
+        status, reason, fact_id = await review.propose_and_review(
+            statement=args["statement"],
+            proposed_by=ctx.actor,
+            category=structured["category"],
+            confidence=float(args.get("confidence", 0.75)),
+            importance=structured["importance"],
+            valid_from=args.get("valid_from"),
+            evidence=evidence,
+            source_trust="untrusted" if ctx.tainted else "trusted",
+            session_id=ctx.session_id,
+            turn_id=ctx.turn_id,
+            relation_hint=relation_hint,
+            supersedes_hint=supersedes_hint,
+        )
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "status": status,
+                    "reason": reason,
+                    "fact_id": str(fact_id) if fact_id else None,
+                }
+            ),
+            data={"status": status, "fact_id": str(fact_id) if fact_id else None},
+        )
+
+    if relation_hint:
+        structured["relation_hint"] = relation_hint
+    if supersedes_hint:
+        structured["supersedes_hint"] = str(supersedes_hint)
+    embedder = get_embedder(get_config())
+    embedding = (await embedder.embed([args["statement"]]))[0] if embedder is not None else None
     candidate_id = await repo_memory.insert_candidate(
         statement=args["statement"],
         proposed_by=ctx.actor,
@@ -104,6 +168,7 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
         source_trust="untrusted" if ctx.tainted else "trusted",
         session_id=ctx.session_id,
         turn_id=ctx.turn_id,
+        embedding=embedding,
     )
     return ToolResult(
         content=json.dumps(

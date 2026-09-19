@@ -68,6 +68,13 @@ channel_limit = 30
 rerank_top_k = 30
 ef_search = 80
 
+# The review gate has exactly one consumer, the daemon's consolidation loop, so a stopped
+# daemon looks identical to an empty queue. These thresholds are what `agent doctor` and the
+# heartbeat use to tell those apart; `agent memory queue --process` drains it by hand.
+[review]
+pending_warn_after_s = 7200
+user_pending_warn_after_s = 300
+
 [paths]
 # ~ is expanded at load time
 data_dir = "~/.local/share/agent"

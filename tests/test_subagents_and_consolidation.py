@@ -122,7 +122,7 @@ async def test_transcript_carries_citable_event_ids(cfg):
     events = await repo_archive.events_for_session(session_id)
     chunks = render_transcript(events)
     assert chunks
-    assert f"[E{events[0]['event_id']}]" in chunks[0]
+    assert f"[E:{events[0]['event_id']}]" in chunks[0]
 
 
 async def test_untrusted_events_are_flagged_in_the_transcript(cfg):
@@ -193,7 +193,8 @@ async def test_facts_sourced_from_untrusted_events_are_marked(cfg):
                 Extraction(
                     facts=[
                         ExtractedFact(
-                            statement="Dylan is the CEO of Acme", category="biographical",
+                            statement="Dylan is the CEO of Acme", subject="Dylan",
+                            predicate="works_at", object="Acme", category="biographical",
                             confidence=0.9,
                             evidence=[{"event_id": str(event_id), "quote": "CEO"}],
                         )
@@ -261,6 +262,7 @@ async def test_a_chosen_category_survives_into_the_fact_row(cfg):
                     facts=[
                         ExtractedFact(
                             statement="Mara is Dylan's sister and a nurse in Boston",
+                            subject="Mara", predicate="related_to", object="Dylan",
                             category="relationship", confidence=0.9,
                             evidence=[{"event_id": str(event_id), "quote": "My sister Mara"}],
                         )
@@ -273,3 +275,72 @@ async def test_a_chosen_category_survives_into_the_fact_row(cfg):
     facts = await repo_memory.active_facts()
     mara = next(f for f in facts if "Mara" in f["statement"])
     assert mara["category"] == "relationship"
+
+
+async def test_the_structured_key_survives_into_the_fact_row(cfg):
+    """Subject and predicate are what `same_key_facts` and `conflicting_groups` join on. Every
+    fact stored while they were optional had both NULL, which left contradiction detection
+    running on embedding similarity alone."""
+    from agentd.llm.roles import set_provider
+
+    session_id = await repo_archive.create_session("test")
+    event_id = await repo_archive.append_event(
+        RawEvent(kind="user_message", actor="user",
+                 content="I live in the East Village.", session_id=session_id)
+    )
+    set_provider(
+        FakeProvider(
+            json_results=[
+                Extraction(
+                    facts=[
+                        ExtractedFact(
+                            statement="Dylan lives in the East Village", subject="Dylan",
+                            predicate="lives_in", object="East Village",
+                            category="biographical", confidence=0.9,
+                            evidence=[{"event_id": f"E:{event_id}", "quote": "East Village"}],
+                        )
+                    ]
+                )
+            ]
+        )
+    )
+    await consolidate.post_session(session_id, cfg)
+    facts = await repo_memory.active_facts()
+    assert facts and facts[0]["predicate"] == "lives_in"
+    assert facts[0]["subject_entity_id"] is not None
+    assert facts[0]["object_text"] == "East Village"
+
+
+async def test_a_predicate_from_the_wrong_family_does_not_abort_the_run(cfg):
+    """The grammar can hold the predicate to the vocabulary but not to the family of the
+    category the model also picked. Reconciling that with a pydantic validator would raise,
+    burn the one repair attempt, and then kill the whole consolidation run."""
+    from agentd.llm.roles import set_provider
+
+    session_id = await repo_archive.create_session("test")
+    event_id = await repo_archive.append_event(
+        RawEvent(kind="user_message", actor="user",
+                 content="I prefer terse answers.", session_id=session_id)
+    )
+    set_provider(
+        FakeProvider(
+            json_results=[
+                Extraction(
+                    facts=[
+                        ExtractedFact(
+                            statement="Dylan prefers terse answers", subject="Dylan",
+                            predicate="lives_in",  # wrong family for `preference`
+                            object="terse answers", category="preference", confidence=0.9,
+                            evidence=[{"event_id": f"E:{event_id}", "quote": "terse"}],
+                        )
+                    ]
+                )
+            ]
+        )
+    )
+    stats = await consolidate.post_session(session_id, cfg)
+    assert "error" not in stats
+    assert stats["facts_proposed"] == 1
+    facts = await repo_memory.active_facts()
+    assert facts and facts[0]["predicate"] is None
+    assert facts[0]["statement"] == "Dylan prefers terse answers"

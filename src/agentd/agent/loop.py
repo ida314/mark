@@ -117,6 +117,13 @@ class AgentLoop:
                     )
                 )
 
+            # Deterministic, channel-agnostic: `agent ask`, one-shot and daemon turns all
+            # pass through here, not just `agent chat`. See `memory/cues.py` for the
+            # safety property this can and cannot buy.
+            from ..memory.cues import detect_correction
+
+            correction_cue = detect_correction(user_text)
+
             # 1. What do we know that bears on this?
             context_block = ""
             refs: dict[str, Any] = {}
@@ -159,6 +166,8 @@ class AgentLoop:
                 session_id=session.id, turn_id=turn_id, actor=self.actor, origin=origin,
                 autonomy=autonomy, tainted=session.tainted,
             )
+            if correction_cue is not None:
+                tctx.extra["correction_cue"] = correction_cue
 
             # 4. Step until the model stops calling tools.
             final_text: list[str] = []

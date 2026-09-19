@@ -190,12 +190,21 @@ class McpConfig(BaseModel):
     servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
 
+class ReviewConfig(BaseModel):
+    # How long a candidate may sit unadjudicated before `agent doctor` calls it a problem.
+    # A user-origin candidate gets its own, much shorter budget: they typed it expecting it
+    # to stick, and the queue has no other consumer than the daemon.
+    pending_warn_after_s: int = 7200
+    user_pending_warn_after_s: int = 300
+
+
 class Config(BaseModel):
     db: DbConfig = Field(default_factory=DbConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embed: EmbedConfig = Field(default_factory=EmbedConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)

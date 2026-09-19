@@ -222,19 +222,16 @@ async def _slash(
         if pack:
             console.print(f"[dim]{pack.stats}[/dim]")
     elif command == "/remember":
-        from ..db import repo_memory
         from ..memory import review
 
-        candidate_id = await repo_memory.insert_candidate(
+        status, reason, _fact_id = await review.propose_and_review(
             statement=rest, proposed_by="user", confidence=0.95,
-            structured={"category": "other"}, evidence=[{"source": "user"}],
+            evidence=[{"source": "user"}],
             session_id=session.id,
+            turn_id=UUID(last_turn_id) if last_turn_id else None,
+            cfg=cfg,
         )
-        rows = await repo_memory.pending_candidates()
-        for row in rows:
-            if row["id"] == candidate_id:
-                status, reason = await review.process_candidate(row, cfg)
-                console.print(f"[green]{status}[/green]: {reason}")
+        console.print(f"[green]{status}[/green]: {reason}")
     elif command == "/inbox":
         rows = await repo_agenda.list_notifications(unread_only=True)
         if not rows:

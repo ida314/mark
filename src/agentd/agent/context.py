@@ -37,8 +37,10 @@ def system_prompt(cfg: Config, autonomy: str, context_block: str = "") -> str:
     if context_block.strip():
         parts.append(
             "\n## What you know right now\n\n"
-            "(Retrieved from memory for this turn. `[F:id]` are fact handles; "
-            "`conf` is confidence.)\n\n" + context_block
+            "(Retrieved from memory for this turn. Each line names its source, how old it "
+            "is, and whether it has been adjudicated. `[F:id]` are adjudicated facts; "
+            "`[C:id]` are provisional claims still in review, which may say `disputed by` "
+            "another handle when something else contends the same point.)\n\n" + context_block
         )
     return "\n".join(p for p in parts if p)
 

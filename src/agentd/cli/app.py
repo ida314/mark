@@ -156,6 +156,49 @@ async def _doctor() -> None:
     else:
         row("docker", False, "not installed: sandboxed shell disabled")
 
+    # The review queue. `agent doctor` already reports whether the daemon is running, but a
+    # yellow "not running" beside an otherwise green table reads as benign — on 2026-09-18 it
+    # was sitting next to five candidates that would never be adjudicated. What was missing is
+    # the consequence, so this row states it.
+    if db_ok:
+        try:
+            from ..db import repo_memory, repo_ops
+            from ..ids import utcnow as _now
+
+            health = await repo_memory.queue_health()
+            now = _now()
+
+            def _waited(ts) -> float:
+                return (now - ts).total_seconds() if ts else 0.0
+
+            user_wait = _waited(health["oldest_user_at"])
+            oldest = _waited(health["oldest_pending_at"])
+            detail = f"{health['pending']} pending, {health['needs_review']} need review"
+            if oldest:
+                detail += f", oldest {int(oldest // 60)}m"
+
+            # The queue has exactly one consumer. If it is not running, a shallow queue is
+            # not a healthy queue — it is a queue that has not filled up *yet*. Reporting
+            # this green beside a yellow "daemon: not running" is what made the original
+            # failure invisible, so the two facts are judged together.
+            beat = (await repo_ops.daemon_status() or {}).get("heartbeat_at")
+            drain_dead = beat is None or _waited(beat) > 2 * cfg.daemon.heartbeat_interval_s
+
+            if user_wait > cfg.review.user_pending_warn_after_s:
+                row("review queue", False,
+                    f"{detail} — a correction of yours is still unadjudicated; "
+                    "run: agent memory queue --process")
+            elif health["pending"] and drain_dead:
+                row("review queue", None,
+                    f"{detail} — nothing is draining it (daemon down); "
+                    "run: agent memory queue --process")
+            elif oldest > cfg.review.pending_warn_after_s:
+                row("review queue", None, f"{detail} — run: agent memory queue --process")
+            else:
+                row("review queue", True, detail)
+        except Exception as exc:
+            row("review queue", False, str(exc)[:200])
+
     # policy
     try:
         from ..policy.engine import engine_from_config
@@ -472,17 +515,13 @@ def remember(text: str) -> None:
 
 
 async def _remember(text: str) -> None:
-    from ..db import repo_memory
     from ..memory import review
 
-    candidate_id = await repo_memory.insert_candidate(
+    status, reason, _fact_id = await review.propose_and_review(
         statement=text, proposed_by="user", confidence=0.95,
-        structured={"category": "other"}, evidence=[{"source": "user"}],
+        evidence=[{"source": "user"}],
     )
-    for row in await repo_memory.pending_candidates():
-        if row["id"] == candidate_id:
-            status, reason = await review.process_candidate(row)
-            console.print(f"[green]{status}[/green]: {reason}")
+    console.print(f"[green]{status}[/green]: {reason}")
 
 
 @app.command()
@@ -641,6 +680,58 @@ async def _memory_review() -> None:
             )
 
 
+@memory_app.command("queue")
+def memory_queue(
+    process: bool = typer.Option(False, "--process", help="Adjudicate everything pending, now"),
+) -> None:
+    """How deep the review queue is, and optionally drain it.
+
+    `process_pending` is otherwise reachable only from the daemon's consolidation loop, so a
+    stopped daemon means proposed memories never become facts and nothing says so.
+    """
+    run(_memory_queue(process))
+
+
+async def _memory_queue(process: bool) -> None:
+    from ..db import repo_memory
+    from ..ids import utcnow
+    from ..memory import review as review_mod
+
+    health = await repo_memory.queue_health()
+    now = utcnow()
+
+    def age(ts) -> str:
+        if ts is None:
+            return "[dim]—[/dim]"
+        seconds = int((now - ts).total_seconds())
+        if seconds < 90:
+            return f"{seconds}s"
+        if seconds < 5400:
+            return f"{seconds // 60}m"
+        return f"{seconds // 3600}h"
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("metric")
+    table.add_column("value")
+    table.add_row("pending", str(health["pending"]))
+    table.add_row("needs your review", str(health["needs_review"]))
+    table.add_row("oldest pending", age(health["oldest_pending_at"]))
+    table.add_row("oldest from you", age(health["oldest_user_at"]))
+    table.add_row("rejected (7d)", str(health["rejected_7d"]))
+    console.print(table)
+
+    if not process:
+        if health["pending"]:
+            console.print("[dim]pass --process to adjudicate these now[/dim]")
+        return
+    stats = await review_mod.process_pending()
+    console.print(
+        f"[green]processed[/green] accepted={stats.accepted} merged={stats.merged} "
+        f"superseded={stats.superseded} rejected={stats.rejected} "
+        f"needs_review={stats.needs_review}"
+    )
+
+
 @memory_app.command("retract")
 def memory_retract(fact_id: str, reason: str = typer.Option("user retracted")) -> None:
     """Mark a fact as never having been true."""
@@ -693,6 +784,22 @@ async def _memory_reembed() -> None:
                     (vector, embedder.model_name, row["id"]),
                 )
         console.print(f"[green]{table}[/green]: {len(rows)} re-embedded")
+
+    # candidate_memories has no embedding_model column, and rows already adjudicated are
+    # frozen history -- only claims still awaiting a decision are worth the recompute.
+    rows = await fetch_all(
+        "SELECT id, statement AS text FROM candidate_memories "
+        "WHERE status IN ('pending', 'needs_review')"
+    )
+    if rows:
+        vectors = await embedder.embed([r["text"] for r in rows])
+        async with connection() as conn:
+            for row, vector in zip(rows, vectors, strict=True):
+                await conn.execute(
+                    "UPDATE candidate_memories SET embedding = %s WHERE id = %s",
+                    (vector, row["id"]),
+                )
+        console.print(f"[green]candidate_memories[/green]: {len(rows)} re-embedded")
 
 
 @md_app.command("log")

@@ -6,6 +6,7 @@ existing fact, supersede one (the world changed), retract one (we were wrong), o
 
 from __future__ import annotations
 
+import getpass
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -30,6 +31,10 @@ USER_ACCEPT_CONFIDENCE = 0.60
 MIN_CONFIDENCE = 0.50
 
 IDENTITY_CATEGORIES = {"biographical", "preference", "relationship", "constraint"}
+
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 SECRET_PATTERNS = [
     re.compile(r"\b(?:sk|pk)-[A-Za-z0-9]{16,}"),
@@ -109,6 +114,26 @@ async def _judge(existing: dict, candidate: dict, cfg: Config) -> JudgeVerdict:
         return JudgeVerdict(relation="contradicts_uncertain", rationale=f"judge unavailable: {exc}")
 
 
+# The extractor is told to write third-person statements, but it still reaches for whatever
+# noun the transcript used. Every one of these has to land on the same entity row, or
+# `(subject_entity_id, predicate)` never groups and the vocabulary buys nothing.
+SELF_ALIASES = frozenset({"i", "me", "my", "myself", "the user", "user", "the owner"})
+
+
+async def _self_entity_id() -> UUID:
+    """The one entity row that means the person this agent belongs to.
+
+    Reuses whatever row already represents them rather than minting a second one: the unique
+    index is on `(kind, lower(canonical_name))`, so upserting "Dylan" as a `person` when the
+    consolidator already filed them as `other` would split the identity in two.
+    """
+    name = getpass.getuser()
+    rows = await repo_memory.find_entities(name, limit=1)
+    kind = rows[0]["kind"] if rows else "person"
+    canonical = rows[0]["canonical_name"] if rows else name
+    return await repo_memory.upsert_entity(kind, canonical, aliases=sorted(SELF_ALIASES))
+
+
 async def _resolve_subject(candidate: dict) -> tuple[UUID | None, str | None, str | None]:
     structured = candidate.get("structured") or {}
     subject = structured.get("subject")
@@ -116,14 +141,43 @@ async def _resolve_subject(candidate: dict) -> tuple[UUID | None, str | None, st
     obj = structured.get("object")
     subject_id = None
     if subject:
-        rows = await repo_memory.find_entities(subject, limit=1)
-        if rows:
-            subject_id = rows[0]["id"]
+        if subject.strip().lower() in SELF_ALIASES:
+            subject_id = await _self_entity_id()
         else:
-            subject_id = await repo_memory.upsert_entity(
-                structured.get("subject_kind", "person"), subject
-            )
+            rows = await repo_memory.find_entities(subject, limit=1)
+            if rows:
+                subject_id = rows[0]["id"]
+            else:
+                subject_id = await repo_memory.upsert_entity(
+                    structured.get("subject_kind", "person"), subject
+                )
     return subject_id, predicate, obj
+
+
+async def _hinted_neighbour(structured: dict, neighbours: list[dict]) -> dict | None:
+    """Resolve `structured["supersedes_hint"]` to a fact, adding it to `neighbours` in place
+    if it is not already there.
+
+    This is the only effect a cue or an explicit `supersedes_ref` is allowed to have: when
+    nothing else in the store surfaced, it guarantees the named fact is one the judge gets to
+    compare against. It never decides the relation itself — that stays `_judge`'s call — and
+    it must never displace a same-key conflict the similarity loop already found, or a
+    mis-aimed hint could steer adjudication away from a real contradiction.
+    """
+    raw = structured.get("supersedes_hint")
+    if not raw:
+        return None
+    try:
+        hint_id = UUID(str(raw))
+    except ValueError:
+        return None
+    for neighbour in neighbours:
+        if neighbour["id"] == hint_id:
+            return neighbour
+    fact = await repo_memory.get_fact(hint_id)
+    if fact is not None:
+        neighbours.append(fact)
+    return fact
 
 
 async def process_candidate(candidate: dict, cfg: Config | None = None) -> tuple[str, str]:
@@ -196,6 +250,13 @@ async def process_candidate(candidate: dict, cfg: Config | None = None) -> tuple
         seen = {n["id"] for n in neighbours}
         neighbours.extend(f for f in same_key if f["id"] not in seen)
 
+        # A cue or an explicit `supersedes_ref` names the fact this candidate is about —
+        # make sure the judge actually sees it, even when it would not otherwise have
+        # scored high enough to surface. The hint only fills a gap: it fires below only when
+        # the similarity/conflicting-key loop found nothing on its own, and it still leaves
+        # the relation itself to the judge.
+        hinted_fact = await _hinted_neighbour(structured, neighbours)
+
         best = None
         best_sim = 0.0
         for neighbour in neighbours:
@@ -213,6 +274,9 @@ async def process_candidate(candidate: dict, cfg: Config | None = None) -> tuple
             if sim >= JUDGE_FLOOR or conflicting_key:
                 if sim > best_sim or conflicting_key:
                     best, best_sim = neighbour, max(sim, best_sim)
+
+        if best is None and hinted_fact is not None:
+            best = hinted_fact
 
         valid_from = parse_when(structured["valid_from"]) if structured.get("valid_from") else None
 
@@ -260,6 +324,61 @@ async def process_candidate(candidate: dict, cfg: Config | None = None) -> tuple
         return await _decide(cid, "accepted", "new fact", result_fact_id=new_id)
 
 
+async def propose_and_review(
+    *,
+    statement: str,
+    proposed_by: str,
+    category: str = "other",
+    confidence: float = 0.75,
+    importance: float = 0.5,
+    valid_from: str | None = None,
+    evidence: list[dict] | None = None,
+    source_trust: str = "trusted",
+    session_id: UUID | None = None,
+    turn_id: UUID | None = None,
+    kind: str = "fact",
+    relation_hint: str | None = None,
+    supersedes_hint: UUID | None = None,
+    cfg: Config | None = None,
+) -> tuple[str, str, UUID | None]:
+    """Insert a candidate and adjudicate it in the same breath, instead of leaving it pending.
+
+    Every caller here is a human typing right now — chat `/remember`, `agent remember`, and
+    `memory_remember`'s fast path when a correction cue fired on an untainted turn — so
+    deferring the verdict has a cost the user can feel. This does not change what the gate
+    is allowed to decide: `process_candidate` still runs in full, still enforces the
+    untrusted-identity block and the secret scrub, still can reject or park a candidate in
+    `needs_review`. It only removes the silent wait, and gives the caller the real outcome.
+    """
+    cfg = cfg or get_config()
+    structured: dict = {"category": category, "importance": importance}
+    if valid_from:
+        structured["valid_from"] = valid_from
+    if relation_hint:
+        structured["relation_hint"] = relation_hint
+    if supersedes_hint:
+        structured["supersedes_hint"] = str(supersedes_hint)
+    embedder = get_embedder(cfg)
+    embedding = (await embedder.embed([statement]))[0] if embedder is not None else None
+    candidate_id = await repo_memory.insert_candidate(
+        statement=statement,
+        proposed_by=proposed_by,
+        kind=kind,
+        confidence=confidence,
+        structured=structured,
+        evidence=evidence or [],
+        source_trust=source_trust,
+        session_id=session_id,
+        turn_id=turn_id,
+        embedding=embedding,
+    )
+    candidate = await repo_memory.candidate_by_id(candidate_id)
+    status, reason = await process_candidate(candidate, cfg)
+    decided = await repo_memory.candidate_by_id(candidate_id)
+    fact_id = decided["result_fact_id"] if decided else None
+    return status, reason, fact_id
+
+
 async def _insert(
     candidate, statement, category, confidence, proposed_by, subject_id, predicate, obj,
     valid_from, embedding, embedder, *, supersedes: UUID | None = None,
@@ -295,13 +414,27 @@ _CATEGORIES = {
 }
 
 
+def _event_uuid(event_id: object) -> UUID | None:
+    """Parse a cited event id, tolerating the transcript marker the model copies.
+
+    `render_transcript` labels each line `[E<uuid>]`, and the extractor is asked to cite that
+    marker, so it returns "E01a0b0ca-089d-...". The `E` is part of the label, not the id.
+    Every fact_evidence row written before this stripped it lost its link to `raw_events`
+    silently, because the ValueError was swallowed into None — which is how a fact ends up
+    with evidence that points at nothing.
+    """
+    match = _UUID_RE.search(str(event_id or ""))
+    if not match:
+        return None
+    try:
+        return UUID(match.group(0))
+    except ValueError:  # pragma: no cover - the pattern already guarantees the shape
+        return None
+
+
 async def _attach_evidence(fact_id: UUID, candidate_id: UUID, evidence: list[dict]) -> None:
     for item in evidence or []:
-        event_id = item.get("event_id")
-        try:
-            event_uuid = UUID(str(event_id)) if event_id else None
-        except ValueError:
-            event_uuid = None
+        event_uuid = _event_uuid(item.get("event_id"))
         await repo_memory.add_evidence(
             fact_id, event_id=event_uuid, candidate_id=candidate_id, quote=item.get("quote")
         )
