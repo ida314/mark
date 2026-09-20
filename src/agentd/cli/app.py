@@ -440,60 +440,88 @@ def connectors_reset(name: str) -> None:
     raise typer.Exit(run(commands_connect.reset(get_config(), name, console)))
 
 
+async def _telegram_check(cfg) -> int:
+    """The body of `agent telegram check`, separated so it can be tested.
+
+    A typer command that wraps `asyncio.run` cannot be called from a test that is already
+    inside an event loop, and the thing worth testing here is the error handling rather
+    than the decorator.
+    """
+    import httpx
+
+    from ..daemon import telegram as tg
+
+    if tg.token() is None:
+        console.print("[yellow]no token:[/yellow] agent secrets set telegram/bot token")
+        return 1
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            me = await tg.call(cfg, client, "getMe")
+    except PermissionError:
+        # The one failure that will never fix itself, so it gets a sentence rather than a
+        # traceback: a rejected token needs a human and BotFather, not a retry.
+        console.print(
+            "[red]telegram rejected the token (401)[/red]\n"
+            "It is revoked, mistyped, or from a different bot. In Telegram: @BotFather -> "
+            "/mybots -> your bot -> API Token -> Revoke, then\n"
+            "  agent secrets set telegram/bot token   [dim](reads stdin; nothing echoes)[/dim]"
+        )
+        return 1
+    except Exception as exc:
+        console.print(f"[red]could not reach telegram:[/red] {type(exc).__name__}: {exc}")
+        return 1
+
+    console.print(f"[green]ok[/green] @{me.get('username')} ({me.get('first_name')})")
+    allowed = cfg.telegram.allowed_chat_ids
+    console.print(
+        f"allowed chat ids: {allowed}" if allowed
+        else "[yellow]allowed_chat_ids is empty, so nobody can talk to it[/yellow]"
+    )
+    return 0
+
+
+async def _telegram_whoami(cfg) -> int:
+    """The body of `agent telegram whoami`. Reads pending updates without consuming them,
+    so the daemon still sees the message."""
+    import httpx
+
+    from ..daemon import telegram as tg
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            updates = await tg.call(cfg, client, "getUpdates", timeout=0)
+    except PermissionError:
+        console.print("[red]telegram rejected the token[/red] — run `agent telegram check`")
+        return 1
+    except Exception as exc:
+        console.print(f"[red]could not reach telegram:[/red] {type(exc).__name__}")
+        return 1
+
+    seen: dict[int, str] = {}
+    for update in updates:
+        chat = ((update.get("message") or {}).get("chat")) or {}
+        if chat.get("id") is not None:
+            seen[int(chat["id"])] = str(chat.get("username") or chat.get("first_name") or "")
+    if not seen:
+        console.print("[dim]no recent messages — send the bot anything, then re-run[/dim]")
+        return 1
+    for chat_id, who in seen.items():
+        marked = " [green](already allowed)[/green]" if chat_id in cfg.telegram.allowed_chat_ids else ""
+        console.print(f"{chat_id}  {who}{marked}")
+    console.print("\n[dim]add to config.toml: [telegram] allowed_chat_ids = [...][/dim]")
+    return 0
+
+
 @telegram_app.command("check")
 def telegram_check() -> None:
     """Is the bot token good, and who is the bot?"""
-    from ..daemon import telegram as tg
-
-    async def go() -> int:
-        cfg = get_config()
-        if tg.token() is None:
-            console.print("[yellow]no token:[/yellow] agent secrets set telegram/bot token")
-            return 1
-        import httpx
-
-        async with httpx.AsyncClient(timeout=20) as client:
-            me = await tg.call(cfg, client, "getMe")
-        console.print(f"[green]ok[/green] @{me.get('username')} ({me.get('first_name')})")
-        allowed = cfg.telegram.allowed_chat_ids
-        console.print(
-            f"allowed chat ids: {allowed}" if allowed
-            else "[yellow]allowed_chat_ids is empty, so nobody can talk to it[/yellow]"
-        )
-        return 0
-
-    raise typer.Exit(run(go()))
+    raise typer.Exit(run(_telegram_check(get_config())))
 
 
 @telegram_app.command("whoami")
 def telegram_whoami() -> None:
-    """Print the chat id of whoever has messaged the bot, so you can allowlist yourself.
-
-    Reads pending updates without consuming them, so the daemon still sees the message.
-    """
-    from ..daemon import telegram as tg
-
-    async def go() -> int:
-        cfg = get_config()
-        import httpx
-
-        async with httpx.AsyncClient(timeout=20) as client:
-            updates = await tg.call(cfg, client, "getUpdates", timeout=0)
-        seen: dict[int, str] = {}
-        for update in updates:
-            chat = ((update.get("message") or {}).get("chat")) or {}
-            if chat.get("id") is not None:
-                seen[int(chat["id"])] = str(chat.get("username") or chat.get("first_name") or "")
-        if not seen:
-            console.print("[dim]no recent messages — send the bot anything, then re-run[/dim]")
-            return 1
-        for chat_id, who in seen.items():
-            marked = " [green](already allowed)[/green]" if chat_id in cfg.telegram.allowed_chat_ids else ""
-            console.print(f"{chat_id}  {who}{marked}")
-        console.print("\n[dim]add to config.toml: [telegram] allowed_chat_ids = [...][/dim]")
-        return 0
-
-    raise typer.Exit(run(go()))
+    """Print the chat id of whoever has messaged the bot, so you can allowlist yourself."""
+    raise typer.Exit(run(_telegram_whoami(get_config())))
 
 
 # --- backups -----------------------------------------------------------------

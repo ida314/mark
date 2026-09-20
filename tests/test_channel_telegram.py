@@ -280,3 +280,58 @@ async def pool_patch(approval_id):
             "UPDATE approvals SET args_sha256 = 'stale' WHERE id = %s", (approval_id,)
         )
     yield
+
+
+
+async def test_a_rejected_token_never_reaches_a_traceback(bot, monkeypatch, capsys):
+    """A 401 is the one failure that cannot fix itself, so it has to arrive as an
+    instruction. It used to propagate out of the typer command as a raw traceback, which
+    tells a person nothing about @BotFather."""
+    from agentd.cli.app import _telegram_check
+
+    real = httpx.AsyncClient
+
+    def rejecting(**kw):
+        return real(transport=httpx.MockTransport(
+            lambda request: httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
+        ))
+
+    monkeypatch.setattr(httpx, "AsyncClient", rejecting)
+    assert await _telegram_check(bot) == 1
+
+    out = capsys.readouterr().out
+    assert "401" in out and "BotFather" in out
+    assert "Traceback" not in out
+
+
+async def test_a_working_token_reports_the_bot(bot, monkeypatch, capsys):
+    from agentd.cli.app import _telegram_check
+
+    real = httpx.AsyncClient
+
+    def ok(**kw):
+        return real(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json={"ok": True, "result": {"username": "dylans_agent_bot"}}
+            )
+        ))
+
+    monkeypatch.setattr(httpx, "AsyncClient", ok)
+    assert await _telegram_check(bot) == 0
+    assert "dylans_agent_bot" in capsys.readouterr().out
+
+
+async def test_an_empty_allowlist_is_called_out_even_when_the_token_works(bot, monkeypatch, capsys):
+    from agentd.cli.app import _telegram_check
+
+    bot.telegram.allowed_chat_ids = []
+    real = httpx.AsyncClient
+
+    def ok(**kw):
+        return real(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"ok": True, "result": {"username": "b"}})
+        ))
+
+    monkeypatch.setattr(httpx, "AsyncClient", ok)
+    await _telegram_check(bot)
+    assert "nobody can talk to it" in capsys.readouterr().out
