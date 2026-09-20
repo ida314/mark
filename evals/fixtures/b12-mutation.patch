@@ -1,0 +1,11 @@
+--- a/src/agentd/obs/telemetry.py
++++ b/src/agentd/obs/telemetry.py
+@@ -172,7 +172,7 @@
+         return seen
+ 
+     def visible_unused(self) -> list[str]:
+-        called = set(self.called_names())
++        called = set(self.offered)
+         return [name for name in self.visible if name not in called]
+ 
+     def selection_failures(self) -> dict[str, Any]:
