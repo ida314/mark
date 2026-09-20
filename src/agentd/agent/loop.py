@@ -21,6 +21,7 @@ from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import utcnow, uuid7
 from ..journal import events as jevents
+from ..journal.ledger import EffectLedger
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
 from ..llm.base import Finish, LLMError, ReasoningDelta, TextDelta, ToolCallDone
@@ -180,6 +181,11 @@ class AgentLoop:
             self.engine,
             self.approver,
             max_result_chars=self.cfg.agent.tool_result_max_chars,
+            # The effect ledger writes through *this loop's* journal, resolved lazily.
+            # A sub-agent, and every test that hands a loop its own writer, would
+            # otherwise announce its effects in one file and the rest of the run in
+            # another - two records of one turn, neither complete.
+            ledger=EffectLedger(self.journal_writer),
         )
         self.last_pack = None
         self._journal = journal

@@ -26,7 +26,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,8 +35,6 @@ from typing import Any
 
 from ..config import Config
 from ..ids import utcnow
-
-SCHEMA_VERSION = 1
 
 # `id` is not in the Pass 2 schema sketch, which keys on (run_id, seq) alone. It is here
 # because session 2c replays "from a last-seen event id" across a feed that spans runs, and
@@ -45,7 +44,7 @@ SCHEMA_VERSION = 1
 #
 # (run_id, seq) keeps the uniqueness the pass asked for, and UNIQUE builds the index that
 # every per-run read uses.
-SCHEMA = """
+SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS journal (
   id      integer PRIMARY KEY AUTOINCREMENT,
   run_id  text    NOT NULL,
@@ -63,6 +62,48 @@ BEGIN
   SELECT RAISE(ABORT, 'journal: seq must increase within a run');
 END;
 """
+
+# Session 3b. The effect ledger shares this file with the journal it is derived from: one
+# file to back up, one connection, one lock, and no ordering question between two databases
+# that describe the same call. `ledger.py` owns what the columns *mean*; the DDL lives here
+# because this module owns the file's schema and the upgrade ladder below.
+#
+# The two CHECKs are the storage refusing states this codebase's characteristic bug would
+# produce: an effect class or a state outside its vocabulary (a typo becoming a fourth
+# class nothing reconciles), and a finished effect with no pointer to its result (a NULL
+# that reads as "done, outcome unknown").
+SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS effect (
+  idempotency_key text PRIMARY KEY,
+  run_id          text NOT NULL,
+  step_id         text NOT NULL,
+  tool            text NOT NULL,
+  effect_class    text NOT NULL
+                  CHECK (effect_class IN ('read','idempotent_write','unsafe_write')),
+  args_hash       text NOT NULL,
+  state           text NOT NULL
+                  CHECK (state IN ('intended','started','committed','failed','orphaned')),
+  result_ref      text,
+  effect_id       text NOT NULL,
+  attempt         integer NOT NULL CHECK (attempt > 0),
+  created_at      text NOT NULL,
+  updated_at      text NOT NULL,
+  started_at      text,
+  CHECK (result_ref IS NOT NULL OR state NOT IN ('committed','failed'))
+);
+
+CREATE INDEX IF NOT EXISTS effect_run ON effect (run_id, created_at);
+CREATE INDEX IF NOT EXISTS effect_state ON effect (state);
+"""
+
+# The upgrade ladder, applied in order from whatever version the file is at. 2a's open
+# question 6 was that `_migrate` could not migrate: it ran one `IF NOT EXISTS` script and
+# bumped `user_version` regardless, so a v2 change to an existing file would have been a
+# silent no-op with the version moved anyway. A step is now a numbered entry here, and the
+# version is only bumped for steps that actually ran. Steps stay additive and are never
+# edited once shipped - the same rule the Postgres migrations follow, for the same reason.
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2}
+SCHEMA_VERSION = max(MIGRATIONS)
 
 
 class JournalError(RuntimeError):
@@ -230,9 +271,12 @@ class JournalStore:
             raise SchemaTooNew(
                 f"{self.path} is at schema {version}, this build understands {SCHEMA_VERSION}"
             )
-        self._conn.executescript(SCHEMA)
-        if version < SCHEMA_VERSION:
-            self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        # Each step, in order, and the version moves one step at a time. A file interrupted
+        # between steps reopens at the last version whose script completed, so the next
+        # open resumes the ladder instead of assuming the whole thing ran.
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            self._conn.executescript(MIGRATIONS[step])
+            self._conn.execute(f"PRAGMA user_version={step}")
 
     def close(self) -> None:
         self._conn.close()
@@ -312,6 +356,33 @@ class JournalStore:
         except BaseException:
             conn.execute("ROLLBACK")
             raise
+
+    # --- the other table in this file ----------------------------------------
+    #
+    # The effect ledger (`ledger.py`) writes through these two, rather than opening a
+    # second connection to the same file. One connection means one lock and one
+    # transaction scope, so a ledger write can never sit behind a busy timeout waiting for
+    # the journal write it is supposed to follow.
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """`BEGIN IMMEDIATE` … `COMMIT`, or `ROLLBACK` and re-raise.
+
+        Not for journal appends - those go through `append`, which assigns `seq` inside its
+        own transaction. This is for the tables that ride along in the same file.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+
+    def query(self, sql: str, args: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(self._conn.execute(sql, tuple(args)).fetchall())
 
     # --- read ----------------------------------------------------------------
 
@@ -415,6 +486,10 @@ class JournalStore:
             try:
                 for run_id in targets:
                     conn.execute("DELETE FROM journal WHERE run_id = ?", (run_id,))
+                    # The ledger is derived from those events, so it goes with them. A run
+                    # is entirely present or entirely gone; an effect row whose journal is
+                    # gone is a claim with nothing behind it.
+                    conn.execute("DELETE FROM effect WHERE run_id = ?", (run_id,))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")

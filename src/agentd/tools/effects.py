@@ -28,6 +28,13 @@ UNSAFE_WRITE: EffectClass = "unsafe_write"
 
 EFFECT_CLASSES: tuple[EffectClass, ...] = (READ, IDEMPOTENT_WRITE, UNSAFE_WRITE)
 
+# The classes that get a ledger row and a pair of `effect_*` journal events (session 3b).
+# `read` is excluded because there is no question for a crash to leave behind: nothing
+# outside changed, so re-executing is free and there is nothing to reconcile. Defined as
+# the complement of `read` rather than as a second hand-written list, so a fourth class
+# could never be added to one and forgotten in the other.
+EFFECTING: tuple[EffectClass, ...] = tuple(c for c in EFFECT_CLASSES if c != READ)
+
 MEANING: dict[EffectClass, str] = {
     READ: "no external state change; free to re-execute",
     IDEMPOTENT_WRITE: "re-execution converges to the same state",

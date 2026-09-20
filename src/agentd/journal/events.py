@@ -6,12 +6,13 @@ frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Nine of the seventeen are emitted today** (session 2b wired them through the runtime).
-The other eight are defined here and written by nobody yet - `tool_progress` needs a
-progress channel the tool surface does not have, `handoff_*` is Pass 5, `checkpoint_written`
-is Pass 4, `effect_*` is Pass 3, `run_resumed` is Pass 4 and `run_forked` is Pass 5. They are
-specified now so those passes fill a slot instead of migrating a schema, and each has a test
-that writes one, so none of them is a shape nobody ever tried to construct.
+**Eleven of the seventeen are emitted today** - nine wired by session 2b, and the two
+`effect_*` types by session 3b's effect ledger. The other six are defined here and written
+by nobody yet - `tool_progress` needs a progress channel the tool surface does not have,
+`handoff_*` is Pass 5, `checkpoint_written` is Pass 4, `run_resumed` is Pass 4 and
+`run_forked` is Pass 5. They are specified now so those passes fill a slot instead of
+migrating a schema, and each has a test that writes one, so none of them is a shape nobody
+ever tried to construct.
 
 Three rules, and the first two are this codebase's characteristic bug stated backwards:
 
@@ -307,8 +308,8 @@ EVENTS: dict[str, dict[str, Field]] = {
 
 EVENT_TYPES: frozenset[str] = frozenset(EVENTS)
 
-# The nine the runtime writes today. Kept as data so a test can assert the gap between the
-# vocabulary and what is actually reachable, instead of that gap living in prose.
+# The eleven the runtime writes today. Kept as data so a test can assert the gap between
+# the vocabulary and what is actually reachable, instead of that gap living in prose.
 EMITTED_TYPES: frozenset[str] = frozenset(
     {
         "agent_started",
@@ -320,6 +321,10 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         "worker_created",
         "worker_finished",
         "message_appended",
+        # Session 3b. Both are written by `journal/ledger.py`, from inside the executor, so
+        # they are reachable from every caller and not only from a turn.
+        "effect_intended",
+        "effect_committed",
     }
 )
 

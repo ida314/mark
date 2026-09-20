@@ -2,6 +2,12 @@
 
 Main agent, sub-agents, approved queue items and MCP callers all come through here,
 so validation, policy, approval and the audit trail cannot be bypassed.
+
+Session 3b added the effect ledger to that list, and for the same reason. The tool events
+(`tool_requested`, `tool_started`, …) are emitted by `agent/loop.py`, which is fine for a
+record a human reads - but `effect_intended` is a promise that a record precedes a real
+world action, and a promise that only holds when the call came through the loop is not a
+promise. Every effecting call, from whatever caller, is announced and rowed here.
 """
 
 from __future__ import annotations
@@ -18,10 +24,12 @@ import jsonschema
 from ..db import repo_ops
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
+from ..journal.ledger import Effect, EffectLedger, get_ledger, ledgered
 from ..obs import otel
 from ..policy.approvals import ApprovalRequest, Approver, SessionGrants
 from ..policy.engine import PolicyContext, PolicyEngine, ToolCallInfo
 from .base import Tool, ToolContext, ToolResult
+from .idempotency import CanonicalizationError, declared_names
 
 UNTRUSTED_WRAPPER = (
     '<untrusted_content source="{source}">\n{body}\n</untrusted_content>\n'
@@ -39,12 +47,18 @@ class ToolExecutor:
         *,
         max_result_chars: int = 8000,
         grants: SessionGrants | None = None,
+        ledger: EffectLedger | None = None,
     ) -> None:
         self.tools = tools
         self.engine = engine
         self.approver = approver
         self.max_result_chars = max_result_chars
         self.grants = grants or SessionGrants()
+        # Resolved on the first effecting call rather than here, so constructing an
+        # executor still opens nothing. There is no "off": an executor with no ledger would
+        # be a second path on which an unsafe write happens unannounced, which is the exact
+        # hole this pass exists to close.
+        self._ledger = ledger
         # (tool, arguments) fingerprints that already failed validation this turn, so a
         # model that cannot find the right argument shape is told so instead of being
         # allowed to spend the whole step budget rediscovering it.
@@ -118,15 +132,36 @@ class ToolExecutor:
                 decision_rule = f"{decision.rule_id}+approved"
             decision = type(decision)(outcome="allow", rule_id=decision_rule, reason=decision.reason)
 
+        # The intent is recorded here and not one line earlier: everything above this point
+        # can still refuse the call, and an approval can sit unanswered for an hour. From
+        # here on there is a record on disk saying this was about to happen.
+        try:
+            effect = self._intend(tool, args, ctx, action_id)
+        except CanonicalizationError as exc:
+            return await self._fail(
+                action_id, parent_id, ctx, name, args,
+                f"Refusing to run {tool.name}: {exc} Without a reproducible idempotency "
+                "key a crash could not tell this call from a second one.",
+                started, rationale=reason,
+            )
+        if effect is not None:
+            effect.dispatched()
+
         with otel.span("tool.call", {"tool.name": name, "tool.risk": tool.risk}) as span:
             try:
                 result = await tool.handler(args, ctx)
             except Exception as exc:  # a tool blowing up must not kill the turn
                 otel.record_exception(span, exc)
-                return await self._fail(
-                    action_id, parent_id, ctx, name, args, f"{type(exc).__name__}: {exc}",
-                    started, rationale=reason,
+                message = f"{type(exc).__name__}: {exc}"
+                failure = await self._fail(
+                    action_id, parent_id, ctx, name, args, message, started,
+                    rationale=reason,
                 )
+                # After the audit row, so `result_ref` names a row that exists. A crash in
+                # between leaves the effect at `started`, which is the honest answer.
+                if effect is not None:
+                    effect.failed(message, result_ref=_result_ref(action_id))
+                return failure
 
         result.content = _truncate(result.content, self.max_result_chars)
         if result.trust == "untrusted" or not tool.trust_output:
@@ -153,7 +188,39 @@ class ToolExecutor:
                 **otel.current_ids(),
             )
         )
+        if effect is not None:
+            # `ok=False` is a clean failure: the call resolved and did not produce its
+            # effect. It is `failed` rather than `committed`, because the one question this
+            # row exists to answer is "did that happen", and a tool that told us it did not
+            # is an answer, not a result.
+            if result.ok:
+                effect.committed(result_ref=_result_ref(action_id), result=result.content)
+            else:
+                effect.failed(_one_line(result.content), result_ref=_result_ref(action_id))
         return result
+
+    def _intend(
+        self, tool: Tool, args: dict[str, Any], ctx: ToolContext, action_id: UUID
+    ) -> Effect | None:
+        """Announce an effecting call, or return None for a `read`.
+
+        Raises `CanonicalizationError` when no stable key can be derived from these
+        arguments. That is a refusal, never a fallback: a made-up key is indistinguishable
+        from a real one until the crash that needs it.
+        """
+        if not ledgered(tool.effect_class):
+            return None
+        if self._ledger is None:
+            self._ledger = get_ledger()
+        run_id, step_id = _effect_scope(ctx, action_id)
+        return self._ledger.intend(
+            run_id=run_id,
+            step_id=step_id,
+            tool=tool.name,
+            effect_class=tool.effect_class,
+            args=args,
+            declared=declared_names(tool.parameters),
+        )
 
     async def _denied(
         self, action_id, parent_id, ctx, tool, args, decision, started, reason,
@@ -229,6 +296,47 @@ class ToolExecutor:
             )
         )
         return ToolResult(content=json.dumps({"error": message}), ok=False, data=data or {})
+
+
+def _result_ref(action_id: UUID) -> str:
+    """Where the result of a committed effect can be read back.
+
+    A pointer rather than a copy, for the same reason a checkpoint's `messages_ref` is one:
+    the `actions` row already holds the arguments, the output and the policy decision, and
+    a second copy in a second store is a second thing to keep true.
+    """
+    return f"action:{action_id}"
+
+
+def _effect_scope(ctx: ToolContext, action_id: UUID) -> tuple[str, str]:
+    """The `(run_id, step_id)` this call is keyed under.
+
+    Normally the loop's, straight off the context. The interesting case is the one 2b and
+    3a both flagged: `policy/replay.execute_approved` runs a queued approval long after its
+    turn ended, with `ctx.run_id = None`, and the MCP seam has no turn at all.
+
+    Such a call gets a run of its own, named for this attempt's action id. The alternative -
+    a shared placeholder like `"detached"` or an empty string - is the failure this codebase
+    keeps having in another costume: a bucket is half a key, and every keyless call in it
+    would hash to the same idempotency key and look like a retry of every other one.
+
+    A missing *step* is treated the same way, rather than being filled in with `"s1"`: `s1`
+    inside a real run is a position the loop also hands out, and two different calls sharing
+    one key is worse than one call that cannot be deduplicated.
+    """
+    if ctx.run_id and ctx.step_id:
+        return ctx.run_id, ctx.step_id
+    return f"detached:{action_id}", "s1"
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    """Why a failed effect failed, in one line.
+
+    The fallback is a sentence rather than `""` or `None`: "this tool reported failure and
+    said nothing" is a fact worth reading in the journal, and an empty string there is
+    indistinguishable from a field nobody filled in.
+    """
+    return " ".join(text.split())[:limit] or "the tool reported failure with no message"
 
 
 def _parse_args(raw: dict[str, Any] | str) -> tuple[dict[str, Any], str | None]:
