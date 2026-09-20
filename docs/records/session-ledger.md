@@ -14,7 +14,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 2a | complete | — | pass-02-outcome.md | journal store + writer. Committed as fe8a8e0. |
 | 2b | complete | 2026-09-20 | pass-02-outcome.md | 17-type vocabulary, 9 of them emitted. No Must not crossed. |
 | 2c | complete | 2026-09-20 | pass-02-outcome.md | committed as b34f153. In-memory UIEvent bus deleted; journal is the only event path. 8 deviations, none crossing a Must not. Kill test passed at 3 points. |
-| 3a | pending | — | — | |
+| 3a | complete | 2026-09-20 | pass-03-outcome.md | committed as cae2f75. effect_class mandatory, no default; 26/26 builtins declare UNAUDITED (= unsafe_write), none classified. 5 deviations, no Must not crossed. |
 | 3b | pending | — | — | |
 | 3c | pending | — | — | **hard stop — human runs this** (effect classification) |
 | 3d | pending | — | — | **hard stop — human runs this** (effect classification) |
@@ -68,3 +68,13 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 - **2c → Pass 4/5:** a retrieval-degraded turn is still invisible to a fold. `Notice` survived
   with one use (memory-retrieval failure) because no event type covers it, and inventing an
   18th was out of 2c's scope.
+
+- **3a → 3b, two decisions 3b must make rather than inherit:** the idempotency key for a
+  call with `ctx.run_id = None` (`policy/replay.execute_approved`, the same hole flagged
+  2b → Pass 3), and whether the effect ledger lands in the journal SQLite file, which
+  would trigger 2a's "`_migrate` cannot migrate".
+- **3a → Pass 4, ordering constraint:** Pass 4 must not ship before 3c/3d. Every tool
+  currently reads `unsafe_write` via the `UNAUDITED` placeholder, so reconciliation would
+  surface `time_now` and `fs_list` as uncertain effects.
+- **3a → 3d, pre-empted corner:** MCP tools are pinned to `unsafe_write` at wrap time
+  because `wrap()` must pass the field. 3d inherits that as a decision already made.
