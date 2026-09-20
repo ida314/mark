@@ -418,7 +418,9 @@ PRIVATE_SAFE = {
     # the *egress* door once untrusted mail is in context, and this sends nothing anywhere.
     # Denying it would break the one workflow the pairing is for: read the invitation, then
     # look at what it collides with.
-    "calendar_upcoming",
+    # Same argument for coursework: a SELECT over archived deadlines, no egress, and
+    # "what is due before that trip" is the same read-then-compare workflow.
+    "calendar_upcoming", "coursework_due",
     "fs_list", "fs_read", "fs_search", "gmail_message", "gmail_search", "goal_upsert",
     "goals_list", "memory_history", "memory_remember", "memory_search", "notify_user",
     "open_loop_add", "open_loop_close", "open_loops_list", "profile_read", "reminder_set",

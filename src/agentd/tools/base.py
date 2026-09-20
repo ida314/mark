@@ -7,7 +7,8 @@ import html as htmllib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime
+from typing import Any, Protocol
 from uuid import UUID
 
 Risk = str  # read | draft | write | external | destructive
@@ -153,3 +154,66 @@ def obj(**properties: Any) -> dict[str, Any]:
 def required(schema: dict[str, Any], *names: str) -> dict[str, Any]:
     schema["required"] = list(names)
     return schema
+
+
+# --- freshness of a store somebody else fills --------------------------------
+#
+# Lives here rather than in one tool module for the same reason `flat` does: the second
+# caller proved it general. A calendar tool and a coursework tool read rows a connector
+# archived, and both have the one failure mode that matters for a store you do not fill
+# yourself — the daemon stops, the query returns nothing, and the tool says "you are free"
+# when it means "I cannot see". Freshness is therefore part of the answer, not a decoration
+# on it, and the same words should carry that in every tool that reads an archive.
+
+# A feed is late once it has missed this many polls in a row. Four rather than one because
+# a single missed poll is the internet being the internet, and crying stale on every jitter
+# teaches the reader to ignore the line that matters.
+STALE_POLLS = 4
+MIN_STALE_S = 600.0
+
+
+class Polled(Protocol):
+    """Anything that names its own poll cadence: a Google account, a Brightspace feed.
+
+    Structural rather than a shared base class, so `tools/` keeps not importing `config`.
+    """
+
+    poll_interval_s: float
+
+
+def describe_age(seconds: float) -> str:
+    if seconds < 90:
+        return "just now"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} minutes ago"
+    if seconds < 172800:
+        return f"{round(seconds / 3600)} hours ago"
+    return f"{round(seconds / 86400)} days ago"
+
+
+def feed_health(
+    state: dict[str, Any], source: Polled, now: datetime, *, noun: str = "calendar"
+) -> tuple[str, bool]:
+    """(how the freshness reads, whether the rows can be trusted to be complete).
+
+    False does not mean the rows are wrong — they are whatever the last good poll saw. It
+    means the *absence* of a row says nothing, so the caller must not report an empty
+    window as an empty calendar.
+
+    `noun` names the feed in the sentence, because "the calendar feed is behind" and "the
+    Brightspace feed is behind" are the same fact about different doors, and a reader who
+    has both configured needs to know which one to go and fix.
+    """
+    if not state:
+        return f"the {noun} feed has never run", False
+    if not state.get("enabled", True):
+        why = state.get("disabled_reason") or "no reason recorded"
+        return f"the {noun} feed is disabled ({flat(why, 120)})", False
+    last = state.get("last_success_at")
+    if last is None:
+        return f"the {noun} feed has not completed a poll yet", False
+    age = (now - last).total_seconds()
+    limit = max(source.poll_interval_s * STALE_POLLS, MIN_STALE_S)
+    if age > limit:
+        return f"the {noun} feed is behind — last synced {describe_age(age)}", False
+    return f"synced {describe_age(age)}", True

@@ -45,17 +45,12 @@ from typing import Any
 from ..config import Config, GoogleAccountConfig
 from ..db import repo_archive, repo_connectors
 from ..ids import utcnow
-from .base import ToolContext, ToolResult, flat, obj, tool
+from .base import ToolContext, ToolResult, describe_age, feed_health, flat, obj, tool
 
 MAX_EVENTS = 50
 DEFAULT_HOURS = 24
 TITLE_CHARS = 120
 LOCATION_CHARS = 80  # a street address that fits is worth the extra column
-# A feed is late once it has missed this many polls in a row. Four rather than one because
-# a single missed poll is the internet being the internet, and crying stale on every jitter
-# teaches the reader to ignore the line that matters.
-STALE_POLLS = 4
-MIN_STALE_S = 600.0
 
 
 def calendar_accounts(cfg: Config) -> dict[str, GoogleAccountConfig]:
@@ -90,40 +85,6 @@ def resolve_calendar(cfg: Config, label: str | None) -> tuple[str, GoogleAccount
         return f"Several calendars are configured ({', '.join(accounts)}); say which one."
     only = next(iter(accounts.items()))
     return only
-
-
-def describe_age(seconds: float) -> str:
-    if seconds < 90:
-        return "just now"
-    if seconds < 5400:
-        return f"{round(seconds / 60)} minutes ago"
-    if seconds < 172800:
-        return f"{round(seconds / 3600)} hours ago"
-    return f"{round(seconds / 86400)} days ago"
-
-
-def feed_health(
-    state: dict[str, Any], account: GoogleAccountConfig, now: datetime
-) -> tuple[str, bool]:
-    """(how the freshness reads, whether the rows can be trusted to be complete).
-
-    False does not mean the rows are wrong — they are whatever the last good poll saw. It
-    means the *absence* of a row says nothing, so the caller must not report an empty
-    window as an empty calendar.
-    """
-    if not state:
-        return "the calendar feed has never run", False
-    if not state.get("enabled", True):
-        why = state.get("disabled_reason") or "no reason recorded"
-        return f"the calendar feed is disabled ({flat(why, 120)})", False
-    last = state.get("last_success_at")
-    if last is None:
-        return "the calendar feed has not completed a poll yet", False
-    age = (now - last).total_seconds()
-    limit = max(account.poll_interval_s * STALE_POLLS, MIN_STALE_S)
-    if age > limit:
-        return f"the calendar feed is behind — last synced {describe_age(age)}", False
-    return f"synced {describe_age(age)}", True
 
 
 def _moment(value: Any) -> datetime | None:
@@ -238,4 +199,9 @@ async def calendar_upcoming(args: dict, ctx: ToolContext) -> ToolResult:
 
 TOOLS = [calendar_upcoming]
 
-__all__ = ["TOOLS", "calendar_upcoming", "feed_health", "one_line", "resolve_calendar"]
+# `describe_age` and `feed_health` moved to `base` once coursework became a second caller.
+# Re-exported here so `builtin_calendar.feed_health` keeps resolving for anything that
+# learned the name from this module.
+__all__ = [
+    "TOOLS", "calendar_upcoming", "describe_age", "feed_health", "one_line", "resolve_calendar",
+]
