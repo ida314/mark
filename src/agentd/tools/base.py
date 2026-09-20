@@ -23,6 +23,12 @@ class ToolContext:
     origin: str = "interactive"
     autonomy: str = "assist"
     tainted: bool = False
+    # Stronger than `tainted`, and deliberately separate. Taint says "untrusted text is in
+    # context", which every web page raises; this says "the user's private data is in
+    # context", which only a handful of tools can raise and which closes the egress door
+    # rather than merely asking about it. Conflating them would mean fetching page 1 of a
+    # search makes page 2 impossible.
+    private: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -52,6 +58,11 @@ class Tool:
     always_on: bool = False
     source: str = "builtin"
     trust_output: bool = True
+    # True for a tool that reads the user's own private data - mail today, a mailbox or a
+    # calendar tomorrow. The loop raises ToolContext.private from this, and the policy's
+    # hard denies key off it. It is not about trusting the *source*; a tool can be both
+    # private_output (it read your mail) and trust_output=False (a stranger wrote it).
+    private_output: bool = False
     preview: PreviewFn | None = None
     enabled: bool = True
 
@@ -96,6 +107,7 @@ def tool(
     path_args: tuple[str, ...] = (),
     always_on: bool = False,
     trust_output: bool = True,
+    private_output: bool = False,
     preview: PreviewFn | None = None,
 ) -> Callable[[Handler], Tool]:
     def decorate(handler: Handler) -> Tool:
@@ -109,6 +121,7 @@ def tool(
             path_args=path_args,
             always_on=always_on,
             trust_output=trust_output,
+            private_output=private_output,
             preview=preview,
         )
 

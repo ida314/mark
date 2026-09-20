@@ -29,6 +29,7 @@ class PolicyContext:
     autonomy: str = "assist"
     origin: str = "interactive"  # interactive | daemon | mcp | subagent:<name>
     tainted: bool = False
+    private: bool = False  # the user's own private data is in context
     approved: bool = False  # set when replaying an approved queued call
 
 
@@ -113,6 +114,8 @@ def _matches(m: Match, call: ToolCallInfo, ctx: PolicyContext, args: dict[str, A
     if m.origin is not None and not any(
         fnmatch.fnmatch(ctx.origin, o) for o in m.origin
     ):
+        return False
+    if m.private is not None and ctx.private != m.private:
         return False
     if m.tainted is not None and ctx.tainted != m.tainted:
         return False

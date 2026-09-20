@@ -58,7 +58,7 @@ def check_url(url: str, resolver=None) -> str | None:
         obj(url={"type": "string"}, max_chars={"type": "integer"}),
         "url",
     ),
-    tags=("web", "untrusted"),
+    tags=("web", "untrusted", "egress"),
     trust_output=False,
 )
 async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
@@ -105,7 +105,7 @@ async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
     "web_search",
     "Search the web and return result titles, urls and snippets. Untrusted content.",
     required(obj(query={"type": "string"}, n={"type": "integer"}), "query"),
-    tags=("web", "untrusted"),
+    tags=("web", "untrusted", "egress"),
     trust_output=False,
 )
 async def web_search(args: dict, ctx: ToolContext) -> ToolResult:

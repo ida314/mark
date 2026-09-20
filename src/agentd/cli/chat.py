@@ -151,7 +151,7 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
             if text.startswith("/"):
                 if text in ("/exit", "/quit"):
                     break
-                handled, autonomy = await _slash(
+                handled, autonomy, session = await _slash(
                     text, session, loop, cfg, autonomy, last_turn_id
                 )
                 if handled:
@@ -199,8 +199,8 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
 async def _slash(
     text: str, session: Session, loop: AgentLoop, cfg: Config, autonomy: str,
     last_turn_id: str | None,
-) -> tuple[bool, str]:
-    """Returns (handled, autonomy)."""
+) -> tuple[bool, str, Session]:
+    """Returns (handled, autonomy, session) — the session because /new replaces it."""
     command, _, rest = text.partition(" ")
     rest = rest.strip()
 
@@ -255,10 +255,13 @@ async def _slash(
         else:
             console.print("[dim]no turn yet[/dim]")
     elif command == "/new":
-        console.print("[dim]start a new session with: agent chat[/dim]")
+        # Also the way out of the private-data interlock: reading mail closes the outside
+        # world for the session, and this is the session ending.
+        session = await Session.create(channel="cli", autonomy=autonomy)
+        console.print(f"[dim]new session {str(session.id)[:8]} — nothing carried over[/dim]")
     else:
-        return False, autonomy
-    return True, autonomy
+        return False, autonomy, session
+    return True, autonomy, session
 
 
 def _brief(args: dict) -> str:

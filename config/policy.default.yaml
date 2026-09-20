@@ -54,6 +54,60 @@ hard_deny:
     reason: forwarding is the cheapest way to exfiltrate a mailbox, so it has no tool at all
     match:
       tool: mail_forward
+  # The same three tripwires under the names a Gmail-specific tool would plausibly take.
+  # gmail_search and gmail_message exist and are read-only; anything that writes to the
+  # mailbox does not, and adding one should fail here rather than ship quietly.
+  - id: no-gmail-send-tool
+    reason: there is no send tool by design; drafts are for a human to send
+    match:
+      tool: gmail_send
+  - id: no-gmail-forward-tool
+    reason: forwarding is the cheapest way to exfiltrate a mailbox, so it has no tool at all
+    match:
+      tool: gmail_forward
+  - id: no-gmail-modify-tool
+    reason: the agent reads mail; labelling, archiving and deleting are yours
+    match:
+      tool: gmail_modify
+
+  # --- the private-data interlock ------------------------------------------------------
+  # Once a tool marked private_output has run, the user's own data is in the context window
+  # alongside whatever a stranger wrote in it. These deny rather than ask: an approval
+  # prompt on every web call after reading mail is approval fatigue, and fatigue is how the
+  # one that matters gets waved through. `private` is set by the agent loop and is sticky
+  # for the session; start a new conversation to get these back.
+  #
+  # Deliberately NOT keyed on `tainted`, which any web page raises - hard-denying on that
+  # would mean fetching page 1 of a search makes page 2 impossible.
+  - id: private-data-no-egress
+    reason: your mail is in context, so nothing that can carry it off this box runs now
+    match:
+      private: true
+      tags: [egress]
+  - id: private-data-no-writes
+    reason: private data in context must not turn into a side effect that outlives the turn
+    match:
+      private: true
+      risk: [write, external, destructive]
+  - id: private-data-no-mcp
+    reason: a foreign server does not get a turn with your mailbox in context
+    match:
+      private: true
+      source: "mcp:*"
+  # Named rather than tagged, so `delegate(memory)` keeps working: that branch never builds
+  # a sub-agent, it calls memory.retrieval.pack in this process. The other two do, and a
+  # sub-agent gets a *fresh* Session whose flags start at their defaults - so it would begin
+  # life unaware this one had read the mailbox, holding web_search and web_fetch. That makes
+  # delegation the way around every other rule here, not merely another one of them.
+  - id: private-data-no-outward-delegation
+    reason: a sub-agent starts with a clean context and its own web tools; start a new
+      session if you need one
+    match:
+      private: true
+      tool: delegate
+      args:
+        agent:
+          in: [researcher, coder]
 
 rules:
   - id: workspace-writes-auto-in-act
@@ -71,6 +125,16 @@ rules:
       args:
         network: {equals: false}
     outcome: allow
+  # Reading the mailbox is something you ask for, not something that happens while you are
+  # asleep. The heartbeat and scheduled watchers run with nobody watching, and a denial there
+  # is silent by design - which is right for this one, because there is no such thing as a
+  # background question about your email that cannot wait.
+  - id: mail-tools-never-unattended
+    reason: the mailbox is not read on your behalf while nobody is watching
+    match:
+      tags: [mail]
+      origin: [daemon]
+    outcome: deny
   - id: watchers-need-approval
     reason: creates autonomous behaviour that outlives this turn
     match:

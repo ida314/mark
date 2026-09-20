@@ -54,7 +54,7 @@ def _preview(args: dict) -> str:
         "command",
     ),
     risk="write",
-    tags=("sandbox", "shell"),
+    tags=("sandbox", "shell", "egress"),
     preview=_preview,
 )
 async def shell_exec(args: dict, ctx: ToolContext) -> ToolResult:

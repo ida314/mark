@@ -49,6 +49,11 @@ class Session:
     summary: str | None = None
     tools_used: set[str] = field(default_factory=set)
     tainted: bool = False
+    # Whether the user's own private data has been read into this conversation. Sticky for
+    # the life of the session: the mail is out of context by the next turn, but what the
+    # model concluded from it is not, so lifting the interlock at the turn boundary would
+    # protect the wrong thing.
+    private: bool = False
 
     @classmethod
     async def create(cls, channel: str = "cli", autonomy: str = "assist") -> Session:
@@ -61,7 +66,11 @@ class Session:
         if row is None:
             raise ValueError(f"No such session: {session_id}")
         return cls(
-            id=row["id"], channel=row["channel"], autonomy=autonomy, summary=row.get("summary")
+            id=row["id"], channel=row["channel"], autonomy=autonomy, summary=row.get("summary"),
+            # Without this, `agent chat --resume` would silently hand back a session whose
+            # interlock had been earned and then forgotten. The archive already knows: every
+            # private tool result was written with a marker, so no migration is needed.
+            private=await repo_archive.session_read_private(session_id),
         )
 
 
@@ -164,7 +173,11 @@ class AgentLoop:
 
             tctx = ToolContext(
                 session_id=session.id, turn_id=turn_id, actor=self.actor, origin=origin,
-                autonomy=autonomy, tainted=session.tainted,
+                # Both flags are seeded from the session, not reset per turn. Forgetting
+                # `private` here is invisible to any single-turn test: the interlock works
+                # inside the turn that read the mail and is gone by the next message, which
+                # is the turn an injected instruction would actually use.
+                autonomy=autonomy, tainted=session.tainted, private=session.private,
             )
             if correction_cue is not None:
                 tctx.extra["correction_cue"] = correction_cue
@@ -257,6 +270,13 @@ class AgentLoop:
                     if result.trust == "untrusted":
                         session.tainted = True
                         tctx.tainted = True
+                    called = self.registry.tools.get(call.name)
+                    private_call = bool(called and called.private_output)
+                    if private_call:
+                        # Mutating the shared context means the very next call in this same
+                        # batch is already judged against the interlock, exactly as taint is.
+                        session.private = True
+                        tctx.private = True
                     denied = bool(result.data.get("denied"))
                     yield ToolFinished(
                         name=call.name, ok=result.ok,
@@ -267,7 +287,11 @@ class AgentLoop:
                             kind="tool_result", actor=f"tool:{call.name}",
                             content=result.content[:20000], trust=result.trust,
                             session_id=session.id, turn_id=turn_id,
-                            payload={"args": args_preview, "ok": result.ok},
+                            payload={
+                                "args": args_preview, "ok": result.ok,
+                                # What `Session.resume` reads back.
+                                **({"private": True} if private_call else {}),
+                            },
                         )
                     )
                     messages.append(

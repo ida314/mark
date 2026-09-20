@@ -123,6 +123,7 @@ def build_registry() -> Registry:
         builtin_agenda,
         builtin_delegate,
         builtin_fs,
+        builtin_mail,
         builtin_memory,
         builtin_shell,
         builtin_web,
@@ -130,6 +131,7 @@ def build_registry() -> Registry:
 
     reg = Registry()
     reg.add(*builtin_memory.TOOLS)
+    reg.add(*builtin_mail.TOOLS)
     reg.add(*builtin_fs.TOOLS)
     reg.add(*builtin_shell.TOOLS)
     reg.add(*builtin_web.TOOLS)

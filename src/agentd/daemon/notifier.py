@@ -125,7 +125,10 @@ def why_held(level: str, cfg: Config) -> str | None:
 def _headers(row: dict, cfg: Config) -> dict[str, str]:
     level = row.get("level", "info")
     headers = {
-        "Title": str(row.get("title", "agent"))[:200],
+        # Redacted and flattened like the body. It was neither: `_redact` only ever saw
+        # `body`, so a credential in a title left the box intact - and a newline in an HTTP
+        # header value is header injection rather than a cosmetic problem.
+        "Title": _redact(" ".join(str(row.get("title") or "agent").split()))[:200] or "agent",
         "Priority": str(PRIORITY.get(level, 3)),
         "Tags": TAGS.get(level, "information_source"),
         "Markdown": "yes",

@@ -279,7 +279,10 @@ def test_an_outbound_connector_asks_even_at_trusted_autonomy():
     assert decision.rule_id == "outbound-connector-always-asks"
 
 
-@pytest.mark.parametrize("name", ["mail_send", "mail_forward"])
+@pytest.mark.parametrize(
+    "name",
+    ["mail_send", "mail_forward", "gmail_send", "gmail_forward", "gmail_modify"],
+)
 def test_there_is_no_tool_that_sends_mail(name):
     """Two halves. The policy half says a send tool would be refused even at trusted with an
     approval in hand; the registry half is the one that actually catches somebody adding it."""
@@ -292,3 +295,147 @@ def test_there_is_no_tool_that_sends_mail(name):
     from agentd.tools.registry import build_registry
 
     assert name not in build_registry().tools
+
+
+# --- the private-data interlock ----------------------------------------------
+#
+# Reading the user's mailbox raises `private` for the session. These assert the door it
+# closes, and — just as importantly — that it stays open when it has not been raised.
+
+
+PRIVATE_DENIED = [
+    ("web_fetch", "read", ("web", "untrusted", "egress"), {}, "builtin", "private-data-no-egress"),
+    ("web_search", "read", ("web", "untrusted", "egress"), {}, "builtin", "private-data-no-egress"),
+    ("shell_exec", "write", ("sandbox", "shell", "egress"), {"network": True}, "builtin",
+     "private-data-no-egress"),
+    ("delegate", "read", ("core",), {"agent": "researcher"}, "builtin",
+     "private-data-no-outward-delegation"),
+    ("delegate", "read", ("core",), {"agent": "coder"}, "builtin",
+     "private-data-no-outward-delegation"),
+    ("fs_write", "write", ("fs",), {}, "builtin", "private-data-no-writes"),
+    ("watcher_add", "write", (), {}, "builtin", "private-data-no-writes"),
+    ("notes_search", "read", ("mcp",), {}, "mcp:notes", "private-data-no-mcp"),
+    ("some_future_sender", "external", (), {}, "builtin", "private-data-no-writes"),
+]
+
+
+@pytest.mark.parametrize("name,risk,tags,args,source,rule", PRIVATE_DENIED)
+def test_a_session_that_read_your_mail_cannot_reach_out(name, risk, tags, args, source, rule):
+    decision = _shipped().evaluate(
+        ToolCallInfo(name=name, risk=risk, tags=tags, args=args, source=source),
+        PolicyContext(autonomy="assist", private=True),
+    )
+    assert decision.outcome == "deny"
+    assert decision.rule_id == rule
+
+
+@pytest.mark.parametrize("name,risk,tags,args,source,rule", PRIVATE_DENIED)
+def test_none_of_that_changes_until_the_mailbox_is_actually_read(
+    name, risk, tags, args, source, rule
+):
+    """The regression that matters most. An interlock that fires when it should not is an
+    interlock somebody turns off."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name=name, risk=risk, tags=tags, args=args, source=source),
+        PolicyContext(autonomy="assist", private=False),
+    )
+    assert decision.outcome != "deny" or decision.rule_id != rule
+
+
+def test_the_interlock_is_not_the_taint_rule():
+    """Taint is raised by every web page and by shell output. Hard-denying on it would mean
+    fetching page 1 of a search makes page 2 impossible, which is why `private` is its own
+    flag rather than a severity level on this one."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="web_fetch", risk="read", tags=("web", "untrusted", "egress")),
+        PolicyContext(autonomy="assist", tainted=True),
+    )
+    assert decision.outcome == "allow"
+
+
+def test_an_airgapped_sandbox_still_runs_after_reading_mail():
+    """`network` absent means no network, and engine.py's absent-argument rule is what makes
+    the distinction load-bearing rather than decorative."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="shell_exec", risk="write", tags=("sandbox", "shell"),
+                     args={"network": False}),
+        PolicyContext(autonomy="assist", private=True),
+    )
+    assert decision.rule_id != "private-data-no-egress"
+
+
+def test_local_delegation_survives_the_interlock():
+    """delegate(memory) never builds a sub-agent; it packs retrieval in this process."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="delegate", risk="read", tags=("core",), args={"agent": "memory"}),
+        PolicyContext(autonomy="assist", private=True),
+    )
+    assert decision.outcome == "allow"
+
+
+def test_the_mail_tools_do_not_lock_themselves_out():
+    """Reading a second message must not be denied by the interlock the first one raised."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="gmail_message", risk="read", tags=("mail", "untrusted")),
+        PolicyContext(autonomy="assist", private=True),
+    )
+    assert decision.outcome == "allow"
+
+
+def test_telling_the_user_still_works_after_reading_their_mail():
+    """An interlock that also gags the agent would just make it fail silently."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="notify_user", risk="draft", tags=("core",)),
+        PolicyContext(autonomy="assist", private=True),
+    )
+    assert decision.outcome == "allow"
+
+
+def test_the_interlock_survives_an_approval_in_hand():
+    """`agent approvals approve` replays a queued call in a *fresh* context that has
+    forgotten the mailbox was ever read. That is precisely why these are hard denies rather
+    than require_approval: a queued call is a delayed allow."""
+    decision = _shipped().evaluate(
+        ToolCallInfo(name="web_fetch", risk="read", tags=("web", "untrusted", "egress")),
+        PolicyContext(autonomy="trusted", private=True, approved=True),
+    )
+    assert decision.outcome == "deny"
+
+
+def test_the_mailbox_is_never_read_unattended():
+    for origin, expected in (("daemon", "deny"), ("interactive", "allow")):
+        decision = _shipped().evaluate(
+            ToolCallInfo(name="gmail_search", risk="read", tags=("mail", "untrusted")),
+            PolicyContext(autonomy="observe" if origin == "daemon" else "assist", origin=origin),
+        )
+        assert decision.outcome == expected, origin
+
+
+# Tools that may still run once the mailbox has been opened. Everything else must be denied,
+# so adding a tool forces a deliberate decision here rather than silently widening the door.
+PRIVATE_SAFE = {
+    "fs_list", "fs_read", "fs_search", "gmail_message", "gmail_search", "goal_upsert",
+    "goals_list", "memory_history", "memory_remember", "memory_search", "notify_user",
+    "open_loop_add", "open_loop_close", "open_loops_list", "profile_read", "reminder_set",
+    "time_now", "tool_search",
+    # `delegate` is here only because this probe passes no arguments, and the rules that
+    # stop it are keyed on `agent`, which the schema makes required. The real denials are
+    # asserted by name above; nothing can call delegate without saying which sub-agent.
+    "delegate",
+}
+
+
+def test_every_new_tool_must_decide_where_it_stands():
+    """Inverted default. A tool added next year is denied under `private` unless somebody
+    puts it on this list on purpose — the same philosophy as the send-tool tripwires."""
+    from agentd.tools.registry import build_registry
+
+    engine = _shipped()
+    for tool in build_registry().enabled():
+        decision = engine.evaluate(
+            ToolCallInfo(name=tool.name, risk=tool.risk, tags=tool.tags, source=tool.source),
+            PolicyContext(autonomy="assist", private=True),
+        )
+        if tool.name in PRIVATE_SAFE:
+            continue
+        assert decision.outcome == "deny", f"{tool.name} is neither denied nor on PRIVATE_SAFE"

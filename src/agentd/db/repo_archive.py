@@ -150,6 +150,24 @@ async def events_for_session(
     )
 
 
+async def session_read_private(session_id: UUID) -> bool:
+    """Has this session ever pulled the user's private data into context?
+
+    The interlock that keeps mail from leaving the box lives on the in-process `Session`, so
+    a resumed conversation would otherwise start with the door open again. The archive is
+    the durable record: every private tool result was written with `payload->>'private'`.
+    """
+    row = await fetch_one(
+        """
+        SELECT 1 AS found FROM raw_events
+        WHERE session_id = %s AND kind = 'tool_result' AND payload->>'private' = 'true'
+        LIMIT 1
+        """,
+        (session_id,),
+    )
+    return row is not None
+
+
 async def max_event_id(session_id: UUID) -> int:
     row = await fetch_one(
         "SELECT COALESCE(max(id), 0) AS m FROM raw_events WHERE session_id = %s", (session_id,)

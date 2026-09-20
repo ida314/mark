@@ -75,7 +75,10 @@ class ToolExecutor:
             name=tool.name, risk=tool.risk, tags=tool.tags, source=tool.source,
             args=args, path_args=tool.path_args,
         )
-        pctx = PolicyContext(autonomy=ctx.autonomy, origin=ctx.origin, tainted=ctx.tainted)
+        pctx = PolicyContext(
+            autonomy=ctx.autonomy, origin=ctx.origin, tainted=ctx.tainted,
+            private=ctx.private,
+        )
         with otel.span("policy.evaluate", {"tool.name": name}):
             decision = self.engine.evaluate(call, pctx)
 
@@ -120,7 +123,9 @@ class ToolExecutor:
         result.content = _truncate(result.content, self.max_result_chars)
         if result.trust == "untrusted" or not tool.trust_output:
             result.trust = "untrusted"
-            result.content = UNTRUSTED_WRAPPER.format(source=tool.name, body=result.content)
+            result.content = UNTRUSTED_WRAPPER.format(
+                source=tool.name, body=_seal(result.content)
+            )
 
         await repo_ops.write_action(
             ActionRecord(
@@ -132,6 +137,7 @@ class ToolExecutor:
                 policy={
                     "outcome": decision.outcome, "rule": decision.rule_id,
                     "autonomy": ctx.autonomy, "origin": ctx.origin, "tainted": ctx.tainted,
+                    "private": ctx.private,
                     "note": approval_note,
                 },
                 undo=result.undo,
@@ -201,6 +207,20 @@ def _parse_args(raw: dict[str, Any] | str) -> tuple[dict[str, Any], str | None]:
     if not isinstance(parsed, dict):
         return {}, "Arguments must be a JSON object"
     return parsed, None
+
+
+def _seal(body: str) -> str:
+    """Stop a body from closing the quarantine it is being put inside.
+
+    `UNTRUSTED_WRAPPER` is a pair of literal tags around attacker-influenced text. Without
+    this, a web page or an email containing `</untrusted_content>` ends the block early and
+    everything after it reads to the model as our own narration - which is the whole
+    boundary, defeated by one string a stranger chose. A zero-width space keeps the text
+    legible to a human reading `agent why` while making the tag no longer a tag.
+    """
+    return body.replace("<untrusted_content", "<\u200buntrusted_content").replace(
+        "</untrusted_content", "</\u200buntrusted_content"
+    )
 
 
 def _truncate(text: str, limit: int) -> str:

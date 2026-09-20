@@ -38,6 +38,9 @@ class Match(BaseModel):
     autonomy: list[Autonomy] | None = None
     origin: list[str] | None = None
     tainted: bool | None = None
+    # True matches only once a tool marked private_output has run in this session - the
+    # user's own data is in context. Stronger than `tainted`, which any web page raises.
+    private: bool | None = None
     args: dict[str, ArgMatcher] = Field(default_factory=dict)
 
 

@@ -121,6 +121,7 @@ def test_the_notifier_never_calls_notify():
 
 async def test_quiet_hours_hold_chatter_but_let_errors_through(cfg, monkeypatch):
     cfg.ntfy.enabled = True
+    cfg.ntfy.quiet_hours = None
     cfg.daemon.quiet_hours = (23, 8)
     monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: True)
 
@@ -185,6 +186,9 @@ async def test_why_held_names_the_min_level(cfg):
 
 async def test_why_held_says_when_quiet_hours_end(cfg, monkeypatch):
     cfg.ntfy.enabled = True
+    # Explicit, because `cfg` is built from the real config file: whoever runs this suite may
+    # have set [ntfy] quiet_hours, and a test that silently inherits it tests their machine.
+    cfg.ntfy.quiet_hours = None
     cfg.daemon.quiet_hours = (23, 8)
     monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: True)
 
@@ -260,3 +264,21 @@ async def test_push_can_keep_its_own_window(cfg, monkeypatch):
 
     three_am = datetime(2026, 9, 20, 3, tzinfo=ZoneInfo("America/New_York"))
     assert in_quiet_hours(three_am, tuple(cfg.daemon.quiet_hours)) is True
+
+
+async def test_a_credential_in_a_title_does_not_leave_the_box(cfg):
+    """`_redact` only ever saw the body. A title is pushed to a phone over the network like
+    everything else, and it is also an HTTP header value, so a newline in one is header
+    injection rather than a cosmetic problem."""
+    headers = notifier._headers(
+        {"title": "token is ghp_0123456789abcdefghijklmnopqrstuvwxyz", "level": "info"}, cfg
+    )
+    assert "ghp_" not in headers["Title"]
+
+    flattened = notifier._headers({"title": "line one\nline two", "level": "info"}, cfg)
+    assert "\n" not in flattened["Title"]
+    assert flattened["Title"] == "line one line two"
+
+
+async def test_an_empty_title_still_says_something(cfg):
+    assert notifier._headers({"title": "", "level": "info"}, cfg)["Title"] == "agent"
