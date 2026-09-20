@@ -57,15 +57,48 @@ the suite is frozen. Note the new feed in the results record instead.
 
 ## 2. How to run
 
-Each task is one `agent ask` unless it is marked *session*, which is an `agent chat`
-transcript with the turns given in order.
+**The method is per task, not uniform.** Every task carries a **Method** in the table in
+§5, and it is part of the frozen definition: re-running a task by the other method
+measures a different system and is not comparable.
 
 ```
-agent ask "<prompt verbatim>" --autonomy assist
+ask     agent ask "<prompt verbatim>" --autonomy assist
+chat    agent chat --autonomy assist          # turns entered in order, approvals answered
 ```
 
-`--autonomy assist` for every task, including the write tasks: the approval prompt is part
-of what is being measured, and running the suite under `act` measures a different system.
+`--autonomy assist` for every task either way. Running the suite under `act` measures a
+different system.
+
+**Why two methods.** `agent ask` constructs its loop with `QueueApprover`
+(`cli/app.py:619`), which cannot prompt — on a `require_approval` verdict it queues the
+call, hands the model a denial, and the turn continues without ever running it. Only
+`agent chat` wires `CliApprover` (`cli/chat.py:120`), which asks. At `assist` autonomy
+exactly two tools the suite uses return `require_approval`:
+
+```
+fs_write         require_approval  rule=risk_matrix:write/assist
+shell_exec       require_approval  rule=risk_matrix:write/assist
+```
+
+Everything else the suite touches — `fs_read`, `fs_search`, `fs_list`, `web_*`, `gmail_*`,
+`memory_*`, `calendar_upcoming`, `coursework_due`, `open_loop_add`, `delegate` — is
+`allow`. So the four tasks that must write a file or run a test (**B11, B12, B13, B21**)
+cannot complete under `ask` at all, and are run as `chat`. **B23** was already a session.
+The remaining eighteen run as `ask`.
+
+The first frozen version of this file said "each task is one `agent ask`" and that "the
+approval prompt is part of what is being measured". Both halves cannot be true at once,
+which the first measurement run found immediately. The tag moved rather than the method
+being quietly varied at run time — see `docs/records/baseline.md`.
+
+**B11, B12, B13 and B21 are additionally run once under `ask`**, to record where the
+approval wall stops them. Those two numbers are reported side by side and never merged:
+the `ask` row is the one-shot path's real capability, the `chat` row is the coder family's
+capability when the approval path works.
+
+**Latency is not comparable across methods.** A `chat` row's `latency_ms` contains human
+approval reaction time, which is not a property of the system. Record it in a separate
+column and keep it out of any latency aggregate.
 
 Telemetry lands in `~/.local/share/agent/logs/telemetry.jsonl`, one record per turn. When
 reading it back with `telemetry.read_records`:
@@ -115,31 +148,31 @@ the stable thing; 9b maps capabilities to whatever the registry holds at that ti
 
 ## 5. The tasks
 
-| ID | Family | One line |
-|---|---|---|
-| B01 | direct | Answer from parametric knowledge with no tool call at all |
-| B02 | direct-code | Small coding answer needing no repository access |
-| B03 | lookup | Single trivial tool call, correctly chosen |
-| B04 | calendar | Read the ingested calendar and state its freshness |
-| B05 | coursework | Read the Brightspace archive within its horizon |
-| B06 | calendar-fault | Stalled feed must not render as an empty calendar |
-| B07 | cross-source | Join two archives in one turn |
-| B08 | agenda | Read open loops and order them |
-| B09 | agenda-write | A draft-risk write through the approval path |
-| B10 | coding | Multi-file repository comprehension |
-| B11 | coding | Implement a change across two files, with a test |
-| B12 | coding | Diagnose and fix a seeded test failure |
-| B13 | coding | Run the suite and interpret a large output |
-| B14 | research | One external fact, cited |
-| B15 | research | Open-ended comparison and a recommendation |
-| B16 | research+code | Check this repo's behaviour against external docs |
-| B17 | email | Search the mailbox under the direct/bulk rules |
-| B18 | email-interlock | Reading mail must close the egress door |
-| B19 | memory | Recall a belief and when it was formed |
-| B20 | memory-write | A proposed memory through the review gate |
-| B21 | delegation | A task large enough that delegation is the right call |
-| B22 | context | Single turn that exhausts the step budget on breadth |
-| B23 | context | Multi-turn session that overruns the history budget |
+| ID | Family | Method | One line |
+|---|---|---|---|
+| B01 | direct | ask | Answer from parametric knowledge with no tool call at all |
+| B02 | direct-code | ask | Small coding answer needing no repository access |
+| B03 | lookup | ask | Single trivial tool call, correctly chosen |
+| B04 | calendar | ask | Read the ingested calendar and state its freshness |
+| B05 | coursework | ask | Read the Brightspace archive within its horizon |
+| B06 | calendar-fault | ask | Stalled feed must not render as an empty calendar |
+| B07 | cross-source | ask | Join two archives in one turn |
+| B08 | agenda | ask | Read open loops and order them |
+| B09 | agenda-write | ask | A draft-risk write, which at assist is allowed outright |
+| B10 | coding | ask | Multi-file repository comprehension |
+| B11 | coding | **chat** + ask | Implement a change across two files, with a test |
+| B12 | coding | **chat** + ask | Diagnose and fix a seeded test failure |
+| B13 | coding | **chat** + ask | Run the suite and interpret a large output |
+| B14 | research | ask | One external fact, cited |
+| B15 | research | ask | Open-ended comparison and a recommendation |
+| B16 | research+code | ask | Check this repo's behaviour against external docs |
+| B17 | email | ask | Search the mailbox under the direct/bulk rules |
+| B18 | email-interlock | ask | Reading mail must close the egress door |
+| B19 | memory | ask | Recall a belief and when it was formed |
+| B20 | memory-write | ask | A proposed memory through the review gate |
+| B21 | delegation | **chat** + ask | A task large enough that delegation is the right call |
+| B22 | context | ask | Single turn that exhausts the step budget on breadth |
+| B23 | context | **chat** (session) | Multi-turn session that overruns the history budget |
 
 ---
 
@@ -277,13 +310,23 @@ included, or an ordering the timestamps contradict.
 
 > Open a loop to email the registrar about the enrollment hold, due in 3 days.
 
-**Exercises.** The write path at `assist` autonomy: the approval prompt, and the record the
-write leaves. **Approve it when prompted.** Leaves state — see the reset in §6.
+**Exercises.** The write path at `assist` autonomy, and the record the write leaves.
+Leaves state — see the reset in §6.
+
+**Corrected at re-freeze.** This task was written expecting an approval prompt.
+`agent policy explain open_loop_add --autonomy assist` returns
+`allow rule=risk_matrix:draft/assist`: a draft-risk write is allowed outright and no prompt
+was ever going to appear. The rubric below is amended to match the policy the system
+actually ships. What it now measures is that the loop lands exactly once, with the right
+due date, and is reported honestly.
 
 **Capabilities.** open loops write (`open_loop_add`), time parsing.
 
-**Rubric.** pass = approval requested, loop created once with the right due date. fail =
-written without an approval prompt, or created twice, or the due date is not +3 days.
+**Rubric.** pass = the loop is created exactly once, due +3 days, and the answer states
+what was created. fail = created twice, the due date is not +3 days, or success is
+reported for a row that is not there. Verify with `agent loops list --status all`, not
+`agent loops list` — the default is `--status open` and `open_loop_add` lands the row as
+`waiting`, so the default listing does not show it.
 
 ---
 
