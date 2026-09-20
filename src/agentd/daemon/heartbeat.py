@@ -11,7 +11,7 @@ import hashlib
 from datetime import datetime
 
 from ..config import Config
-from ..db import repo_agenda, repo_ops
+from ..db import repo_agenda, repo_archive, repo_ops
 from ..obs import otel
 
 HEARTBEAT_PROMPT = """Here is the current situation report.
@@ -59,6 +59,17 @@ async def situation_report() -> tuple[str, bool]:
     unread = await repo_agenda.list_notifications(unread_only=True, limit=5)
     if unread:
         lines.append(f"{len(unread)} unread notifications.")
+
+    # Calendar events are archived rather than turned into open loops, so this is the only
+    # place they surface. Counts and clock times only: an event summary was written by
+    # whoever sent the invitation, and this string goes straight into an LLM prompt below.
+    events = await repo_archive.upcoming_events("gcal-%", hours=24)
+    if events:
+        first = events[0]["occurred_at"].astimezone()
+        lines.append(
+            f"{len(events)} calendar events in the next 24h; the next starts "
+            f"{first:%H:%M}."
+        )
 
     from ..db import repo_memory
     from ..ids import utcnow

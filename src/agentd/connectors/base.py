@@ -208,6 +208,29 @@ async def propose_fact(
     )
 
 
+# --- what a connector opened -------------------------------------------------
+
+
+async def tracked_loops(connector: str) -> list[dict]:
+    """Open loops this connector opened, with the item they came from.
+
+    The join is `open_loops.source_event_id -> raw_events.event_id`, which is why migration
+    0007 indexes `(payload->>'connector', payload->>'external_id')`. Every sweep needs this
+    and none of them should be writing the SQL again.
+    """
+    from ..db.pool import fetch_all
+
+    return await fetch_all(
+        """
+        SELECT l.id, l.title, e.payload->>'external_id' AS external_id, e.occurred_at
+        FROM open_loops l
+        JOIN raw_events e ON e.event_id = l.source_event_id
+        WHERE l.status <> 'closed' AND e.payload->>'connector' = %s
+        """,
+        (connector,),
+    )
+
+
 # --- one poll ----------------------------------------------------------------
 
 

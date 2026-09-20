@@ -406,6 +406,19 @@ def connectors_disable(name: str) -> None:
     raise typer.Exit(run(commands_connect.set_enabled(get_config(), name, False, console)))
 
 
+@connectors_app.command("auth")
+def connectors_auth(
+    label: str = typer.Argument(..., help="a key under [connectors.google.accounts]"),
+    port: int = typer.Option(
+        0, help="fixed loopback port, for `ssh -L` when the browser is on another machine"
+    ),
+) -> None:
+    """Authorise one Google account. Opens a consent page; stores only a refresh token."""
+    from . import commands_connect
+
+    raise typer.Exit(run(commands_connect.google_auth(get_config(), label, console, port=port)))
+
+
 @connectors_app.command("reset")
 def connectors_reset(name: str) -> None:
     """Clear the cursor so the next poll re-reads everything."""

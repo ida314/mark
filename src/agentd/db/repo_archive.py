@@ -170,6 +170,29 @@ async def recent_messages(session_id: UUID, limit: int = 200) -> list[dict]:
     return list(reversed(rows))
 
 
+async def upcoming_events(kind_like: str, hours: int, limit: int = 50) -> list[dict]:
+    """Connector-archived events starting in the next `hours`, most recent version of each.
+
+    `DISTINCT ON` is doing real work here. The archive is append-only and version-sensitive
+    by design, so an event that was moved twice is three rows; the last one written is the
+    one that is true, and counting all three would report a day three times as full as it is.
+    """
+    rows = await fetch_all(
+        """
+        SELECT DISTINCT ON (payload->>'external_id') occurred_at, kind, payload
+        FROM raw_events
+        WHERE kind LIKE %s
+          AND payload->>'external_id' IS NOT NULL
+          AND occurred_at >= now()
+          AND occurred_at < now() + make_interval(hours => %s)
+        ORDER BY payload->>'external_id', id DESC
+        LIMIT %s
+        """,
+        (kind_like, hours, limit),
+    )
+    return sorted(rows, key=lambda r: r["occurred_at"])
+
+
 async def set_consolidated_upto(session_id: UUID, event_id: int) -> None:
     async with connection() as conn:
         await conn.execute(

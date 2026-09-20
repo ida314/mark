@@ -28,4 +28,27 @@ def all_connectors(cfg: Config) -> list[Connector]:
         from .github import GithubConnector
 
         out.append(GithubConnector(cfg))
+
+    # One connector per account per service, not one per service. Gmail and Calendar share a
+    # credential but not a failure: Gmail being rate-limited at midday should not stop the
+    # calendar poll, and `agent connectors list` should say which of the two is unhappy.
+    if cfg.connectors.google.enabled:
+        from .gcal import GoogleCalendarConnector
+        from .gmail import GmailConnector
+
+        for label, account in sorted(cfg.connectors.google.accounts.items()):
+            if account.mail:
+                out.append(GmailConnector(cfg, label))
+            if account.calendar:
+                out.append(GoogleCalendarConnector(cfg, label))
+
+    if cfg.connectors.imap.enabled:
+        from .imap_mail import ImapConnector
+
+        out.extend(ImapConnector(cfg, label) for label in sorted(cfg.connectors.imap.accounts))
+
+    if cfg.connectors.brightspace.enabled:
+        from .brightspace import BrightspaceConnector
+
+        out.append(BrightspaceConnector(cfg))
     return out

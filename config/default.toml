@@ -154,3 +154,84 @@ review_due_in_h = 0       # 0 invents no deadlines — and so the heartbeat stay
 # Which notification reasons become an open loop, and which of those also reach your phone.
 include_reasons = ["review_requested", "assign", "mention"]
 notify_reasons = ["review_requested", "mention"]
+
+# --- Google: Gmail and Calendar, one OAuth client, one account entry each -----
+#
+# The credential is a refresh token obtained once in a browser, and the scopes are
+# read-only: gmail.readonly cannot mark a message read or send one, calendar.readonly
+# cannot write an event. That is enforced by Google rather than by this code's restraint.
+#
+#   1. In a Google Cloud project, enable the Gmail API and the Calendar API, and create an
+#      OAuth client of type "Desktop app".
+#   2. agent secrets set google/client client_id
+#      agent secrets set google/client client_secret
+#   3. agent connectors auth <label>        # opens a consent page, stores a refresh token
+#      #  on a headless box: agent connectors auth <label> --port 8771
+#      #  with `ssh -L 8771:127.0.0.1:8771 thisbox` from wherever the browser is
+#      #  (any free port: Google exempts loopback redirects from exact URI matching)
+#   4. agent connectors poll gmail-<label>
+#
+# Each account under [connectors.google.accounts] becomes up to two connectors, gmail-<label>
+# and gcal-<label>, because one being rate-limited should not stall the other. The label is
+# the connector name, so it is lowercase letters, digits, - and _ only.
+[connectors.google]
+enabled = false
+
+# [connectors.google.accounts.nyu]
+# address = "you@nyu.edu"       # the refresh token lives at google/<address>
+# mail = true
+# calendar = true
+# calendar_id = "primary"
+# query = "is:unread in:inbox"  # server-side narrowing, before the rules below
+# horizon_days = 14             # calendar: how far ahead one poll looks
+# poll_interval_s = 120
+#
+# [connectors.google.accounts.nyu.rules]
+# direct_only = true            # you in To or Cc
+# skip_bulk = true              # List-Unsubscribe, List-Id, Precedence, Auto-Submitted
+# aliases = ["first.last@nyu.edu"]   # other addresses that are also you
+# skip_senders = ["@noreply.example.edu", "notifications@github.com"]
+# due_in_h = 0                  # 0 invents no deadlines; delivery is then via push only
+# notify = true
+
+# --- IMAP: a mailbox with no API ---------------------------------------------
+#
+# A mail password is the whole mailbox - there is no read-only scope to hide behind - so
+# the read-only guarantee is structural: the mailbox is opened with EXAMINE and headers are
+# fetched with BODY.PEEK, neither of which can set \Seen.
+#
+#   agent secrets set imap/<label> password
+#   agent connectors poll imap-<label>
+[connectors.imap]
+enabled = false
+
+# [connectors.imap.accounts.dodds]
+# host = "mail.hostedemail.com"
+# port = 993
+# username = "you@example.org"
+# address = "you@example.org"   # what "addressed to you" means here; defaults to username
+# mailbox = "INBOX"
+# poll_interval_s = 300
+#
+# [connectors.imap.accounts.dodds.rules]
+# direct_only = true
+# skip_bulk = true
+
+# --- Brightspace: the per-user calendar feed ----------------------------------
+#
+# Not the Valence API, which needs an application key a D2L administrator registers. In
+# Brightspace: Calendar -> Subscribe, copy the link, then
+#
+#   agent secrets set brightspace/nyu ics_url
+#
+# The link contains a token, so it is a credential and lives in the vault. Unlike mail and
+# GitHub this connector does set a real due_at, because somebody else set that deadline -
+# which means the heartbeat will speak up once one passes.
+[connectors.brightspace]
+enabled = false
+label = "nyu"
+horizon_days = 21
+poll_interval_s = 1800
+all_day_loops = false   # reading week is not a deadline
+require = []            # e.g. ["due"] once you have seen what your own feed contains
+notify = true

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / "config" / "default.toml"
@@ -159,6 +160,128 @@ class GithubConnectorConfig(BaseModel):
     )
 
 
+CONNECTOR_LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,30}")
+
+
+def _check_labels(accounts: dict[str, Any]) -> dict[str, Any]:
+    """A label is not cosmetic: it becomes the connector's name, which is the
+    `connector_state` primary key and the `raw_events` kind prefix. Rejecting a bad one here
+    is how a typo in config.toml fails at load rather than as a mystery row in the archive."""
+    for label in accounts:
+        if not CONNECTOR_LABEL.fullmatch(label):
+            raise ValueError(
+                f"account label {label!r} must be lowercase letters, digits, - or _ "
+                "(it becomes the connector name)"
+            )
+    return accounts
+
+
+class MailRules(BaseModel):
+    """What counts as mail that is waiting on you.
+
+    This is your noise budget and the only part of the mail connectors that is yours to
+    tune. Titles are not here, and will not be: an open-loop title reaches an LLM prompt
+    through the heartbeat, so composing one is an injection boundary rather than formatting.
+    """
+
+    # You in To or Cc. Off means anything unread counts, including mail you were bcc'd on
+    # and everything a mailing list sends - which is a different product.
+    direct_only: bool = True
+    # List-Unsubscribe, List-Id, Precedence: bulk/list/junk, Auto-Submitted: anything but no.
+    skip_bulk: bool = True
+    # Exact addresses, or "@domain" to mean the whole domain.
+    skip_senders: list[str] = Field(default_factory=list)
+    # Other addresses that are also you. NYU hands out a netid address and a name-based
+    # alias for the same mailbox, and `direct_only` would drop half your mail without this.
+    aliases: list[str] = Field(default_factory=list)
+    # 0 invents no deadlines, exactly as GitHub's review_due_in_h does - and with the same
+    # consequence: overdue_loops() only sees loops with a due_at, so at 0 the heartbeat stays
+    # quiet about mail and delivery is entirely via push.
+    due_in_h: int = 0
+    notify: bool = True
+
+
+class GoogleAccountConfig(BaseModel):
+    """One Google account. Mail and calendar share a credential, so they share an entry -
+    but they are two connectors, because one being rate-limited should not stall the other."""
+
+    address: str = ""  # the refresh token lives in the vault at google/<address>
+    mail: bool = True
+    calendar: bool = False
+    calendar_id: str = "primary"
+    # Server-side narrowing, so the rules below run over a small set. Kept broad on purpose:
+    # `category:primary` silently matches nothing on a Workspace account without tabs.
+    query: str = "is:unread in:inbox"
+    max_results: int = 50
+    horizon_days: int = 14  # calendar: how far ahead one poll looks
+    poll_interval_s: float = 120.0
+    sweep_interval_s: float = 3600.0
+    rules: MailRules = Field(default_factory=MailRules)
+
+
+class GoogleConnectorConfig(BaseModel):
+    enabled: bool = False
+    gmail_api_base: str = "https://gmail.googleapis.com"
+    calendar_api_base: str = "https://www.googleapis.com"
+    token_uri: str = "https://oauth2.googleapis.com/token"
+    auth_uri: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    accounts: dict[str, GoogleAccountConfig] = Field(default_factory=dict)
+
+    _labels = field_validator("accounts")(_check_labels)
+
+
+class ImapAccountConfig(BaseModel):
+    """A mailbox reachable only by IMAP, which is most of them.
+
+    Polled less often than Gmail because every poll is a fresh TLS connection and a LOGIN
+    rather than a conditional GET; there is no cheap 304 to hide behind.
+    """
+
+    host: str = ""
+    port: int = 993
+    username: str = ""  # the password lives in the vault at imap/<label>
+    address: str = ""  # what "addressed to you" means here; defaults to username
+    mailbox: str = "INBOX"
+    poll_interval_s: float = 300.0
+    sweep_interval_s: float = 3600.0
+    rules: MailRules = Field(default_factory=MailRules)
+
+    def me(self) -> str:
+        return self.address or self.username
+
+
+class ImapConnectorConfig(BaseModel):
+    enabled: bool = False
+    accounts: dict[str, ImapAccountConfig] = Field(default_factory=dict)
+
+    _labels = field_validator("accounts")(_check_labels)
+
+
+class BrightspaceConnectorConfig(BaseModel):
+    """The per-user iCal feed, not the Valence API.
+
+    Valence would give announcements and grades, and needs an application key that a D2L
+    administrator registers - which a student cannot do. The calendar feed needs nobody: it
+    is a URL with a token in it, it is read-only, and it carries the thing that actually has
+    a deadline. The URL is therefore a credential and lives in the vault, not in config.toml.
+    """
+
+    enabled: bool = False
+    label: str = "nyu"  # the feed URL lives in the vault at brightspace/<label>
+    horizon_days: int = 21
+    poll_interval_s: float = 1800.0
+    # An all-day entry in a course calendar is reading week or a holiday, not something you
+    # owe anybody. Archived either way; this decides whether it also becomes a loop.
+    all_day_loops: bool = False
+    # Case-insensitive substrings a summary must contain to become a loop. Empty means every
+    # timed event does. Set it to ["due"] once you have seen what your own feed actually
+    # contains - which `agent connectors poll brightspace` will show you.
+    require: list[str] = Field(default_factory=list)
+    # Unlike mail and GitHub, a due date is a real deadline somebody else set, so this
+    # connector does give its loops a due_at and the heartbeat does speak up about them.
+    notify: bool = True
+
+
 class ConnectorsConfig(BaseModel):
     """Daemon-side feeds. Not tools: the agent cannot call these and never sees their
     credentials."""
@@ -170,6 +293,11 @@ class ConnectorsConfig(BaseModel):
     notify_after_failures: int = 5
     disabled_recheck_s: float = 300.0
     github: GithubConnectorConfig = Field(default_factory=GithubConnectorConfig)
+    google: GoogleConnectorConfig = Field(default_factory=GoogleConnectorConfig)
+    imap: ImapConnectorConfig = Field(default_factory=ImapConnectorConfig)
+    brightspace: BrightspaceConnectorConfig = Field(
+        default_factory=BrightspaceConnectorConfig
+    )
 
 
 class McpServerConfig(BaseModel):

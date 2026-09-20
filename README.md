@@ -191,6 +191,77 @@ token is enough. An hourly unconditional sweep closes loops whose thread has lef
 list; the minute-by-minute poll is conditional and deliberately never closes anything, because a
 304 means "nothing changed", not "everything is finished".
 
+### Mail, calendars and coursework
+
+Four more connectors, all read-only, all holding their own credential. They share one rule
+with GitHub and with each other: an open-loop title is a sentence this code composed, and
+the sender's own words — subject lines, event summaries, course names — go into `detail`,
+which nothing renders to the model.
+
+| connector | source | credential | opens |
+|---|---|---|---|
+| `gmail-<label>` | Gmail API | OAuth refresh token, `gmail.readonly` | one loop per sender |
+| `gcal-<label>` | Calendar API | the same token, `calendar.readonly` | nothing — see below |
+| `imap-<label>` | any IMAP server | a password | one loop per sender |
+| `brightspace` | the per-user iCal feed | the feed URL | one loop per deadline, with a real `due_at` |
+
+**Google.** One Cloud project, one Desktop OAuth client, then one browser round trip per
+account:
+
+```bash
+agent secrets set google/client client_id        # and client_secret
+agent connectors auth nyu                        # --port 8771 + `ssh -L` if headless
+agent connectors poll gmail-nyu
+```
+
+Mail and calendar share a credential but are two connectors, because Gmail being rate-limited
+at midday should not stall the calendar poll, and `agent connectors list` should say which of
+the two is unhappy. The scopes are read-only, which is stronger than a promise: `gmail.readonly`
+cannot mark a message read, so seeing a message never changes your unread count — and that is
+what makes the hourly sweep meaningful, since your own inbox stays the source of truth for
+whether somebody is still waiting.
+
+**Why a calendar event is not an open loop.** It is not a thing waiting on you; it is a thing
+that will happen whether or not you act, and fourteen days of events would bury the loops that
+mean somebody is blocked. Events are archived, and the heartbeat says *how much* of the next
+24 hours is spoken for — a count and a clock time, never a summary, because a summary was
+written by whoever sent the invitation and the situation report goes straight into a prompt.
+
+**IMAP**, for the mailboxes with no API. A mail password is the whole mailbox; there is no
+read-only scope to hide behind, so the guarantee is structural and doubled: the mailbox is
+opened with `EXAMINE` and headers are fetched with `BODY.PEEK`, neither of which can set
+`\Seen`. This is also the one connector that ignores the `httpx.AsyncClient` the framework
+hands it — IMAP is a stateful TLS socket, so the conversation runs in a worker thread.
+
+**Brightspace** reads the per-user calendar feed, not the Valence API: Valence needs an
+application key that a D2L administrator registers, which a student cannot do. The cost is no
+announcements and no grades. The feed URL contains a token, so it is a credential and lives in
+the vault:
+
+```bash
+# Brightspace -> Calendar -> Subscribe, copy the link
+agent secrets set brightspace/nyu ics_url
+```
+
+Two failure modes are handled on purpose rather than discovered. A 200 carrying HTML is an SSO
+login page — what you get when the link is copied from the address bar — and is treated as an
+auth error, because reading it as "no events" would close every deadline you have. And a
+redirect to another host is refused outright, since the token is *in* the URL and following it
+would hand the credential to whoever controls the target.
+
+Unlike mail and GitHub, this connector sets a real `due_at`: somebody else set that deadline,
+which is exactly the case `overdue_loops()` exists for, so the heartbeat does speak up once one
+passes.
+
+**Your noise budget** is `[connectors.*.rules]`: `direct_only` (you in To or Cc), `skip_bulk`
+(`List-Unsubscribe`, `List-Id`, `Precedence`, `Auto-Submitted`), `aliases`, `skip_senders`,
+`due_in_h`, `notify`. Titles are not tunable and will not be; they are an injection boundary,
+not formatting.
+
+One design note worth knowing: **one loop per sender, not per message.** Five emails from the
+same person while you have not replied is one thing waiting on you. The sweep closes it when
+nothing from them is unread any more.
+
 ## Operating notes
 
 - **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint: the SIR router on

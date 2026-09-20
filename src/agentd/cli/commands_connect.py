@@ -7,8 +7,11 @@ the monkeypatch list in `tests/conftest.py` and makes each of these callable fro
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from .. import secrets as vault
@@ -51,10 +54,12 @@ async def render_list(cfg: Config, console: Console) -> None:
         state = states.get(connector.name, {})
         why = connector.configured()
         if why:
-            status, detail = "[yellow]not set up[/yellow]", why
+            # `why` is a shell command containing [section] names, and Rich reads square
+            # brackets as markup — unescaped, the part that tells you what to fix vanishes.
+            status, detail = "[yellow]not set up[/yellow]", escape(why)
         elif not state.get("enabled", True):
             status = "[red]disabled[/red]"
-            detail = state.get("disabled_reason") or "disabled by hand"
+            detail = escape(state.get("disabled_reason") or "disabled by hand")
         else:
             status = "[green]enabled[/green]"
             detail = (
@@ -81,7 +86,7 @@ async def poll_now(cfg: Config, name: str, console: Console) -> int:
 
     why = connector.configured()
     if why:
-        console.print(f"[yellow]{name} is not set up:[/yellow] {why}")
+        console.print(f"[yellow]{name} is not set up:[/yellow] {escape(why)}")
         return 1
 
     async with httpx.AsyncClient(
@@ -91,9 +96,9 @@ async def poll_now(cfg: Config, name: str, console: Console) -> int:
 
     state = await repo_connectors.load_state(name)
     if result is None:
-        console.print(f"[red]{name}: {state.get('last_error') or 'disabled'}[/red]")
+        console.print(f"[red]{name}: {escape(state.get('last_error') or 'disabled')}[/red]")
         if state.get("disabled_reason"):
-            console.print(f"[dim]{state['disabled_reason']}[/dim]")
+            console.print(f"[dim]{escape(state['disabled_reason'])}[/dim]")
         return 1
 
     console.print(
@@ -138,9 +143,13 @@ async def doctor_rows(cfg: Config, row) -> None:
         state = states.get(connector.name, {})
         why = connector.configured()
         if why:
-            row(f"connector:{connector.name}", None, why)
+            row(f"connector:{connector.name}", None, escape(why))
         elif not state.get("enabled", True):
-            row(f"connector:{connector.name}", False, state.get("disabled_reason") or "disabled")
+            row(
+                f"connector:{connector.name}",
+                False,
+                escape(state.get("disabled_reason") or "disabled"),
+            )
         else:
             ref = connector.vault_ref
             token = vault.get(ref, "token") if ref else None
@@ -151,3 +160,89 @@ async def doctor_rows(cfg: Config, row) -> None:
                 f"{state.get('items_seen', 0)} items"
                 + (f", token {token.fingerprint()}" if token else ""),
             )
+
+
+async def google_auth(cfg: Config, label: str, console: Console, *, port: int = 0) -> int:
+    """The one-time browser round trip that turns a Cloud OAuth client into a refresh token.
+
+    Loopback, not the old out-of-band flow, because Google removed that one. The practical
+    consequence on a headless box is that the browser has to reach 127.0.0.1 *on this
+    machine*, so `--port 8771` plus `ssh -L 8771:127.0.0.1:8771` is the documented way in
+    from a laptop. Not 8765, which this box gave to something else years ago. Google exempts
+    loopback redirects from exact URI matching, so a Desktop client accepts whichever port
+    you pick without registering it. The port is printed either way, so the failure mode is
+    visible rather than a consent page that hangs.
+
+    What lands in the vault is the refresh token and the scopes, never the access token: an
+    access token is worth an hour and caching it on disk would be a liability for no gain.
+    """
+    from ..connectors import google_auth as oauth
+
+    account = cfg.connectors.google.accounts.get(label)
+    if account is None:
+        known = ", ".join(sorted(cfg.connectors.google.accounts)) or "none configured"
+        console.print(f"[red]no Google account labelled {label}[/red] (have: {known})")
+        return 1
+    if not account.address:
+        console.print(f"[red]set [connectors.google.accounts.{label}] address first[/red]")
+        return 1
+    if vault.get(oauth.CLIENT_REF, "client_id") is None:
+        console.print(
+            f"[yellow]no OAuth client yet.[/yellow] Create a Desktop client in a Google Cloud "
+            f"project with the Gmail and Calendar APIs enabled, then:\n"
+            f"  agent secrets set {oauth.CLIENT_REF} client_id\n"
+            f"  agent secrets set {oauth.CLIENT_REF} client_secret"
+        )
+        return 1
+
+    scopes = [oauth.GMAIL_SCOPE] if account.mail else []
+    if account.calendar:
+        scopes.append(oauth.CALENDAR_SCOPE)
+    if not scopes:
+        console.print(f"[red]{label} has neither mail nor calendar enabled[/red]")
+        return 1
+
+    verifier, challenge = oauth.pkce_pair()
+    server, thread = oauth.serve_once(port, timeout_s=300.0)
+    bound = server.server_address[1]
+    redirect_uri = f"http://127.0.0.1:{bound}/"
+    client_id = vault.get(oauth.CLIENT_REF, "client_id")
+    url = oauth.build_auth_url(cfg, client_id.reveal(), redirect_uri, scopes, challenge,
+                               account.address)
+
+    console.print(f"Authorising [bold]{account.address}[/bold] for: {', '.join(scopes)}")
+    console.print(f"[dim]listening on 127.0.0.1:{bound} for the redirect[/dim]")
+    console.print("\nOpen this in a browser that can reach this machine's loopback:\n")
+    console.print(url)
+    console.print("\n[dim]waiting (5 minutes)...[/dim]")
+
+    await asyncio.to_thread(thread.join, 300.0)
+    server.server_close()
+    code, error = oauth._CodeHandler.code, oauth._CodeHandler.error
+    oauth._CodeHandler.code = oauth._CodeHandler.error = None
+    if error:
+        console.print(f"[red]Google refused: {error}[/red]")
+        return 1
+    if not code:
+        console.print("[red]no authorisation code arrived[/red] (the wait ran out)")
+        return 1
+
+    async with httpx.AsyncClient(timeout=cfg.connectors.timeout_s) as client:
+        try:
+            payload = await oauth.exchange_code(
+                cfg, client, code=code, verifier=verifier, redirect_uri=redirect_uri
+            )
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+    oauth.store(account.address, payload, scopes)
+
+    granted = set(str(payload.get("scope", "")).split())
+    missing = [s for s in scopes if s not in granted] if granted else []
+    console.print(f"[green]stored[/green] refresh token at {oauth.account_ref(account.address)}")
+    if missing:
+        # Google shows one checkbox per scope and the user can clear one. Saying so now beats
+        # a 403 from the calendar connector an hour later.
+        console.print(f"[yellow]not granted:[/yellow] {', '.join(missing)}")
+    console.print(f"Now: agent connectors poll gmail-{label}" if account.mail else "")
+    return 0

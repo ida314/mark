@@ -397,3 +397,27 @@ def test_the_framework_only_ever_archives_untrusted():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         }
         assert not called & {"insert_fact", "supersede_fact", "retract_fact"}
+
+
+# --- what a parked connector tells you ---------------------------------------
+
+
+async def test_the_command_that_fixes_a_connector_survives_the_renderer(cfg):
+    """`configured()` returns a shell command naming a TOML section, and Rich reads square
+    brackets as markup: unescaped, the listing prints "set  host and username" and drops the
+    one part that says where. Worth a test because the failure is silent and looks cosmetic.
+    """
+    from rich.console import Console
+
+    from agentd.cli import commands_connect
+    from agentd.config import ImapAccountConfig
+
+    cfg.connectors.enabled = True
+    cfg.connectors.imap.enabled = True
+    cfg.connectors.imap.accounts = {"dodds": ImapAccountConfig()}
+
+    console = Console(width=200, force_terminal=False, no_color=True)
+    with console.capture() as captured:
+        await commands_connect.render_list(cfg, console)
+
+    assert "[connectors.imap.accounts.dodds]" in captured.get()
