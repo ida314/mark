@@ -46,6 +46,7 @@ from ..config import Config, GoogleAccountConfig
 from ..db import repo_archive, repo_connectors
 from ..ids import utcnow
 from .base import ToolContext, ToolResult, describe_age, feed_health, flat, obj, tool
+from .effects import UNAUDITED
 
 MAX_EVENTS = 50
 DEFAULT_HOURS = 24
@@ -142,6 +143,7 @@ def one_line(row: dict[str, Any], now: datetime) -> str:
     tags=("calendar", "untrusted"),
     always_on=True,
     trust_output=False,
+    effect_class=UNAUDITED,
 )
 async def calendar_upcoming(args: dict, ctx: ToolContext) -> ToolResult:
     # Imported here, not at module scope, for the same reason `builtin_mail` does it:

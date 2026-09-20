@@ -27,7 +27,8 @@ def _mail_registry():
 
     reads_mail = Tool(
         name="reads_mail", description="reads the user's mailbox", parameters=obj(),
-        handler=handler, risk="read", tags=("mail",), trust_output=False, private_output=True,
+        handler=handler, effect_class="read", risk="read", tags=("mail",),
+        trust_output=False, private_output=True,
     )
     reg = Registry()
     reg.add(reads_mail, *builtin_web.TOOLS)

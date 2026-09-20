@@ -24,6 +24,7 @@ from mcp.client.stdio import stdio_client
 from .config import Config, McpServerConfig, get_config
 from .obs import otel
 from .tools.base import Tool, ToolContext, ToolResult
+from .tools.effects import UNSAFE_WRITE
 from .tools.registry import Registry, get_registry
 
 _NAME_OK = re.compile(r"[^a-zA-Z0-9_-]")
@@ -154,6 +155,12 @@ class ServerConnection:
             description=f"[{self.name}] {description}"[:1000],
             parameters=schema,
             handler=handler,
+            # A remote tool cannot be classified from here: the protocol has no effect
+            # class, `read_only_hint` is the server's own claim about itself, and this
+            # process did not write the thing on the other end. `unsafe_write` is the
+            # answer that cannot duplicate an action on resume. A per-server declaration
+            # in config would be the way to say otherwise, and nobody needs one yet.
+            effect_class=UNSAFE_WRITE,
             risk=_risk_for(spec, remote),
             tags=("mcp", self.name),
             source=f"mcp:{self.name}",

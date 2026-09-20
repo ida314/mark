@@ -41,6 +41,7 @@ from ..connectors import google_auth
 from ..connectors.base import ConnectorAuthError, ConnectorRateLimited, ConnectorTransient
 from ..connectors.gmail import METADATA_HEADERS
 from .base import ToolContext, ToolResult, flat, obj, required, tool
+from .effects import UNAUDITED
 
 MAX_RESULTS = 25
 DEFAULT_RESULTS = 10
@@ -246,6 +247,7 @@ def one_line(message: dict) -> str:
     always_on=True,
     trust_output=False,
     private_output=True,
+    effect_class=UNAUDITED,
 )
 async def gmail_search(args: dict, ctx: ToolContext) -> ToolResult:
     from ..config import get_config
@@ -297,6 +299,7 @@ async def gmail_search(args: dict, ctx: ToolContext) -> ToolResult:
     always_on=True,
     trust_output=False,
     private_output=True,
+    effect_class=UNAUDITED,
 )
 async def gmail_message(args: dict, ctx: ToolContext) -> ToolResult:
     from ..config import get_config

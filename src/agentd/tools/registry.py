@@ -13,6 +13,7 @@ from typing import Any
 from ..config import Config, get_config
 from ..db import repo_ops
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED, check_effect_class
 
 ALWAYS_EXPOSE_LIMIT = 20
 SIMILARITY_FLOOR = 0.30
@@ -24,7 +25,16 @@ class Registry:
     tools: dict[str, Tool] = field(default_factory=dict)
 
     def add(self, *tools: Tool) -> None:
+        """Register tools, refusing any that has not said whether re-running it is safe.
+
+        The check is here as well as in `Tool.__post_init__` on purpose, and the second one
+        is not redundant: `effect_class` is a mutable field on a plain dataclass, an MCP
+        server hands over tools this process did not write, and a duck-typed stand-in never
+        runs `__post_init__` at all. The constructor is the early loud failure; this is the
+        one that binds everything that reaches the registry by another road.
+        """
         for t in tools:
+            check_effect_class(t.name, getattr(t, "effect_class", None))
             self.tools[t.name] = t
 
     def get(self, name: str) -> Tool | None:
@@ -152,6 +162,7 @@ def tool_search_tool(registry: Registry) -> Tool:
         "tool_search",
         "Find tools available beyond the ones already listed, by describing what you need.",
         required(obj(query={"type": "string"}), "query"),
+        effect_class=UNAUDITED,
         tags=("core",),
         always_on=True,
     )

@@ -272,7 +272,7 @@ async def test_untrusted_content_cannot_close_its_own_wrapper(cfg):
 
     tool = Tool(
         name="hostile_source", description="returns attacker text", parameters=obj(),
-        handler=handler, risk="read", trust_output=False,
+        handler=handler, effect_class="read", risk="read", trust_output=False,
     )
     registry = Registry()
     registry.add(tool)
@@ -300,7 +300,8 @@ async def test_a_private_tool_raises_the_flag_the_interlock_reads(cfg):
 
     tool = Tool(
         name="reads_private", description="reads the user's data", parameters=obj(),
-        handler=handler, risk="read", trust_output=False, private_output=True,
+        handler=handler, effect_class="read", risk="read", trust_output=False,
+        private_output=True,
     )
     registry = Registry()
     registry.add(tool)

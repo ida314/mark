@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from .effects import EffectClass, check_effect_class
+
 Risk = str  # read | draft | write | external | destructive
 
 
@@ -61,6 +63,12 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema for the arguments
     handler: Handler
+    # Whether re-running this call after a crash is safe: read | idempotent_write |
+    # unsafe_write, defined in `effects.py`. Keyword-only and with no default, so the
+    # question is answered where the tool is written rather than inferred later by
+    # something that cannot know. Distinct from `risk`, which asks whether the user should
+    # be *asked first*; two different questions with two different wrong answers.
+    effect_class: EffectClass = field(kw_only=True)
     risk: Risk = "read"
     tags: tuple[str, ...] = ()
     path_args: tuple[str, ...] = ()
@@ -74,6 +82,9 @@ class Tool:
     private_output: bool = False
     preview: PreviewFn | None = None
     enabled: bool = True
+
+    def __post_init__(self) -> None:
+        check_effect_class(self.name, self.effect_class)
 
     @property
     def needs_reason(self) -> bool:
@@ -111,6 +122,7 @@ def tool(
     description: str,
     parameters: dict[str, Any],
     *,
+    effect_class: EffectClass,
     risk: Risk = "read",
     tags: tuple[str, ...] = (),
     path_args: tuple[str, ...] = (),
@@ -125,6 +137,7 @@ def tool(
             description=description,
             parameters=parameters,
             handler=handler,
+            effect_class=effect_class,
             risk=risk,
             tags=tags,
             path_args=path_args,

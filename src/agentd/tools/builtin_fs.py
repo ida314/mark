@@ -10,6 +10,7 @@ from pathlib import Path
 from ..config import get_config
 from ..ids import utcnow
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED
 
 MAX_READ_BYTES = 400_000
 
@@ -28,6 +29,7 @@ def _p(path: str) -> Path:
     required(obj(path={"type": "string", "description": "Directory to list"}), "path"),
     tags=("fs",),
     path_args=("path",),
+    effect_class=UNAUDITED,
 )
 async def fs_list(args: dict, ctx: ToolContext) -> ToolResult:
     path = _p(args["path"])
@@ -57,6 +59,7 @@ async def fs_list(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     tags=("fs",),
     path_args=("path",),
+    effect_class=UNAUDITED,
 )
 async def fs_read(args: dict, ctx: ToolContext) -> ToolResult:
     path = _p(args["path"])
@@ -89,6 +92,7 @@ async def fs_read(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     tags=("fs",),
     path_args=("path",),
+    effect_class=UNAUDITED,
 )
 async def fs_search(args: dict, ctx: ToolContext) -> ToolResult:
     rg = shutil.which("rg")
@@ -144,6 +148,7 @@ def _write_preview(args: dict) -> str:
     tags=("fs",),
     path_args=("path",),
     preview=_write_preview,
+    effect_class=UNAUDITED,
 )
 async def fs_write(args: dict, ctx: ToolContext) -> ToolResult:
     cfg = get_config()

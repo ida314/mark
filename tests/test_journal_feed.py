@@ -199,7 +199,7 @@ async def test_a_subscriber_is_told_a_tool_started_before_that_tool_returns(cfg,
     registry.add(
         Tool(
             name="slow_thing", description="waits to be watched", parameters=obj(),
-            handler=handler, risk="read",
+            handler=handler, effect_class="read", risk="read",
         )
     )
     loop = AgentLoop(

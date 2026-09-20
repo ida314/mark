@@ -57,6 +57,12 @@ async def test_a_read_only_hint_counts_only_when_the_server_is_trusted_to_say_so
     try:
         assert registry.get(qualified_name("echo", "peek")).risk == "read"
         assert registry.get(qualified_name("echo", "echo")).risk == "external"
+        # The hint moves `risk`, which asks whether to prompt the user first. It does not
+        # move `effect_class`, which asks whether a crash may re-run the call: a server
+        # describing itself is not in a position to promise that, so a tool that arrived
+        # over a pipe stays at the class that cannot duplicate an action.
+        for remote in ("peek", "echo"):
+            assert registry.get(qualified_name("echo", remote)).effect_class == "unsafe_write"
     finally:
         await clients.close()
 

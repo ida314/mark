@@ -11,6 +11,7 @@ import shutil
 from ..config import get_config
 from ..ids import uuid7
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED
 
 
 def docker_command(command: str, *, network: bool, timeout_s: int, name: str) -> list[str]:
@@ -56,6 +57,7 @@ def _preview(args: dict) -> str:
     risk="write",
     tags=("sandbox", "shell", "egress"),
     preview=_preview,
+    effect_class=UNAUDITED,
 )
 async def shell_exec(args: dict, ctx: ToolContext) -> ToolResult:
     cfg = get_config()

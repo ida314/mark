@@ -8,6 +8,7 @@ import socket
 import httpx
 
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED
 
 MAX_BYTES = 5_000_000
 
@@ -60,6 +61,7 @@ def check_url(url: str, resolver=None) -> str | None:
     ),
     tags=("web", "untrusted", "egress"),
     trust_output=False,
+    effect_class=UNAUDITED,
 )
 async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
     url = args["url"]
@@ -107,6 +109,7 @@ async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
     required(obj(query={"type": "string"}, n={"type": "integer"}), "query"),
     tags=("web", "untrusted", "egress"),
     trust_output=False,
+    effect_class=UNAUDITED,
 )
 async def web_search(args: dict, ctx: ToolContext) -> ToolResult:
     import asyncio

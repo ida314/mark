@@ -15,6 +15,7 @@ from ..embed import get_embedder
 from ..ids import parse_when, utcnow
 from ..memory.predicates import UNSPECIFIED, Predicate, coerce, vocabulary_for_prompt
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED
 
 
 @tool(
@@ -37,6 +38,7 @@ from .base import Tool, ToolContext, ToolResult, obj, required, tool
     ),
     tags=("memory", "core"),
     always_on=True,
+    effect_class=UNAUDITED,
 )
 async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
     from ..memory.retrieval import pack
@@ -120,6 +122,7 @@ async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
     risk="draft",
     tags=("memory", "core"),
     always_on=True,
+    effect_class=UNAUDITED,
 )
 async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
     structured = {
@@ -231,6 +234,7 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
     "Show how what you believe about a subject changed over time, including former beliefs.",
     required(obj(subject={"type": "string"}), "subject"),
     tags=("memory",),
+    effect_class=UNAUDITED,
 )
 async def memory_history(args: dict, ctx: ToolContext) -> ToolResult:
     rows = await repo_memory.facts_for_subject(args["subject"])
@@ -257,6 +261,7 @@ async def memory_history(args: dict, ctx: ToolContext) -> ToolResult:
     obj(section={"type": "string", "description": "e.g. profile/core, goals, projects"}),
     tags=("memory", "core"),
     always_on=True,
+    effect_class=UNAUDITED,
 )
 async def profile_read(args: dict, ctx: ToolContext) -> ToolResult:
     from ..memory.mdrepo import MarkdownRepo
@@ -273,6 +278,7 @@ async def profile_read(args: dict, ctx: ToolContext) -> ToolResult:
     obj(),
     tags=("core",),
     always_on=True,
+    effect_class=UNAUDITED,
 )
 async def time_now(args: dict, ctx: ToolContext) -> ToolResult:
     now = utcnow().astimezone()

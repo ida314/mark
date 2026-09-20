@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .effects import UNAUDITED
 
 
 @tool(
@@ -28,6 +29,7 @@ from .base import Tool, ToolContext, ToolResult, obj, required, tool
     ),
     tags=("core",),
     always_on=True,
+    effect_class=UNAUDITED,
 )
 async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     agent_name = args["agent"]
