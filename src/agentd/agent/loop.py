@@ -16,7 +16,7 @@ from ..db.repo_ops import ActionRecord
 from ..ids import utcnow, uuid7
 from ..llm.base import Finish, LLMError, ReasoningDelta, TextDelta, ToolCallDone
 from ..llm.roles import get_provider, params_for
-from ..obs import otel
+from ..obs import otel, telemetry
 from ..policy.approvals import Approver, AutoApprover
 from ..policy.engine import PolicyEngine, engine_from_config
 from ..tools.base import ToolContext
@@ -127,6 +127,13 @@ class AgentLoop:
         turn_id = uuid7()
         started = time.perf_counter()
         usage_total = {"input_tokens": 0, "output_tokens": 0}
+        # Pass 1 baseline measurement. Reads state this loop already keeps and feeds
+        # nothing back into it; see obs/telemetry.py.
+        tele = telemetry.TurnTelemetry.start(
+            cfg=self.cfg, request_id=str(turn_id), session_id=str(session.id),
+            role=self.role, actor=self.actor, origin=origin, channel=session.channel,
+            autonomy=autonomy, model=params_for(self.role, self.cfg).model or "",
+        )
 
         with otel.span("agent.turn", {"agentd.autonomy": autonomy, "agentd.origin": origin}):
             trace_ids = otel.current_ids()
@@ -171,6 +178,7 @@ class AgentLoop:
             )
             tool_schemas = [t.openai_schema() for t in tools]
             exposed = {t.name: t for t in tools}
+            tele.tools_offered(list(exposed), registry_size=len(self.registry.enabled()))
 
             # 3. Build the messages.
             history = await ctxmod.history_messages(
@@ -206,6 +214,8 @@ class AgentLoop:
 
                 text_parts: list[str] = []
                 calls = []
+                tele.context_sample(messages)
+                finish_reason: str | None = None
                 llm_started = time.perf_counter()
                 params = params_for(self.role, self.cfg)
                 try:
@@ -223,6 +233,8 @@ class AgentLoop:
                             elif isinstance(event, ToolCallDone):
                                 calls.append(event.call)
                             elif isinstance(event, Finish):
+                                finish_reason = event.reason
+                                tele.usage_seen(event.usage)
                                 usage_total["input_tokens"] += event.usage.get("input_tokens", 0)
                                 usage_total["output_tokens"] += event.usage.get("output_tokens", 0)
                 except LLMError as exc:
@@ -231,11 +243,16 @@ class AgentLoop:
                         turn_id, session, origin, autonomy, "error", started,
                         usage_total, refs, trace_ids, str(exc),
                     )
+                    tele.finish(
+                        status="failed", steps=steps, usage=usage_total, answer="",
+                        error=str(exc), trace_ids=trace_ids,
+                    )
                     yield TurnFinished(
                         turn_id=str(turn_id), text="", steps=steps, usage=usage_total
                     )
                     return
 
+                tele.llm_call(time.perf_counter() - llm_started, finish_reason)
                 assistant_text = "".join(text_parts).strip()
                 await repo_ops.write_action(
                     ActionRecord(
@@ -274,6 +291,11 @@ class AgentLoop:
                 for call in calls:
                     args_preview = _safe_args(call.arguments)
                     yield ToolStarted(name=call.name, args=args_preview)
+                    # Read before the re-add below, which would otherwise make every call
+                    # look like it was to a tool the model had been shown.
+                    was_visible = call.name in exposed
+                    known = call.name in self.registry.tools
+                    call_started = time.perf_counter()
                     if call.name not in exposed and call.name in self.registry.tools:
                         exposed[call.name] = self.registry.tools[call.name]
                     result = await self.executor.run(
@@ -291,6 +313,14 @@ class AgentLoop:
                         session.private = True
                         tctx.private = True
                     denied = bool(result.data.get("denied"))
+                    tele.tool_call(
+                        telemetry.CallRecord(
+                            step=steps, name=call.name, ok=result.ok, denied=denied,
+                            invalid_args=bool(result.data.get("invalid_args")),
+                            known=known, visible=was_visible,
+                            duration_ms=int((time.perf_counter() - call_started) * 1000),
+                        )
+                    )
                     yield ToolFinished(
                         name=call.name, ok=result.ok,
                         summary=_summarize(result.content), denied=denied,
@@ -337,11 +367,13 @@ class AgentLoop:
                     messages.append({"role": "system", "content": note})
 
                 # Tools added mid-turn by tool_search become visible on the next step.
-                for name in tctx.extra.pop("added_tools", []):
+                revealed = tctx.extra.pop("added_tools", [])
+                for name in revealed:
                     t = self.registry.get(name)
                     if t and name not in exposed:
                         exposed[name] = t
                         tool_schemas.append(t.openai_schema())
+                tele.tools_revealed(revealed)
 
             answer = "\n".join(t for t in final_text if t).strip()
             if answer:
@@ -354,6 +386,14 @@ class AgentLoop:
             await repo_archive.touch_session(session.id)
             await self._record_turn(
                 turn_id, session, origin, autonomy, "ok", started, usage_total, refs, trace_ids
+            )
+            # "abandoned" is the step budget running out with the model still calling tools:
+            # the last step is forced tool-free and carries FINAL_NUDGE, so what comes back
+            # is a summary of unfinished work, not an answer. Same reading as a sub-agent's
+            # `budget_exhausted`.
+            tele.finish(
+                status="abandoned" if steps >= self.cfg.agent.max_steps else "completed",
+                steps=steps, usage=usage_total, answer=answer, trace_ids=trace_ids,
             )
             yield TurnFinished(
                 turn_id=str(turn_id), text=answer, steps=steps, usage=usage_total

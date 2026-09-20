@@ -105,6 +105,14 @@ enabled = true
 capture_content = false
 jaeger_ui = "http://127.0.0.1:16686"
 
+# Pass 1 baseline measurement: one JSON line per turn, counting tool calls, unused visible
+# tools, selection failures, context tokens and latency. Separate from [obs] because tracing
+# is for inspecting one turn that went wrong and this is for counting every turn so two
+# builds can be compared. Pass 2 replaces it with the run journal.
+[telemetry]
+enabled = true
+# path = "~/.local/share/agent/logs/telemetry.jsonl"   # unset means exactly this
+
 [mcp]
 http_port = 8770
 

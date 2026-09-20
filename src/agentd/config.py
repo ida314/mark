@@ -128,6 +128,19 @@ class ObsConfig(BaseModel):
     jaeger_ui: str = "http://127.0.0.1:16686"
 
 
+class TelemetryConfig(BaseModel):
+    """Pass 1 baseline measurement. A flat JSONL file, on purpose and not for long.
+
+    Separate from [obs] because they answer different questions. Tracing is for looking at
+    one turn that went wrong; this is for counting every turn so two builds of the agent can
+    be compared. Pass 2 replaces the storage with the run journal and this section goes away.
+    """
+
+    enabled: bool = True
+    # None means <paths.data_dir>/logs/telemetry.jsonl.
+    path: Path | None = None
+
+
 class NtfyConfig(BaseModel):
     """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never
     leave hardware you control."""
@@ -401,6 +414,7 @@ class Config(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     obs: ObsConfig = Field(default_factory=ObsConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
