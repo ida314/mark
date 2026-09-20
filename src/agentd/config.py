@@ -333,6 +333,7 @@ class BrightspaceConnectorConfig(BaseModel):
     label: str = "nyu"  # the feed URL lives in the vault at brightspace/<label>
     horizon_days: int = 21
     poll_interval_s: float = 1800.0
+    sweep_interval_s: float = 3600.0  # the unconditional read that closes withdrawn work
     # An all-day entry in a course calendar is reading week or a holiday, not something you
     # owe anybody. Archived either way; this decides whether it also becomes a loop.
     all_day_loops: bool = False

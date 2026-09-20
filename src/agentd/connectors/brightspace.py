@@ -39,6 +39,7 @@ from .base import (
     ConnectorTransient,
     Item,
     PollResult,
+    tracked_loops,
 )
 
 # Course codes, extracted rather than escaped: CSCI-UA 480, MATH-UA 121, DS-GA 1003, CS 101.
@@ -47,6 +48,9 @@ COURSE_CODE = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{1,3})?[ -]?\d{2,4}\b")
 LOOP_TITLE_WITH_COURSE = "Coursework due: {course} on {when}"
 LOOP_TITLE = "Coursework due on {when}"
 WHEN_FORMAT = "%a %d %b %H:%M"
+# How many consecutive valid-but-empty reads it takes before an empty feed closes loops.
+# Two, because one is how a transient oddity at the source empties your whole agenda.
+EMPTY_SWEEPS_BEFORE_CLOSING = 2
 
 
 def course_code(*texts: str) -> str | None:
@@ -79,6 +83,11 @@ class BrightspaceConnector(Connector):
         self.cfg = cfg
         self.settings = cfg.connectors.brightspace
         self.poll_interval_s = self.settings.poll_interval_s
+        self.sweep_interval_s = self.settings.sweep_interval_s
+        # Consecutive sweeps that read a valid but empty calendar. In memory rather than in
+        # `connector_state.cursor`, which `poll_once` replaces wholesale on every success;
+        # a restart resets it to zero, which only ever delays a close.
+        self._empty_sweeps = 0
 
     @property
     def vault_ref(self) -> str:
@@ -207,6 +216,58 @@ class BrightspaceConnector(Connector):
                 ref={"loop": str(loop_id), "event": str(event_id)},
             )
         return 1
+
+    # --- closing what the course withdrew -------------------------------------
+
+    async def sweep(self, client: httpx.AsyncClient) -> None:
+        """Close loops for deadlines the feed no longer carries.
+
+        Unconditional on purpose: `poll` sends `If-None-Match`, and a 304 says nothing at
+        all about what vanished. An ICS feed cannot say "you submitted this", so the only
+        thing it can tell us is that a deadline no longer exists - and the cost of getting
+        that wrong is a missed grade. Hence four separate refusals:
+
+        - **An ambiguous read closes nothing.** A non-200 - including the 401 a regenerated
+          feed URL returns - or a body with no `VCALENDAR`, which is the SSO login page
+          `poll` already knows to recognise.
+        - **Existence is asked of the whole feed, not the poll window.** `poll` filters to
+          `now - 12h .. horizon` to decide what is worth *archiving*; this asks what still
+          *exists*. Conflating the two closes an assignment that was merely pushed past the
+          horizon, which is the one direction a student cannot afford.
+        - **An empty calendar is believed, but only twice over.** A 200 carrying a
+          `VCALENDAR` with no events is a real empty calendar and not a failure - end of
+          term happens - but it is the single reading that closes everything at once, so it
+          has to survive two consecutive sweeps.
+        - **Only a deadline still in the future is eligible.** One leaves the archive window
+          simply by passing, and passing is not withdrawal; closing on it would delete
+          precisely the overdue loops `overdue_loops()` exists to surface.
+
+        A rescheduled assignment keeps its UID, so it stays in `live` and is never closed.
+        Where a feed omits UID entirely, `_to_item` falls back to a summary-and-start key and
+        a reschedule does read as withdrawal - correctly, since `react` has by then opened a
+        fresh loop under the new time and the old title names the old one.
+        """
+        response = await self._fetch(client, {})
+        if response.status_code != 200 or "BEGIN:VCALENDAR" not in response.text:
+            self._empty_sweeps = 0
+            return
+
+        live = {_to_item(event).external_id for event in ics.parse(response.text)}
+        if live:
+            self._empty_sweeps = 0
+        else:
+            self._empty_sweeps += 1
+            if self._empty_sweeps < EMPTY_SWEEPS_BEFORE_CLOSING:
+                return
+
+        now = utcnow()
+        for row in await tracked_loops(self.name):
+            if row["external_id"] in live:
+                continue
+            # `occurred_at` on the source event is the deadline itself - see `_to_item`.
+            if row["occurred_at"] is None or row["occurred_at"] <= now:
+                continue
+            await repo_agenda.close_open_loop(row["id"])
 
 
 # --- parsing -----------------------------------------------------------------

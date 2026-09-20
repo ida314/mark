@@ -309,3 +309,107 @@ async def test_calendar_access_is_reported_missing_before_it_403s(cfg, gcal, tmp
         scopes=[google_auth.GMAIL_SCOPE],
     )
     assert "re-run `agent connectors auth nyu`" in gcal.configured()
+
+
+# --- Brightspace: closing what the course withdrew ----------------------------
+#
+# The sweep is the only thing that can close a coursework loop on its own, and an ICS feed
+# cannot say "you submitted this" - only that a deadline is no longer there. Every test
+# below is about a way for "no longer there" to mean something other than "withdrawn".
+
+
+async def _sweep(brightspace, body, status=200):
+    await brightspace.sweep(_client(_serves(body, status)))
+
+
+async def _open_titles() -> list[str]:
+    return [row["title"] for row in await repo_agenda.list_open_loops("open")]
+
+
+async def test_a_withdrawn_deadline_closes_its_loop(cfg, brightspace):
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+    assert len(await _open_titles()) == 1
+
+    await _sweep(brightspace, _feed(_vevent(uid="other")))
+    assert await _open_titles() == []
+
+
+async def test_a_deadline_moved_past_the_horizon_stays_open(cfg, brightspace):
+    """The regression this sweep was rewritten for.
+
+    `poll` only archives `now - 12h .. horizon`, so an assignment pushed a month out drops
+    out of the *poll* window while remaining perfectly present in the feed. Asking the poll
+    window whether something still exists closes it as withdrawn.
+    """
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+    beyond = utcnow() + timedelta(days=cfg.connectors.brightspace.horizon_days + 9)
+
+    await _sweep(brightspace, _feed(_vevent(uid="a1", when=beyond)))
+    assert len(await _open_titles()) == 1
+
+
+async def test_a_passed_deadline_is_not_a_withdrawn_one(cfg, brightspace):
+    """It left the feed by happening. Closing on that deletes exactly the overdue loops
+    `overdue_loops()` exists to surface."""
+    await poll_once(
+        brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1", when=utcnow() - timedelta(hours=2)))))
+    )
+    assert len(await _open_titles()) == 1
+
+    await _sweep(brightspace, _feed(_vevent(uid="other")))
+    assert len(await _open_titles()) == 1
+
+
+async def test_a_rescheduled_deadline_keeps_its_loop(cfg, brightspace):
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+    moved = utcnow() + timedelta(days=4)
+
+    await _sweep(brightspace, _feed(_vevent(uid="a1", when=moved)))
+    assert len(await _open_titles()) == 1
+
+
+@pytest.mark.parametrize(
+    "body,status",
+    [
+        ("<html>Log in to NYU</html>", 200),  # SSO page served as 200
+        ("", 500),
+        ("", 401),
+    ],
+)
+async def test_an_ambiguous_read_closes_nothing(cfg, brightspace, body, status):
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+
+    await _sweep(brightspace, body, status)
+    assert len(await _open_titles()) == 1
+
+
+async def test_an_empty_calendar_is_believed_only_the_second_time(cfg, brightspace):
+    """End of term is real, so an empty feed does close loops - but it is the one reading
+    that closes the whole agenda at once, so it has to happen twice running."""
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+
+    await _sweep(brightspace, _feed())
+    assert len(await _open_titles()) == 1
+
+    await _sweep(brightspace, _feed())
+    assert await _open_titles() == []
+
+
+async def test_a_feed_that_comes_back_resets_the_count(cfg, brightspace):
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+
+    await _sweep(brightspace, _feed())
+    await _sweep(brightspace, _feed(_vevent(uid="a1")))
+    await _sweep(brightspace, _feed())
+    assert len(await _open_titles()) == 1
+
+
+async def test_an_ambiguous_read_also_resets_the_count(cfg, brightspace):
+    """Otherwise one empty read, an outage, and one more empty read a week later add up to
+    a close that no single observation supports."""
+    await poll_once(brightspace, cfg, _client(_serves(_feed(_vevent(uid="a1")))))
+
+    await _sweep(brightspace, _feed())
+    await _sweep(brightspace, "", 500)
+    await _sweep(brightspace, _feed())
+    assert len(await _open_titles()) == 1
