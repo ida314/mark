@@ -15,7 +15,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 2b | complete | 2026-09-20 | pass-02-outcome.md | 17-type vocabulary, 9 of them emitted. No Must not crossed. |
 | 2c | complete | 2026-09-20 | pass-02-outcome.md | committed as b34f153. In-memory UIEvent bus deleted; journal is the only event path. 8 deviations, none crossing a Must not. Kill test passed at 3 points. |
 | 3a | complete | 2026-09-20 | pass-03-outcome.md | committed as cae2f75. effect_class mandatory, no default; 26/26 builtins declare UNAUDITED (= unsafe_write), none classified. 5 deviations, no Must not crossed. |
-| 3b | pending | — | — | |
+| 3b | complete | 2026-09-20 | pass-03-outcome.md | committed as 0eda557. effect table (schema v2) + idempotency keys + announce-before-dispatch in the executor. 7 deviations, no Must not crossed. |
 | 3c | pending | — | — | **hard stop — human runs this** (effect classification) |
 | 3d | pending | — | — | **hard stop — human runs this** (effect classification) |
 | 4a | pending | — | — | |
@@ -78,3 +78,15 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
   surface `time_now` and `fs_list` as uncertain effects.
 - **3a → 3d, pre-empted corner:** MCP tools are pinned to `unsafe_write` at wrap time
   because `wrap()` must pass the field. 3d inherits that as a decision already made.
+- **RESOLVED by 3b:** the `ctx.run_id = None` call (`policy/replay.execute_approved`, MCP)
+  is keyed `detached:<action_id>`, unique per call, never a shared bucket. The effect
+  ledger lives in journal.db under a real migration ladder, so 2a's "`_migrate` cannot
+  migrate" is closed rather than triggered.
+- **3b → Pass 4, conservative reading to inherit:** `started` is a ledger-only transition.
+  Pass 02 fixed the vocabulary at 17 types and a drift-guard test asserts it, so there is
+  no `effect_started` event and the ledger holds one bit a cold fold cannot reproduce.
+- **3b → 3c, a test that must die:** `tests/test_journal_events.py::test_a_complete_turn_is_readable_from_the_journal_alone`
+  asserts an `effect_intended`/`effect_committed` pair around `fs_read`. Classifying
+  `fs_read` as `read` must delete that assertion, not work around it.
+- **3b → 3c/3d, the cost that makes the audit urgent:** every effecting call now costs four
+  synchronous fsyncs, and with all 26 builtins `UNAUDITED` that applies to `time_now`.
