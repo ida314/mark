@@ -26,8 +26,8 @@ from typing import Any
 
 import pytest
 
-from agentd.agent.events import TurnFinished
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.stream import Answer
 from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
 from agentd.journal import events as jevents
 from agentd.journal.runtime import RunJournal
@@ -295,7 +295,7 @@ async def test_a_complete_turn_is_readable_from_the_journal_alone(cfg, tmp_path)
     finished = [
         e
         async for e in loop.run_turn(session, "what does the note say?")
-        if isinstance(e, TurnFinished)
+        if isinstance(e, Answer)
     ][0]
 
     events = store.read(finished.turn_id)

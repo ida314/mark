@@ -345,6 +345,24 @@ class JournalStore:
         with self._lock:
             return [Event.from_row(r) for r in self._conn.execute(sql, args).fetchall()]
 
+    def last_id(self, run_id: str | None = None) -> int:
+        """The highest feed id in the file, or 0 when it is empty.
+
+        Where a subscriber starts when it wants "everything from now on" rather than the
+        whole history. `id` and not `seq`: a feed spans runs, and `seq` only orders within
+        one.
+        """
+        with self._lock:
+            if run_id is None:
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS n FROM journal"
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS n FROM journal WHERE run_id = ?", (run_id,)
+                ).fetchone()
+            return int(row["n"])
+
     def count(self, run_id: str | None = None) -> int:
         with self._lock:
             return self._count_locked(run_id)

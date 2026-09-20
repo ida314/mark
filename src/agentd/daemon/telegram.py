@@ -40,10 +40,14 @@ from uuid import UUID
 import httpx
 
 from .. import secrets as vault
-from ..agent.events import TurnFinished, brief_args
 from ..agent.loop import AgentLoop, Session
+from ..agent.stream import Answer
 from ..config import Config
 from ..db import repo_agenda, repo_ops
+from ..ids import uuid7
+from ..journal.feed import JournalTail, turn_ended
+from ..journal.render import brief_args
+from ..journal.store import Event
 from ..policy.approvals import QueueApprover
 
 HELP = (
@@ -150,8 +154,9 @@ def render_tools(lines: list[tuple[str, str, str]]) -> str:
     for exactly that reason - without it a value containing a newline and a tick would
     forge a line claiming a tool ran that never did.
 
-    Still not rendered: the tool's *result*. `ToolFinished.summary` is the output rather
-    than the request, which for a mail search is a stranger's subject lines in full.
+    Still not rendered: the tool's *result*. `tool_finished.summary` in the journal is the
+    output rather than the request, which for a mail search is a stranger's subject lines in
+    full.
     """
     return "\n".join(
         f"{SYMBOL.get(state, '')} {name}({args}){NOTE.get(state, '')}".strip()
@@ -178,8 +183,9 @@ class Progress:
 
     async def finished(self, name: str, *, ok: bool, denied: bool) -> None:
         state = "denied" if denied else ("ok" if ok else "error")
-        # Matched on the name alone: `ToolFinished` does not carry the arguments, and the
-        # most recent running call of that name is the one that just ended.
+        # Matched on the name alone: the terminal journal event carries the `call_id` but
+        # not the arguments, and the most recent running call of that name is the one that
+        # just ended.
         for index in range(len(self.lines) - 1, -1, -1):
             if self.lines[index][0] == name and self.lines[index][2] == "running":
                 self.lines[index] = (name, self.lines[index][1], state)
@@ -329,23 +335,39 @@ async def handle_message(
     denied: list[str] = []
     progress = Progress(cfg, client, chat_id, show=conv.show_tools(chat_id))
 
+    # The run is named up front: the progress message is a subscriber to this run's journal,
+    # and a subscriber cannot filter on a run id the turn has not opened yet. Which tools ran
+    # is read from the journal here exactly as it is in the REPL - one feed, two surfaces.
+    run_id = str(uuid7())
+    tail = JournalTail.local(run_id=run_id, cfg=cfg)
+    turn_over = asyncio.Event()
+
+    async def absorb(event: Event) -> None:
+        payload = event.payload
+        if event.type == "tool_requested":
+            await progress.started(payload["name"], payload["args"])
+        elif event.type == "tool_finished":
+            await progress.finished(payload["name"], ok=True, denied=False)
+        elif event.type == "tool_failed":
+            refused = bool(payload["denied"])
+            await progress.finished(payload["name"], ok=False, denied=refused)
+            if refused:
+                denied.append(payload["name"])
+
+    async def watch() -> None:
+        async for event in tail.follow(stop=turn_over, until=turn_ended(run_id)):
+            await absorb(event)
+
     async def run() -> None:
         nonlocal answer
-        from ..agent.events import ToolFinished, ToolStarted
-
         async for event in loop.run_turn(
-            session, text, origin="telegram", autonomy=cfg.telegram.autonomy
+            session, text, origin="telegram", autonomy=cfg.telegram.autonomy, run_id=run_id
         ):
-            if isinstance(event, ToolStarted):
-                await progress.started(event.name, event.args)
-            if isinstance(event, ToolFinished):
-                await progress.finished(event.name, ok=event.ok, denied=event.denied)
-                if event.denied:
-                    denied.append(event.name)
-            if isinstance(event, TurnFinished):
+            if isinstance(event, Answer):
                 answer = event.text
 
     task = asyncio.create_task(run())
+    watcher = asyncio.create_task(watch())
     while not task.done():
         # A silent bot is indistinguishable from a broken one, and a local model on a busy
         # GPU is often neither.
@@ -353,6 +375,12 @@ async def handle_message(
         if not done:
             await call(cfg, client, "sendChatAction", chat_id=chat_id, action="typing")
     await task
+    turn_over.set()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await watcher
+    # The tail of the run can land after the watcher stopped; a cursor read cannot miss it.
+    for event in tail.drain():
+        await absorb(event)
 
     if denied and not answer:
         answer = (

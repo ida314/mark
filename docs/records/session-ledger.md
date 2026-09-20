@@ -13,7 +13,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 1c | complete | human | pass-01-outcome.md + baseline.md | 22 of 23 rows graded; 5 human-at-terminal rows not run |
 | 2a | complete | — | pass-02-outcome.md | journal store + writer. Committed as fe8a8e0. |
 | 2b | complete | 2026-09-20 | pass-02-outcome.md | 17-type vocabulary, 9 of them emitted. No Must not crossed. |
-| 2c | pending | — | — | last session of pass 2. Run a live turn first (2b open q1: nothing has journaled a real turn). UIEvent path to remove: agent/events.py + cli/chat.py, daemon/{telegram,scheduler,heartbeat}.py |
+| 2c | complete | 2026-09-20 | pass-02-outcome.md | committed as b34f153. In-memory UIEvent bus deleted; journal is the only event path. 8 deviations, none crossing a Must not. Kill test passed at 3 points. |
 | 3a | pending | — | — | |
 | 3b | pending | — | — | |
 | 3c | pending | — | — | **hard stop — human runs this** (effect classification) |
@@ -60,3 +60,11 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
   `ctx.run_id = None` — a tool call journaled by nobody, the same shape as baseline finding 3.
   Tool events are emitted from `loop.py`, not the executor; making `effect_intended`
   unbypassable means moving emission into the executor and taking these with it.
+- **RESOLVED by 2c:** a live turn has now been journaled. `tool_finished.trust` and
+  `ToolCall.id` were both real on the wire, so the 2b → 2c warning is closed.
+- **2c → Pass 4/5, to decide rather than inherit:** whether a run id is ever derived from a
+  turn id — the REPL and Telegram mint the run id before the turn, so `run_id != str(turn_id)`
+  on those two channels.
+- **2c → Pass 4/5:** a retrieval-degraded turn is still invisible to a fold. `Notice` survived
+  with one use (memory-retrieval failure) because no event type covers it, and inventing an
+  18th was out of 2c's scope.

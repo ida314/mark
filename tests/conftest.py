@@ -98,6 +98,29 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
     set_provider(None)
 
 
+@pytest.fixture
+def journaled(cfg: Config):
+    """What this test's turns recorded in the journal, in feed order.
+
+    Tests used to read a turn's tool calls off the in-process event stream the CLI rendered.
+    Session 2c deleted that stream, so a test that asserts what a turn did now asserts
+    against the same rows a frontend renders - which is the point of there being one path.
+
+    The writer is flushed first: the chatty event types are buffered and the age check runs
+    on append rather than on a timer, so an assertion made without flushing would be about
+    the buffer rather than about the journal.
+    """
+    from agentd.journal.store import Event
+
+    def read(*types: str, run_id: str | None = None) -> list[Event]:
+        writer = journal_runtime.get_writer(cfg)
+        writer.flush()
+        events = writer.store.read(run_id) if run_id is not None else writer.store.read_all()
+        return [e for e in events if not types or e.type in types]
+
+    return read
+
+
 TABLES = [
     "fact_evidence", "fact_entities", "facts", "entities", "episodes",
     "candidate_memories", "procedures", "raw_event_embeddings", "raw_events", "sessions",

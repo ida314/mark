@@ -1,4 +1,12 @@
-"""The REPL: streaming answers, inline approvals, notifications that arrive mid-conversation."""
+"""The REPL: streaming answers, inline approvals, notifications that arrive mid-conversation.
+
+Two sources feed the screen and they answer different questions. The turn stream
+(`agent/stream.py`) carries the model's prose as it arrives. Everything else on screen - which
+tool is running, what it returned, who was delegated to, how the turn ended - is read from the
+run journal through `journal/feed.py`, which is the same feed a frontend in another process
+subscribes to and the same cursor it reconnects with. Before session 2c the REPL rendered a
+second, in-memory copy of those facts; the copy is gone.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +20,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from ..agent.events import (
-    Notice,
-    SubagentFinished,
-    SubagentStarted,
-    TextChunk,
-    ThinkingChunk,
-    ToolFinished,
-    ToolStarted,
-    TurnFinished,
-    brief_args,
-)
 from ..agent.loop import AgentLoop, Session
+from ..agent.stream import Answer, Delta, Notice
 from ..config import Config
 from ..db import repo_agenda, repo_archive
 from ..db.pool import listen
+from ..ids import uuid7
+from ..journal.feed import JournalTail, turn_ended
+from ..journal.render import Line, render_event
+from ..journal.store import Event
 from ..obs import otel
 from ..policy.approvals import ApprovalRequest, ApprovalResult, SessionGrants
 
@@ -105,6 +107,67 @@ async def _inbox_watcher(stop: asyncio.Event) -> None:
         return
 
 
+class TurnView:
+    """One turn on screen: prose from the turn stream, everything else from the journal.
+
+    The prose arrives a fragment at a time with no trailing newline, so anything else that
+    prints has to close the line first or it lands in the middle of a sentence. That is the
+    only reason this holds state.
+    """
+
+    def __init__(self, *, show_thinking: bool) -> None:
+        self.show_thinking = show_thinking
+        self.streaming = False
+
+    def delta(self, event: Delta) -> None:
+        if event.thinking:
+            if self.show_thinking:
+                console.print(f"[dim]{event.text}[/dim]", end="", markup=True)
+            return
+        console.print(event.text, end="", markup=False, highlight=False)
+        self.streaming = True
+
+    def line(self, line: Line) -> None:
+        if self.streaming:
+            console.print()
+            self.streaming = False
+        console.print(f"[{line.style}]{line.text}[/{line.style}]" if line.style else line.text)
+
+    def notice(self, event: Notice) -> None:
+        self.line(Line(event.text, {"error": "red", "warn": "yellow"}.get(event.level, "cyan")))
+
+    def show(self, event: Event) -> None:
+        """Render one journal event, or nothing if it has no line.
+
+        The `try` is here and not around the whole feed on purpose. `memory/retrieval.py` has
+        the version of this bug worth avoiding: one unrenderable item inside a broad
+        `try/except` takes out the whole panel and says nothing. A renderer that raises here
+        costs one line and says so.
+        """
+        try:
+            line = render_event(event)
+        except Exception as exc:  # noqa: BLE001 - a bad line must not end the feed
+            line = Line(f"(cannot render {event.type}: {exc})", "red")
+        if line is not None:
+            self.line(line)
+
+    async def follow(self, tail: JournalTail, run_id: str, stop: asyncio.Event) -> None:
+        """Print the run's events as they land, until the turn ends or the caller stops."""
+        async for event in tail.follow(stop=stop, until=turn_ended(run_id)):
+            self.show(event)
+
+    def catch_up(self, tail: JournalTail) -> None:
+        """Whatever landed after the follower stopped. There is no in-memory queue to lose,
+        so this is a cursor read and cannot miss anything."""
+        for event in tail.drain():
+            self.show(event)
+
+    def end(self) -> None:
+        if self.streaming:
+            console.print()
+            self.streaming = False
+
+
 async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_thinking: bool) -> None:
     otel.setup("agent-cli", cfg)
     cfg.ensure_dirs()
@@ -159,31 +222,33 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
                     continue
 
             console.print()
-            streaming = False
-            async for event in loop.run_turn(session, text, autonomy=autonomy):
-                if isinstance(event, TextChunk):
-                    console.print(event.text, end="", markup=False, highlight=False)
-                    streaming = True
-                elif isinstance(event, ThinkingChunk) and show_thinking:
-                    console.print(f"[dim]{event.text}[/dim]", end="", markup=True)
-                elif isinstance(event, ToolStarted):
-                    if streaming:
-                        console.print()
-                        streaming = False
-                    console.print(f"[dim]→ {event.name}({brief_args(event.args)})[/dim]")
-                elif isinstance(event, ToolFinished):
-                    mark = "✗" if event.denied else ("✓" if event.ok else "!")
-                    color = "yellow" if event.denied else ("green" if event.ok else "red")
-                    console.print(f"[{color}]  {mark} {event.summary}[/{color}]")
-                elif isinstance(event, SubagentStarted):
-                    console.print(f"[magenta]→ delegating to {event.name}[/magenta]")
-                elif isinstance(event, SubagentFinished):
-                    console.print(f"[magenta]  {event.name}: {event.status}[/magenta]")
-                elif isinstance(event, Notice):
-                    console.print(f"[yellow]{event.text}[/yellow]")
-                elif isinstance(event, TurnFinished):
-                    last_turn_id = event.turn_id
-                    console.print()
+            # The run is named before the turn starts, because a subscriber cannot filter a
+            # feed by a run id it has not been told yet. The loop would otherwise derive one
+            # from the turn it is about to open.
+            run_id = str(uuid7())
+            view = TurnView(show_thinking=show_thinking)
+            tail = JournalTail.local(run_id=run_id, cfg=cfg)
+            turn_over = asyncio.Event()
+            follower = asyncio.create_task(view.follow(tail, run_id, turn_over))
+            try:
+                async for event in loop.run_turn(
+                    session, text, autonomy=autonomy, run_id=run_id
+                ):
+                    if isinstance(event, Delta):
+                        view.delta(event)
+                    elif isinstance(event, Notice):
+                        view.notice(event)
+                    elif isinstance(event, Answer):
+                        last_turn_id = event.turn_id
+            finally:
+                turn_over.set()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await follower
+                # `agent_finished` is written while the turn's generator unwinds, so the last
+                # event of the run can land after the follower has been told to stop.
+                view.catch_up(tail)
+                view.end()
+                console.print()
     finally:
         stop.set()
         await close_external_tools()

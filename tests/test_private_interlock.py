@@ -7,7 +7,6 @@ closed on the next message — and the argument is easier to follow in one place
 
 from __future__ import annotations
 
-from agentd.agent.events import ToolFinished
 from agentd.agent.loop import AgentLoop, Session
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
@@ -35,7 +34,7 @@ def _mail_registry():
     return reg
 
 
-async def test_reading_mail_closes_the_door_for_the_rest_of_the_turn(cfg):
+async def test_reading_mail_closes_the_door_for_the_rest_of_the_turn(cfg, journaled):
     """The whole point, proven through the real loop rather than the policy engine alone:
     the model reads mail, then tries to look something up, and the second call is refused."""
     provider = FakeProvider(turns=[
@@ -48,15 +47,16 @@ async def test_reading_mail_closes_the_door_for_the_rest_of_the_turn(cfg):
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "what did my professor say?", autonomy="act")
+    await _run(loop, session, "what did my professor say?", autonomy="act")
 
-    finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert finished[0].name == "reads_mail" and not finished[0].denied
-    assert finished[1].name == "web_fetch" and finished[1].denied
+    calls = journaled("tool_finished", "tool_failed")
+    assert calls[0].type == "tool_finished" and calls[0].payload["name"] == "reads_mail"
+    assert calls[1].type == "tool_failed" and calls[1].payload["name"] == "web_fetch"
+    assert calls[1].payload["denied"] is True
     assert session.private is True
 
 
-async def test_two_web_fetches_in_a_row_are_still_fine(cfg):
+async def test_two_web_fetches_in_a_row_are_still_fine(cfg, journaled):
     """The control. Ordinary research raises `tainted` on the first fetch; if the interlock
     keyed on that instead of on `private`, page 2 would be impossible."""
     # Loopback URLs so this never touches the network: check_url refuses them inside the
@@ -73,11 +73,11 @@ async def test_two_web_fetches_in_a_row_are_still_fine(cfg):
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "compare these pages", autonomy="act")
+    await _run(loop, session, "compare these pages", autonomy="act")
 
-    finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert len(finished) == 2
-    assert not any(e.denied for e in finished)
+    calls = journaled("tool_finished", "tool_failed")
+    assert [e.payload["name"] for e in calls] == ["web_fetch", "web_fetch"]
+    assert not any(e.payload.get("denied") for e in calls)
     assert session.tainted is True and session.private is False
 
 
@@ -102,7 +102,7 @@ async def test_an_ordinary_session_resumes_without_the_interlock(cfg):
     assert (await Session.resume(session.id)).private is False
 
 
-async def test_the_door_stays_shut_on_the_next_message_too(cfg):
+async def test_the_door_stays_shut_on_the_next_message_too(cfg, journaled):
     """The regression for a bug a single-turn test cannot see.
 
     `run_turn` builds a fresh ToolContext per turn. Seeding `tainted` from the session but
@@ -124,6 +124,6 @@ async def test_the_door_stays_shut_on_the_next_message_too(cfg):
         [("web_fetch", {"url": "http://127.0.0.1/leak"})],
         "I cannot reach the web after reading your mail.",
     ])
-    events = await _run(loop, session, "now look something up", autonomy="act")
-    finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert finished and finished[0].denied, "a new turn must not reopen the door"
+    await _run(loop, session, "now look something up", autonomy="act")
+    fetches = [e for e in journaled("tool_failed") if e.payload["name"] == "web_fetch"]
+    assert fetches and fetches[0].payload["denied"], "a new turn must not reopen the door"

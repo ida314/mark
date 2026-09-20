@@ -1,8 +1,12 @@
 # Pass 2 — Durable Run Journal — outcome
 
-Sessions completed: **2a**, **2b**. Session 2c (frontend subscription) is not started, so
-**the pass's exit criteria are not met** as a whole: no frontend replays from the journal, and
-the kill-mid-run exercise has been done at the store level (2a) but not against a real turn.
+Sessions completed: **2a**, **2b**, **2c**. **The pass's exit criteria are met**: a frontend
+replays from the journal by last-seen id, the process was killed mid-run at three different
+points against a real turn and the journal is complete up to each, and there is one event path
+at the end of the pass because 2c deleted the other one. The paragraphs below were written
+after 2a and 2b and are left as they were; the 2c section at the end is what changed them, and
+says where.
+
 2b's own exit criterion — "a complete run produces a journal from which the sequence of what
 happened is readable without reference to any other source" — is met, and is asserted as a
 sequence rather than a set in `tests/test_journal_events.py`.
@@ -605,3 +609,298 @@ the two records must not treat a missing telemetry row as a missing turn.
 measured (2a #2); the fsync cost is unmeasured (2a #3); `_migrate` cannot migrate (2a #6);
 retention's two extension points are still unusable (2a #7). And from Pass 1: token accounting
 is still broken upstream, which is why `usage_reported` exists.
+
+---
+
+## Session 2c — Frontend subscription
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/journal/feed.py` | `JournalTail`: the cursor, `drain()`, `follow()`, `turn_ended` | 194 |
+| `src/agentd/journal/render.py` | one journal event → one human line, for every frontend | 139 |
+| `src/agentd/agent/stream.py` | what is left of the turn stream: `Delta`, `Notice`, `Answer` | 77 |
+| `src/agentd/agent/events.py` | **deleted** | −98 |
+| `src/agentd/agent/loop.py` | yields prose only; six event constructions removed | +18 −38 |
+| `src/agentd/agent/subagents.py` | reads its worker's failures from the feed | +29 −9 |
+| `src/agentd/cli/chat.py` | `TurnView`, and the REPL as a journal subscriber | +102 −37 |
+| `src/agentd/daemon/telegram.py` | the progress message as a journal subscriber | +43 −15 |
+| `src/agentd/daemon/{scheduler,heartbeat}.py` | `TurnFinished` → `Answer` | +4 −4 |
+| `src/agentd/cli/app.py` | `agent journal runs / show / follow` | +109 |
+| `src/agentd/journal/store.py` | `last_id()`, so a subscriber can start at "now" | +18 |
+| `tests/conftest.py` | the `journaled` fixture | +23 |
+| `tests/test_journal_feed.py` | 32 tests | 415 |
+
+Suite 582 → 614 passing. `ruff check src tests scripts` clean. Six existing test files were
+modified, which is new for this pass and unavoidable: they asserted against the event path
+this session deleted. They now assert against the journal, which is the point.
+
+**The pass's exit criteria are met.** Three kills mid-run at three different points, each
+leaving a complete contiguous prefix; a frontend killed mid-run and reconnected from its last
+id with no gap. Both were done against the real model and the real journal, not the suite —
+numbers below.
+
+### what deviated from the plan, and why
+
+**"Remove any pre-existing in-memory event bus" could not mean "remove the generator".**
+`AgentLoop.run_turn` is an async generator and its yields are how a caller drives a turn at
+all. What was a second event path is the *lifecycle vocabulary* it carried:
+`ToolStarted`, `ToolFinished`, `SubagentStarted`, `SubagentFinished`, `TurnFinished`. Those
+are gone. What remains in `agent/stream.py` is `Delta` (a fragment of the model's output),
+`Answer` (the finished text) and `Notice`, and the rule is written into the module: **it
+carries no agent, tool or worker state.** `test_a_turn_that_calls_a_tool_says_nothing_about_it_on_the_stream`
+is the guard, and `test_the_in_process_event_bus_no_longer_exists` asserts the module cannot
+be imported.
+
+**`Notice` survived, with one use, and it is the one thing on the stream that the journal
+does not know.** It reports that memory retrieval failed and the turn continued with less
+context than it should have. There is no event type for that — the vocabulary is fixed by
+§15 and by 2b — and inventing an eighteenth type in the session whose job is deletion was not
+this session's call. The other two notices were removed rather than kept: "model call failed"
+is `agent_finished(status="failed", error=...)` and a frontend renders it from there, and the
+withdrawn-tool warning is the `message_appended(role=system, step_id=...)` the loop already
+journals. See open question 1.
+
+**`Answer` carries only `turn_id` and `text`,** where `TurnFinished` also carried `steps` and
+`usage`. Those are `agent_finished`'s and are now read from it: `subagents.py` derives
+`budget_exhausted` from `status == "abandoned"` (the loop's own word for the step budget
+running out, and the worker's budget is `spec.max_steps`) and its token count from
+`usage`. Duplicating them on the stream is how two records of one number start to disagree.
+
+**Delivery is a cursor read from the file, not a fan-out.** There is no subscriber list, no
+queue and no in-memory ring anywhere in this session's code. A subscriber holds one integer
+(`JournalTail.last_id`) and everything it renders it read from SQLite by `id > cursor`. Three
+consequences, all of them the reason for choosing it: a subscriber cannot be delivered
+something that is not durable; a reconnect and a first connection are the same code path with
+a different starting integer; and there is nothing a killed frontend can lose except the
+integer, which is what `--since` takes back.
+
+**`drain()` flushes the writer when it owns one, and that is load-bearing rather than tidy.**
+2a's open question 5 was exactly this: the buffer's age check runs on append and there is no
+timer, so a process that goes quiet mid-turn — which is what a process does while a tool runs
+for thirty seconds — would hold `tool_started` in memory and the feed would stall at the
+moment the user is waiting. The poll interval (50ms, `feed.POLL_INTERVAL_S`) is therefore the
+buffer's real age bound while somebody is watching, and it costs at most one fsync per
+interval. `test_a_subscriber_is_told_a_tool_started_before_that_tool_returns` makes the tool
+itself refuse to return until a subscriber has seen `tool_started`, so the property fails as a
+timeout rather than as a slow UI.
+
+**The REPL and Telegram now mint the run id before the turn starts.** A subscriber cannot
+filter a feed by a run id the turn has not opened yet, so `run_id = str(uuid7())` is passed
+into `run_turn`, and for those two channels **`run_id != str(turn_id)`** — the loop's default
+derivation still applies to `agent ask`, `one_shot` and both daemon turns. The papercut this
+creates (`agent trace` takes a turn id, `agent journal show` took a run id) is closed rather
+than documented: `journal show` resolves a turn id by scanning `agent_started` payloads.
+
+**`brief_args` moved into `journal/render.py` rather than being copied.** It was in the
+deleted module, and it is the rule about how much of a stranger's words to show. Both frontends
+render through it, and `flat` still collapses whitespace so a mail subject cannot forge a
+second line in a feed that prints one event per line.
+
+**`agent journal` was built after all** (2a and 2b both deferred it). 2c needs a subscriber in
+its own process, or "the frontend reads the journal" is a claim about one renderer rather than
+about the feed: `runs`, `show`, and `follow --run --since --replay`. `follow` prints the id
+first on every line, because that is the cursor.
+
+### what is now true about the code that was not before
+
+- **There is one event path.** Everything about execution goes `RunJournal.emit` →
+  `JournalWriter.append` → `JournalStore.append`, and everything that watches it reads
+  `store.read_all(after_id=...)`. The REPL, the Telegram progress message, `subagents.py` and
+  `agent journal follow` are four subscribers to one feed; three of them are in the writing
+  process and one is not, and they use the same class.
+- **A frontend cannot show something the journal does not have**, because the object it
+  renders *is* the journaled row, with its `id` and `seq`. The old path could, and did in one
+  direction: `SubagentStarted` was rendered by the REPL and emitted by nobody, so delegation
+  was invisible in the UI for as long as that code existed. It is now visible, from
+  `worker_created` / `worker_finished`, which the journal has had since 2b.
+- **The renderer cannot take the feed down.** `render_event` is a `.get` with no default
+  branch to get wrong, so the eight types nothing writes yet render as nothing;
+  `RENDERED_TYPES` says which have a line, as data. A payload that raises anyway costs one
+  visible red line in the REPL and not the rest of the turn — the opposite of
+  `memory/retrieval.py`, where a `KeyError` inside a broad `except` silently removes the whole
+  memory block. Every one of the seventeen types is exercised by a parametrized test whose
+  payload is *derived from the type's own field spec*, so a type added later is covered on the
+  day it is added.
+- **A worker's transcript still carries its failures in the right place.** `subagents.py`
+  drains the feed at each yield rather than on a timer, so `[tool X failed]` lands where the
+  failure happened rather than wherever a poll woke up. This is behaviour, not cosmetics: that
+  transcript is what the summarising model is shown. Asserted by
+  `test_a_workers_tool_failure_lands_in_its_transcript_where_it_happened`, which fails if the
+  drain moves to the end of the turn.
+- **Nothing about agent behaviour, prompts or the tool surface changed.** The messages sent to
+  the model, the tool schemas, the policy decisions and the archive rows are untouched; the
+  only change to what a *person* sees is that the REPL now renders mid-turn system nudges
+  (the withdrawn-tool notice and `FINAL_NUDGE`) as a dim line, because that is where that
+  information lives now.
+
+**Mutation-checked rather than trusted for being green.** Six mutations, five caught
+immediately:
+
+- remove the flush from `drain()` → 6 failures, including the live-tool one.
+- `turn_ended` ignores `worker_id` (a delegating turn's feed stops at the first worker) → caught.
+- renderer map without a default branch (`_RENDERERS[event.type]`) → 9 failures.
+- `subagents` absorbs the feed only after the turn → caught, on marker position.
+- `TurnView.show` swallows a render failure instead of printing it → caught.
+- **advance the cursor only over events the tail kept** → *survived the first round.* It is
+  invisible without paging: with `limit`, a cursor parked before a page of another run's
+  events re-reads that page forever and never reaches its own next event. The narrowed-tail
+  test now reads in pages with a foreign run's events last, and catches it both ways.
+
+### schemas as actually implemented
+
+**No change to the journal schema, the event vocabulary, or any payload.** `SCHEMA_VERSION`
+is still 1, no migration, `worker_id` and `step_id` are still payload keys, and 2a's open
+question 6 (`_migrate` cannot migrate) is still untriggered. 2c added one read method,
+`JournalStore.last_id(run_id=None)` — the highest feed id in the file, 0 when empty, which is
+where a subscriber starts when it wants "from now on".
+
+**The subscription, as implemented:**
+
+```python
+JournalTail(store, *, run_id=None, worker_id=None, since=0, writer=None)
+JournalTail.on(writer, *, run_id=None, worker_id=None, since=None)   # this process's writer
+JournalTail.local(*, run_id=None, worker_id=None, since=None, cfg=None)
+JournalTail.attach(path=None, *, run_id=None, since=0, cfg=None)     # another process
+tail.last_id                      # the whole of a subscriber's state
+tail.drain(limit=None) -> list[Event]
+async tail.follow(*, stop=None, poll_interval=0.05, until=None) -> AsyncIterator[Event]
+journal.feed.turn_ended(run_id)   # `until=` for "this run's own turn ended, not a worker's"
+```
+
+`since=None` means "the end of the file as it is now", and it flushes before reading that end,
+because an id taken while events sit in the buffer would be re-read as new the moment somebody
+flushed. `drain()` advances the cursor past events it filtered out. `follow()` checks `stop`
+*after* a drain, never before.
+
+**The turn stream, as implemented** (`agent/stream.py`, all frozen dataclasses):
+
+```
+Delta(text: str, thinking: bool = False)      # a fragment of the model's output
+Notice(text: str, level: str = "info")        # a remark to the human; one use left
+Answer(turn_id: str, text: str)               # yielded once, last
+STREAM_TYPES = (Delta, Notice, Answer)        # the guard test's list
+```
+
+**Rendering:** `render_event(Event) -> Line | None`, `Line(text, style)` where `style` is a
+rich style name. `RENDERED_TYPES` is exactly `{tool_requested, tool_progress, tool_finished,
+tool_failed, worker_created, worker_finished, message_appended, agent_finished}`.
+`tool_started` has no line (the request line already carried the name *and* the arguments, and
+two lines per call is noise); `agent_started` has none; the Pass 3/4/5 types have none, which
+is theirs to add. `message_appended` renders **only** `role=system` events that carry a
+`step_id` — the mid-turn nudges — because the user's words and the assistant's prose are
+already on screen and the assembled system block is 5kB of instructions the user did not write.
+`agent_finished` renders only `status="failed"`.
+
+**Which events are synchronous and which are buffered: unchanged** (`effect_*`,
+`checkpoint_written`, `agent_finished`). What changed is the practical effect of buffering:
+while a subscriber is attached its poll flushes the tail, so an interactive turn commits every
+event within 50ms of emitting it. A turn with *no* subscriber — both daemon turns, and
+`agent ask` — still holds its tail until `buffer_max` (32), the 1.0s age check on the next
+append, or `agent_finished`.
+
+**The kill exercise, run live against `~/.local/share/agent/journal.db` and the real model.**
+A watcher thread SIGKILLs the process the moment the journal shows a chosen event, so the kill
+point is exact and nothing unwinds — no `atexit`, no flush:
+
+| run | killed on | events kept | seq | ends with | integrity |
+|---|---|---|---|---|---|
+| `kill-1` | the system block, i.e. during the model call | 3 | 1–3 contiguous | `message_appended` | ok |
+| `kill-2` | `tool_started`, i.e. with the tool running | 6 | 1–6 contiguous | `tool_started` | ok |
+| `kill-3` | `tool_finished`, before the turn could end | 7 | 1–7 contiguous | `tool_finished` | ok |
+| `kill-4` | the same point in wall-clock terms, **nobody subscribed** | 4 | 1–4 contiguous | `message_appended` | ok |
+
+Every payload parsed, `PRAGMA integrity_check` was `ok` in all four, and no run had a hole.
+`kill-4` is the one worth reading twice: the same kill point kept **four** events instead of
+seven, because with nobody watching, the tool events were still in the buffer. A killed
+process loses a suffix and never a hole (2a), and *how long* that suffix is depends on whether
+anything was subscribed.
+
+**The reconnect exercise**, two `agent journal follow` processes and one live turn:
+follower A started at id 34, printed ids 35, 36, 37, was `kill -9`'d mid-run; follower B
+started with `--since 37` and printed 38, 39, 40, 41, 42, 43. The run holds ids 35–43, seq 1–9,
+ending in `agent_finished`. No gap, no duplicate, no state anywhere but the integer.
+
+**Live-data check (the house rule: count the nulls in the table, do not trust the code).**
+43 events across 7 runs at the time of checking, every row re-validated against
+`events.EVENTS`: no missing required field, no unknown key, and the only nulls were
+`agent_started.parent_turn_id` (7, every top-level turn, declared nullable) and
+`agent_finished.error` (3, every turn that succeeded, declared nullable). Five empty
+`message_appended.preview` values, all with `chars: 0` — a step whose assistant message was
+nothing but tool calls, which is a true empty and agrees with its own count. The two paths 2b
+flagged came back real: `tool_finished.trust` is `"trusted"`, and `ToolCall.id` is
+`"chatcmpl-tool-af38ca2f09567bad"` from this provider, so `call_id` is a real string rather
+than the `None` 2b worried about. A live denial was provoked to reach `tool_failed`:
+`rule: "fs-outside-roots"`, `queued_id: null` (nullable, and a policy denial is not a queued
+approval), `denied: true`, `attempt: 0`.
+
+The REPL itself was driven live under a pty: `→ tool_search(query=calendar)` and
+`✓ These tools are now available…` rendered from the journal feed, then the prose answer —
+the same screen as before, sourced from the only record there is.
+
+### deferred items, and where they went
+
+- **Anything that reads the journal for recovery** — Pass 4, per the *Must not*. `feed.py`
+  reads it for *display*; nothing folds it. `reduce` still does not exist.
+- **`tool_progress` still has no producer.** It now has a renderer, so the pass that adds a
+  progress channel to the tool surface gets the UI for free. Still a *Must not* here.
+- **The Pass 3/4/5 event types have no human line.** `checkpoint_written`, `effect_*`,
+  `run_*`, `handoff_*` render as nothing rather than as an invented line; adding one belongs to
+  the pass that writes them, and `RENDERED_TYPES` is where it goes.
+- **The poll interval is a module constant, not config.** `feed.POLL_INTERVAL_S = 0.05`. It is
+  a UI latency knob and a buffer age bound; no `[journal]` key was added for it, because
+  nobody has a reason to tune it yet.
+- **No transport.** The feed is a SQLite cursor. An HTTP/SSE or websocket frontend would wrap
+  `JournalTail.attach` and pass `Last-Event-ID` to `since`; that is the whole integration and
+  it is not built, because there is no such frontend in this repo.
+- **`agent journal show` resolves a turn id by scanning `agent_started` payloads.** Fine at
+  the current size, wrong at a million events. Whoever adds an index adds it there.
+
+### open questions for later passes
+
+**1. A degraded turn is still invisible to a fold.** When memory retrieval fails, the loop
+catches it, yields a `Notice`, and continues with no context block. The REPL prints it; the
+journal has no record, so a Pass 4 fold cannot tell a turn that answered from memory from one
+that answered from nothing. This was equally true before 2c — it was a UI line then too — but
+2c is where it became the *only* thing on the turn stream that the journal does not know, which
+makes it the obvious next thing to fix. Fixing it means either an eighteenth event type or a
+field on the `message_appended` that carries the system block; both are vocabulary changes and
+belong with whoever owns the fold.
+
+**2. `run_id != turn_id` for the REPL and Telegram, and the rule is now "whoever needs to
+subscribe first names the run".** Consistent within each channel, inconsistent across them,
+and `journal show` papers over the difference. Pass 4's `run_resumed` and Pass 5's `run_forked`
+both need to name runs that outlive a single turn, so that is the pass that should decide
+whether a run id is ever derived from a turn id at all.
+
+**3. The REPL's rendering has no automated coverage below `TurnView`.** `TurnView.show` and
+`render_event` are tested directly, and the live pty run above exercised the whole thing once,
+but nothing in the suite drives `run_chat` — it needs a terminal. The specific gap: if
+`view.catch_up(tail)` were deleted, the REPL would silently stop showing the last events of a
+turn and every test would still pass. A fake-console harness around `run_chat` would close it.
+
+**4. The fsync cost is still unmeasured, and there is now more of it.** 2a #3 and 2b #4 are
+unchanged, and 2c adds one flush per poll interval per subscribed turn — bounded by 20/s and
+only while events are actually arriving, but unmeasured. Pass 10 owns the number.
+
+**5. A daemon turn is journaled in clumps.** Neither `scheduler.py` nor `heartbeat.py`
+subscribes, because neither renders anything, so their events sit buffered until 32 accumulate,
+the 1.0s age check fires on the next append, or the turn ends. An out-of-process follower
+watching a daemon turn therefore sees it arrive in bursts, and a SIGKILL mid-daemon-turn keeps
+less than the same kill would keep from an interactive one (the `kill-4` row). If that matters
+to Pass 4's resume story, the fix is a subscriber-less flush trigger, not a bigger buffer.
+
+**6. `follow()` has no cross-process wakeup.** It polls. A frontend on another machine over a
+network filesystem would be polling a file it should not be polling; the answer then is a
+notify channel carrying only "there is something after id N", never the events themselves — the
+events must still come from the journal, or the second path is back.
+
+**7. Still open, untouched by 2c:** power-loss durability is reasoned rather than measured
+(2a #2); `_migrate` cannot migrate (2a #6); retention's two extension points are unusable until
+Passes 3 and 4 (2a #7); a tool call outside a turn is journaled by nobody (2b #2); the tool
+events are emitted by `loop.py` rather than by the executor (2b #3); the journal holds
+200-character plaintext previews in `data_dir` and is not in `backup.create` (2b #5);
+`agent_finished.status` has four values where telemetry has three (2b #6). And from Pass 1,
+token accounting is still broken upstream — every live `agent_finished` in the journal carries
+`usage_reported: false`.

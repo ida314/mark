@@ -1,4 +1,10 @@
-"""The turn loop: one user message in, streamed events out, everything archived."""
+"""The turn loop: one user message in, prose out, everything recorded in the journal.
+
+What this loop hands back to its caller is the model's own output (`agent/stream.py`). What
+it *records* - every tool call, every message, how the turn ended - goes to the run journal,
+and anything that wants to watch that subscribes with `journal/feed.py`. Session 2c removed
+the second copy that used to be yielded alongside.
+"""
 
 from __future__ import annotations
 
@@ -26,15 +32,7 @@ from ..tools.base import ToolContext
 from ..tools.executor import ToolExecutor
 from ..tools.registry import Registry, get_registry
 from . import context as ctxmod
-from .events import (
-    Notice,
-    TextChunk,
-    ThinkingChunk,
-    ToolFinished,
-    ToolStarted,
-    TurnFinished,
-    UIEvent,
-)
+from .stream import Answer, Delta, Notice, TurnStream
 
 FINAL_NUDGE = (
     "You have used your whole tool budget for this turn. Stop calling tools. "
@@ -207,7 +205,7 @@ class AgentLoop:
         run_id: str | None = None,
         worker_id: str | None = None,
         parent_turn_id: UUID | str | None = None,
-    ) -> AsyncIterator[UIEvent]:
+    ) -> AsyncIterator[TurnStream]:
         """One turn. `run_id` defaults to this turn, which is what makes a top-level turn a
         run; a worker is handed its caller's `run_id` and a `worker_id`, so its events are
         part of the run that created it rather than a second run nothing links to."""
@@ -371,9 +369,9 @@ class AgentLoop:
                         ):
                             if isinstance(event, TextDelta):
                                 text_parts.append(event.text)
-                                yield TextChunk(text=event.text)
+                                yield Delta(text=event.text)
                             elif isinstance(event, ReasoningDelta):
-                                yield ThinkingChunk(text=event.text)
+                                yield Delta(text=event.text, thinking=True)
                             elif isinstance(event, ToolCallDone):
                                 calls.append(event.call)
                             elif isinstance(event, Finish):
@@ -382,7 +380,10 @@ class AgentLoop:
                                 usage_total["input_tokens"] += event.usage.get("input_tokens", 0)
                                 usage_total["output_tokens"] += event.usage.get("output_tokens", 0)
                 except LLMError as exc:
-                    yield Notice(text=f"Model call failed: {exc}", level="error")
+                    # No notice on the stream: the failure and its message are the journal's
+                    # `agent_finished(status="failed", error=...)`, which a frontend reads
+                    # from the feed like everything else. Yielding it here as well is how
+                    # the two paths this session deleted came to disagree.
                     await self._record_turn(
                         turn_id, session, origin, autonomy, "error", started,
                         usage_total, refs, trace_ids, str(exc),
@@ -395,9 +396,7 @@ class AgentLoop:
                         status="failed", steps=steps, answer="", usage=usage_total,
                         usage_reported=tele.usage_reported, error=str(exc),
                     )
-                    yield TurnFinished(
-                        turn_id=str(turn_id), text="", steps=steps, usage=usage_total
-                    )
+                    yield Answer(turn_id=str(turn_id), text="")
                     return
 
                 tele.llm_call(time.perf_counter() - llm_started, finish_reason)
@@ -449,7 +448,6 @@ class AgentLoop:
                 stuck: list[str] = []
                 for call in calls:
                     args_preview = _safe_args(call.arguments)
-                    yield ToolStarted(name=call.name, args=args_preview)
                     # Read before the re-add below, which would otherwise make every call
                     # look like it was to a tool the model had been shown.
                     was_visible = call.name in exposed
@@ -526,10 +524,6 @@ class AgentLoop:
                             },
                             step_id=sid,
                         )
-                    yield ToolFinished(
-                        name=call.name, ok=result.ok,
-                        summary=_summarize(result.content), denied=denied,
-                    )
                     await repo_archive.append_event(
                         RawEvent(
                             kind="tool_result", actor=f"tool:{call.name}",
@@ -558,13 +552,6 @@ class AgentLoop:
                         ]
                         stuck.append(
                             STUCK_NUDGE.format(name=call.name, attempts=attempts)
-                        )
-                        yield Notice(
-                            text=(
-                                f"({call.name} kept being called with arguments it rejects; "
-                                "withdrawn for this turn)"
-                            ),
-                            level="warn",
                         )
 
                 # After the batch, never between an assistant's tool calls and their results.
@@ -613,9 +600,7 @@ class AgentLoop:
                 status=status, steps=steps, answer=answer, usage=usage_total,
                 usage_reported=tele.usage_reported,
             )
-            yield TurnFinished(
-                turn_id=str(turn_id), text=answer, steps=steps, usage=usage_total
-            )
+            yield Answer(turn_id=str(turn_id), text=answer)
 
     async def _record_turn(
         self, turn_id, session, origin, autonomy, status, started, usage, refs, trace_ids,
@@ -658,11 +643,6 @@ def _safe_args(raw: str) -> dict[str, Any]:
         return {"_raw": (raw or "")[:200]}
 
 
-def _summarize(content: str, limit: int = 160) -> str:
-    flat = " ".join(content.split())
-    return flat[:limit] + ("…" if len(flat) > limit else "")
-
-
 async def one_shot(
     prompt: str, *, autonomy: str = "assist", channel: str = "cli", approver: Approver | None = None
 ) -> str:
@@ -671,7 +651,7 @@ async def one_shot(
     loop = AgentLoop(approver=approver)
     answer = ""
     async for event in loop.run_turn(session, prompt, autonomy=autonomy):
-        if isinstance(event, TurnFinished):
+        if isinstance(event, Answer):
             answer = event.text
     await repo_archive.end_session(session.id)
     return answer

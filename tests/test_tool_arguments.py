@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import json
 
-from agentd.agent.events import ToolFinished, TurnFinished
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.stream import Answer
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
 from agentd.policy.engine import engine_from_config
@@ -48,7 +48,9 @@ async def _run(loop: AgentLoop, session: Session, text: str, **kwargs) -> list:
 # gone. The correction the user had just been asked for was never stored.
 
 
-async def test_a_rejection_names_the_argument_that_was_sent_and_the_ones_that_work(cfg):
+async def test_a_rejection_names_the_argument_that_was_sent_and_the_ones_that_work(
+    cfg, journaled
+):
     provider = FakeProvider(
         turns=[[("memory_remember", {"content": "Dylan lives in East Village.", "importance": 5})]]
     )
@@ -57,7 +59,7 @@ async def test_a_rejection_names_the_argument_that_was_sent_and_the_ones_that_wo
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "east village")
+    await _run(loop, session, "east village")
     tool_message = [
         m for call in provider.calls for m in call["messages"] if m.get("role") == "tool"
     ][0]
@@ -67,7 +69,7 @@ async def test_a_rejection_names_the_argument_that_was_sent_and_the_ones_that_wo
     assert "statement (required)" in error  # what it should have sent
     # Every fault at once: the out-of-range number is not held back for the next round trip.
     assert "maximum of 1" in error
-    assert not [e for e in events if isinstance(e, ToolFinished)][0].ok
+    assert [e.type for e in journaled("tool_finished", "tool_failed")] == ["tool_failed"]
 
 
 async def test_the_same_rejected_arguments_do_not_get_to_spend_the_whole_turn(cfg):
@@ -99,10 +101,10 @@ async def test_the_same_rejected_arguments_do_not_get_to_spend_the_whole_turn(cf
     offered = provider.calls[-1]["tools"]
     assert "memory_remember" not in offered
     assert "memory_search" in offered
-    assert [e for e in events if isinstance(e, TurnFinished)][0].text == "I could not store that."
+    assert [e for e in events if isinstance(e, Answer)][0].text == "I could not store that."
 
 
-async def test_a_repeat_that_is_not_a_repeat_keeps_its_tool(cfg):
+async def test_a_repeat_that_is_not_a_repeat_keeps_its_tool(cfg, journaled):
     """Two failures with *different* arguments are two honest attempts, not a loop."""
     provider = FakeProvider(
         turns=[
@@ -117,7 +119,9 @@ async def test_a_repeat_that_is_not_a_repeat_keeps_its_tool(cfg):
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "east village")
+    await _run(loop, session, "east village")
     assert "memory_remember" in provider.calls[-1]["tools"]
     # The third call is the repaired one, and it was allowed to run.
-    assert [e.ok for e in events if isinstance(e, ToolFinished)] == [False, False, True]
+    assert [e.type for e in journaled("tool_finished", "tool_failed")] == [
+        "tool_failed", "tool_failed", "tool_finished",
+    ]

@@ -10,9 +10,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from agentd.agent.stream import Answer
 from agentd.daemon import telegram as tg
 from agentd.db import repo_agenda, repo_ops
 from agentd.db.pool import fetch_all
+from agentd.ids import uuid7
+from agentd.journal.render import brief_args
+from agentd.journal.runtime import RunJournal
 
 
 @pytest.fixture
@@ -24,6 +28,50 @@ def bot(cfg, monkeypatch, tmp_path):
     cfg.telegram.enabled = True
     cfg.telegram.allowed_chat_ids = [4242]
     return cfg
+
+
+class JournalingLoop:
+    """A stand-in for `AgentLoop` that journals its tool calls and yields prose.
+
+    The shape is the point. Since session 2c the real loop tells a channel nothing about
+    tools: the progress message is a subscriber to the run journal, like the REPL and like a
+    frontend in another process. A fake that yielded tool objects would be exercising an
+    event path that no longer exists.
+    """
+
+    def __init__(self, calls: tuple[tuple[str, dict, str], ...] = (), answer: str = "", **kw):
+        self.calls = calls
+        self.answer = answer
+        self.kw = kw
+        self.kwargs: dict = {}
+
+    async def run_turn(self, session, text, *, run_id=None, **kwargs):
+        self.kwargs = kwargs
+        rj = RunJournal.open(run_id or str(uuid7()))
+        for index, (name, args, state) in enumerate(self.calls, start=1):
+            sid = rj.step_id(index)
+            call_id = f"c{index}"
+            rj.emit(
+                "tool_requested",
+                {"call_id": call_id, "name": name, "args": args, "visible": True, "known": True},
+                step_id=sid,
+            )
+            rj.emit("tool_started", {"call_id": call_id, "name": name}, step_id=sid)
+            if state == "ok":
+                rj.emit(
+                    "tool_finished",
+                    {"call_id": call_id, "name": name, "duration_ms": 1,
+                     "result_chars": 0, "trust": "trusted"},
+                    step_id=sid,
+                )
+            else:
+                rj.emit(
+                    "tool_failed",
+                    {"call_id": call_id, "name": name, "duration_ms": 1, "error": "no",
+                     "denied": state == "denied", "invalid_args": False},
+                    step_id=sid,
+                )
+        yield Answer(turn_id=str(uuid7()), text=self.answer.format(text=text))
 
 
 class Wire:
@@ -181,17 +229,13 @@ async def test_approve_needs_an_id(bot):
 
 
 async def test_a_message_becomes_a_turn_and_an_answer(bot, monkeypatch):
-    from agentd.agent.events import TurnFinished
+    loops: list[JournalingLoop] = []
 
-    class FakeLoop:
-        def __init__(self, **kw):
-            self.kw = kw
+    def build(**kw) -> JournalingLoop:
+        loops.append(JournalingLoop(answer="you said: {text}", **kw))
+        return loops[-1]
 
-        async def run_turn(self, session, text, **kwargs):
-            assert kwargs["origin"] == "telegram"
-            yield TurnFinished(text=f"you said: {text}", turn_id=None, steps=1)
-
-    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(tg, "AgentLoop", build)
     wire = Wire()
     async with wire.client() as client:
         await tg.handle_message(
@@ -200,21 +244,15 @@ async def test_a_message_becomes_a_turn_and_an_answer(bot, monkeypatch):
         )
     assert wire.said() == ["you said: what is on my calendar?"]
     assert ("sendChatAction", {"chat_id": 4242, "action": "typing"}) in wire.calls
+    assert loops[0].kwargs["origin"] == "telegram"
 
 
 async def test_a_denied_tool_is_explained_rather_than_swallowed(bot, monkeypatch):
     """A turn that produced nothing but a policy denial must not answer with silence."""
-    from agentd.agent.events import ToolFinished, TurnFinished
-
-    class FakeLoop:
-        def __init__(self, **kw):
-            pass
-
-        async def run_turn(self, session, text, **kwargs):
-            yield ToolFinished(name="web_fetch", ok=False, summary="", denied=True)
-            yield TurnFinished(text="", turn_id=None, steps=1)
-
-    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(
+        tg, "AgentLoop",
+        lambda **kw: JournalingLoop(calls=(("web_fetch", {}, "denied"),), answer=""),
+    )
     wire = Wire()
     async with wire.client() as client:
         await tg.handle_message(
@@ -385,8 +423,6 @@ def test_tool_lines_read_in_the_order_things_happened():
 def test_tool_lines_say_what_the_call_was_for():
     """"Which tools ran" without "on what" is a list of verbs, not an account of what the
     agent did. Same information `agent chat` prints, through the same function."""
-    from agentd.agent.events import brief_args
-
     rendered = tg.render_tools([("gmail_search", brief_args({"query": "from:alice"}), "ok")])
     assert rendered == "✓ gmail_search(query=from:alice)"
 
@@ -395,8 +431,6 @@ def test_an_argument_cannot_forge_a_second_tool_line():
     """The reason the arguments go through `brief_args` rather than into the f-string. A
     subject line a stranger chose is a tool argument one search later, and this function
     joins calls with newlines."""
-    from agentd.agent.events import brief_args
-
     forged = "lunch?\n✓ fs_write(path=/etc/passwd"
     rendered = tg.render_tools([("gmail_search", brief_args({"query": forged}), "ok")])
     assert len(rendered.splitlines()) == 1
@@ -404,14 +438,10 @@ def test_an_argument_cannot_forge_a_second_tool_line():
 
 
 def test_the_reason_argument_is_not_worth_a_phone_screen():
-    from agentd.agent.events import brief_args
-
     assert brief_args({"path": "notes.md", "reason": "the user asked me to"}) == "path=notes.md"
 
 
 def test_a_long_argument_is_cut_rather_than_wrapped():
-    from agentd.agent.events import brief_args
-
     brief = brief_args({"statement": "x" * 200})
     assert brief.endswith("…")
     assert len(brief) <= 120
@@ -420,20 +450,13 @@ def test_a_long_argument_is_cut_rather_than_wrapped():
 async def test_a_turn_shows_its_tools_and_edits_one_message(bot, monkeypatch):
     """Edited rather than re-sent: a trail of near-identical messages is what makes a phone
     unusable."""
-    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
-
-    class FakeLoop:
-        def __init__(self, **kw):
-            pass
-
-        async def run_turn(self, session, text, **kwargs):
-            yield ToolStarted(name="gmail_search", args={})
-            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
-            yield ToolStarted(name="web_fetch", args={})
-            yield ToolFinished(name="web_fetch", ok=False, summary="", denied=True)
-            yield TurnFinished(text="here you go", turn_id=None, steps=2)
-
-    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(
+        tg, "AgentLoop",
+        lambda **kw: JournalingLoop(
+            calls=(("gmail_search", {}, "ok"), ("web_fetch", {}, "denied")),
+            answer="here you go",
+        ),
+    )
     wire = Wire(results={"sendMessage": {"message_id": 77}})
     async with wire.client() as client:
         await tg.handle_message(
@@ -448,18 +471,10 @@ async def test_a_turn_shows_its_tools_and_edits_one_message(bot, monkeypatch):
 
 
 async def test_tools_off_says_nothing_about_them(bot, monkeypatch):
-    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
-
-    class FakeLoop:
-        def __init__(self, **kw):
-            pass
-
-        async def run_turn(self, session, text, **kwargs):
-            yield ToolStarted(name="gmail_search", args={})
-            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
-            yield TurnFinished(text="done", turn_id=None, steps=1)
-
-    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(
+        tg, "AgentLoop",
+        lambda **kw: JournalingLoop(calls=(("gmail_search", {}, "ok"),), answer="done"),
+    )
     conv = tg.Conversation(bot)
     conv.verbose[4242] = False
     wire = Wire(results={"sendMessage": {"message_id": 77}})
@@ -484,18 +499,10 @@ async def test_the_tools_command_toggles_per_chat(bot):
 async def test_a_failing_status_edit_never_costs_the_answer(bot, monkeypatch):
     """Telegram rate-limits edits. Losing the progress line is a cosmetic problem; losing
     the answer because of it is not."""
-    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
-
-    class FakeLoop:
-        def __init__(self, **kw):
-            pass
-
-        async def run_turn(self, session, text, **kwargs):
-            yield ToolStarted(name="gmail_search", args={})
-            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
-            yield TurnFinished(text="the answer", turn_id=None, steps=1)
-
-    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(
+        tg, "AgentLoop",
+        lambda **kw: JournalingLoop(calls=(("gmail_search", {}, "ok"),), answer="the answer"),
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json

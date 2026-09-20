@@ -1,9 +1,10 @@
 """The event vocabulary: every type the journal may carry, and the shape of its payload.
 
-Not to be confused with `agent/events.py`, which is the in-process UI stream the CLI and
-Telegram render. That one is ephemeral and is what session 2c replaces with a journal-backed
-feed. This one is the durable record: `state = fold(reduce, journal, initial)` folds over
-exactly these seventeen types and nothing else.
+These seventeen types are the only vocabulary there is. Session 2c deleted the in-process
+`agent/events.py` stream that used to carry the same facts under different names, so a
+frontend that wants to know what a tool is doing reads them from here through
+`journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
+`state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
 **Nine of the seventeen are emitted today** (session 2b wired them through the runtime).
 The other eight are defined here and written by nobody yet - `tool_progress` needs a

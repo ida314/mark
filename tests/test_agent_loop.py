@@ -1,11 +1,16 @@
-"""The turn loop and the executor, driven by a scripted model."""
+"""The turn loop and the executor, driven by a scripted model.
+
+What a turn *did* is asserted against the journal (the `journaled` fixture), because that is
+where it is recorded. What a turn *said* is asserted against the turn stream, because prose
+is all the stream carries now.
+"""
 
 from __future__ import annotations
 
 import json
 
-from agentd.agent.events import TextChunk, ToolFinished, TurnFinished
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.stream import Answer, Delta
 from agentd.db import repo_ops
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
@@ -28,7 +33,7 @@ async def _run(loop: AgentLoop, session: Session, text: str, **kwargs) -> list:
     return [event async for event in loop.run_turn(session, text, **kwargs)]
 
 
-async def test_tool_result_is_fed_back_and_the_answer_streams(cfg, tmp_path):
+async def test_tool_result_is_fed_back_and_the_answer_streams(cfg, tmp_path, journaled):
     target = cfg.paths.roots()[0] / "note.txt"
     target.write_text("the answer is 42")
     provider = FakeProvider(
@@ -41,9 +46,8 @@ async def test_tool_result_is_fed_back_and_the_answer_streams(cfg, tmp_path):
     session = await Session.create("test")
     events = await _run(loop, session, "what does the note say?")
 
-    tool_events = [e for e in events if isinstance(e, ToolFinished)]
-    assert tool_events and tool_events[0].ok
-    text = "".join(e.text for e in events if isinstance(e, TextChunk))
+    assert [e.type for e in journaled("tool_finished", "tool_failed")] == ["tool_finished"]
+    text = "".join(e.text for e in events if isinstance(e, Delta) and not e.thinking)
     assert "42" in text
     # the model saw the tool output
     assert any(
@@ -53,7 +57,7 @@ async def test_tool_result_is_fed_back_and_the_answer_streams(cfg, tmp_path):
     )
 
 
-async def test_denied_write_comes_back_to_the_model_as_a_denial(cfg):
+async def test_denied_write_comes_back_to_the_model_as_a_denial(cfg, journaled):
     target = cfg.paths.workspace / "out.txt"
     provider = FakeProvider(
         turns=[[("fs_write", {"path": str(target), "content": "x", "reason": "because"})], "Understood."]
@@ -63,10 +67,10 @@ async def test_denied_write_comes_back_to_the_model_as_a_denial(cfg):
         approver=AutoApprover(approve=False), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "write the file", autonomy="assist")
+    await _run(loop, session, "write the file", autonomy="assist")
 
-    finished = [e for e in events if isinstance(e, ToolFinished)][0]
-    assert finished.denied
+    refused = journaled("tool_failed")[0]
+    assert refused.payload["denied"] is True and refused.payload["name"] == "fs_write"
     assert not target.exists()
     tool_messages = [
         m for call in provider.calls for m in call["messages"] if m.get("role") == "tool"
@@ -124,7 +128,7 @@ async def test_untrusted_output_taints_the_turn_and_escalates_later_writes(cfg, 
     assert not target.exists()
 
 
-async def test_the_step_budget_ends_with_a_summary(cfg):
+async def test_the_step_budget_ends_with_a_summary(cfg, journaled):
     small = cfg.model_copy(update={"agent": cfg.agent.model_copy(update={"max_steps": 2})})
     target = cfg.paths.roots()[0] / "loop.txt"
     target.write_text("x")
@@ -140,35 +144,36 @@ async def test_the_step_budget_ends_with_a_summary(cfg):
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "keep reading")
-    finished = [e for e in events if isinstance(e, TurnFinished)][0]
-    assert finished.steps == 2
+    await _run(loop, session, "keep reading")
+    ended = journaled("agent_finished")[0]
+    assert ended.payload["steps"] == 2
+    assert ended.payload["status"] == "abandoned"
     # the last call had no tools and carried the nudge
     assert provider.calls[-1]["tools"] == []
 
 
-async def test_invalid_tool_arguments_are_reported_not_raised(cfg):
+async def test_invalid_tool_arguments_are_reported_not_raised(cfg, journaled):
     provider = FakeProvider(turns=[[("fs_read", {})], "I need a path."])
     loop = AgentLoop(
         cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "read something")
-    finished = [e for e in events if isinstance(e, ToolFinished)][0]
-    assert not finished.ok
-    assert "Invalid arguments" in finished.summary
+    await _run(loop, session, "read something")
+    failed = journaled("tool_failed")[0]
+    assert failed.payload["invalid_args"] is True
+    assert "Invalid arguments" in failed.payload["error"]
 
 
-async def test_unknown_tool_is_reported_to_the_model(cfg):
+async def test_unknown_tool_is_reported_to_the_model(cfg, journaled):
     provider = FakeProvider(turns=[[("no_such_tool", {})], "That tool does not exist."])
     loop = AgentLoop(
         cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
-    events = await _run(loop, session, "do a thing")
-    assert not [e for e in events if isinstance(e, ToolFinished)][0].ok
+    await _run(loop, session, "do a thing")
+    assert [e.payload["name"] for e in journaled("tool_failed")] == ["no_such_tool"]
 
 
 async def test_long_tool_output_is_truncated(cfg):
@@ -196,7 +201,7 @@ async def test_the_turn_is_archived_and_audited(cfg):
     )
     session = await Session.create("test")
     events = await _run(loop, session, "hi")
-    turn_id = [e for e in events if isinstance(e, TurnFinished)][0].turn_id
+    turn_id = [e for e in events if isinstance(e, Answer)][0].turn_id
 
     from agentd.db.repo_archive import events_for_session
 

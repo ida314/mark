@@ -19,6 +19,7 @@ from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
 from ..journal import events as jevents
+from ..journal.feed import JournalTail
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
 from ..llm.roles import get_provider, params_for
@@ -26,7 +27,7 @@ from ..obs import otel
 from ..policy.approvals import Approver
 from ..policy.engine import cap_autonomy
 from ..tools.registry import Registry, get_registry
-from .events import TextChunk, ToolFinished, TurnFinished
+from .stream import Answer, Delta
 
 
 class CandidateIn(BaseModel):
@@ -163,6 +164,25 @@ async def run_subagent(
                 session_id=parent_session_id, turn_id=parent_turn_id,
             )
         )
+        # The worker's own journal, narrowed to this worker. What used to arrive as
+        # in-process `ToolFinished` objects is read back from the feed, and it is drained at
+        # each yield rather than on a timer so that a failure marker lands where it happened
+        # in the transcript instead of wherever a poll woke up.
+        tail = JournalTail.on(rj.writer, run_id=run_id, worker_id=worker_id)
+
+        def absorb() -> None:
+            nonlocal tokens, status
+            for je in tail.drain():
+                if je.type == "tool_failed":
+                    transcript.append(f"\n[tool {je.payload['name']} failed]\n")
+                elif je.type == "agent_finished":
+                    usage = je.payload["usage"]
+                    tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+                    # "abandoned" is the loop's word for the step budget running out with
+                    # the model still calling tools, and this loop's budget is spec.max_steps.
+                    if je.payload["status"] == "abandoned":
+                        status = "budget_exhausted"
+
         async for event in loop.run_turn(
             session,
             task,
@@ -174,15 +194,15 @@ async def run_subagent(
             worker_id=worker_id,
             parent_turn_id=parent_turn_id,
         ):
-            if isinstance(event, TextChunk):
+            absorb()
+            if isinstance(event, Delta) and not event.thinking:
                 transcript.append(event.text)
-            elif isinstance(event, ToolFinished):
-                if not event.ok:
-                    transcript.append(f"\n[tool {event.name} failed]\n")
-            elif isinstance(event, TurnFinished):
-                tokens = event.usage.get("input_tokens", 0) + event.usage.get("output_tokens", 0)
-                if event.steps >= spec.max_steps:
-                    status = "budget_exhausted"
+            elif isinstance(event, Answer):
+                # The answer is already in the transcript: it is the prose that streamed.
+                pass
+        # `agent_finished` is written as the turn's generator unwinds, which is after its
+        # last yield, so the run's ending is only readable once the loop above has ended.
+        absorb()
         tainted = session.tainted
 
         # Final structured report, with no tools available.

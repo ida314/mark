@@ -40,6 +40,7 @@ watchers_app = typer.Typer(help="Timers, intervals and file watchers.")
 secrets_app = typer.Typer(help="Credentials the agent itself cannot read.")
 connectors_app = typer.Typer(help="Daemon-side feeds. They hold credentials the agent cannot read.")
 telegram_app = typer.Typer(help="The Telegram chat channel.")
+journal_app = typer.Typer(help="The run journal: the event log every frontend subscribes to.")
 
 app.add_typer(db_app, name="db")
 app.add_typer(memory_app, name="memory")
@@ -55,6 +56,7 @@ app.add_typer(watchers_app, name="watchers")
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(connectors_app, name="connectors")
 app.add_typer(telegram_app, name="telegram")
+app.add_typer(journal_app, name="journal")
 
 console = Console()
 
@@ -1266,6 +1268,113 @@ async def _actions(limit: int) -> None:
             f"[dim]{row['ts']:%m-%d %H:%M:%S}[/dim] [{color}]{row['status']:<7}[/{color}] "
             f"{row['actor']:<18} {row['kind']:<12} {row['name']} [dim]{str(row['id'])[:8]}[/dim]"
         )
+
+
+# --- the run journal ---------------------------------------------------------
+#
+# A subscriber in its own process, which is what makes "the frontend reads the journal" a
+# claim about the feed rather than about one renderer: these commands hold no state but the
+# last id they printed, and that is what `--since` takes back.
+
+
+@journal_app.command("runs")
+def journal_runs(limit: int = typer.Option(20, help="Most recent runs first.")) -> None:
+    """Which runs are in the journal, and how much of each."""
+    from ..journal.store import JournalStore, default_path
+
+    cfg = get_config()
+    with JournalStore(default_path(cfg)) as store:
+        rows = list(reversed(store.runs()))[:limit]
+        table = Table("run", "events", "last seq", "first", "last")
+        for info in rows:
+            table.add_row(
+                info.run_id, str(info.events), str(info.last_seq),
+                info.first_ts[:19], info.last_ts[:19],
+            )
+        console.print(table)
+        console.print(f"[dim]{store.count()} events, last id {store.last_id()}[/dim]")
+
+
+@journal_app.command("show")
+def journal_show(
+    run_id: str,
+    after: int = typer.Option(0, help="Only events after this seq."),
+) -> None:
+    """One run as a sequence: what happened, in order, from the journal alone."""
+    from ..journal.store import JournalStore, default_path
+
+    cfg = get_config()
+    with JournalStore(default_path(cfg)) as store:
+        events = store.read(run_id, after_seq=after)
+        if not events:
+            # A turn id is what the rest of the CLI takes (`agent trace`, `agent why`), and
+            # for a turn whose caller named its own run - the REPL and Telegram both do, so
+            # that they can subscribe before the turn opens - it is not the run id. Rather
+            # than make somebody grep for it, resolve it.
+            resolved = next(
+                (
+                    e.run_id
+                    for e in store.read_all()
+                    if e.type == "agent_started" and e.payload.get("turn_id") == run_id
+                ),
+                None,
+            )
+            if resolved is None:
+                console.print(f"[yellow]no events for run or turn {run_id}[/yellow]")
+                raise typer.Exit(1)
+            console.print(f"[dim]turn {run_id} ran in run {resolved}[/dim]")
+            events = store.read(resolved, after_seq=after)
+        for event in events:
+            console.print(_journal_line(event))
+
+
+@journal_app.command("follow")
+def journal_follow(
+    run_id: str | None = typer.Option(None, "--run", help="Only this run."),
+    since: int | None = typer.Option(
+        None, help="Resume after this event id. Omit to start at the end of the file."
+    ),
+    replay: bool = typer.Option(False, help="Start from the first event ever written."),
+) -> None:
+    """Subscribe to the journal and print events as they land.
+
+    The id in each line is the cursor: pass the last one you saw back as `--since` and the
+    feed resumes with no gap and no duplicate. That is the whole reconnection mechanism -
+    there is no session, no queue and nothing buffered on the writer's side to lose.
+    """
+    from ..journal.feed import JournalTail
+    from ..journal.store import default_path
+
+    cfg = get_config()
+    start = 0 if replay else since
+    tail = JournalTail.attach(default_path(cfg), run_id=run_id, since=start or 0)
+    if start is None:
+        tail.last_id = tail.store.last_id()
+    console.print(f"[dim]following {tail.store.path} from id {tail.last_id}[/dim]")
+
+    async def _follow() -> None:
+        async for event in tail.follow():
+            console.print(_journal_line(event))
+
+    try:
+        run(_follow())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        console.print(f"[dim]last event id: {tail.last_id}[/dim]")
+
+
+def _journal_line(event) -> str:
+    """One event as one line. The id first, because it is what a reconnect needs."""
+    from ..journal.render import render_event
+
+    rendered = render_event(event)
+    worker = event.payload.get("worker_id")
+    tail = f"  {rendered.text}" if rendered else ""
+    return (
+        f"[dim]{event.id:>6}[/dim] [dim]{event.ts[11:19]}[/dim] "
+        f"{'w' if worker else ' '} seq {event.seq:>3} [bold]{event.type}[/bold]{tail}"
+    )
 
 
 # --- policy and tools --------------------------------------------------------

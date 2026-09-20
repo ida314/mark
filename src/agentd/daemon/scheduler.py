@@ -60,9 +60,9 @@ async def fire_watcher(watcher: dict, cfg: Config | None = None) -> str:
                 origin="daemon",
                 autonomy=watcher["autonomy"],
             ):
-                from ..agent.events import TurnFinished
+                from ..agent.stream import Answer
 
-                if isinstance(event, TurnFinished):
+                if isinstance(event, Answer):
                     text = event.text
             if text:
                 await repo_agenda.notify(

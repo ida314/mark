@@ -110,8 +110,8 @@ async def heartbeat_loop(cfg: Config, stop: asyncio.Event) -> None:
                 continue  # nothing new: no model call at all
             last_hash = digest
 
-            from ..agent.events import TurnFinished
             from ..agent.loop import AgentLoop, Session
+            from ..agent.stream import Answer
             from ..policy.approvals import QueueApprover
 
             with otel.span("daemon.heartbeat"):
@@ -129,7 +129,7 @@ async def heartbeat_loop(cfg: Config, stop: asyncio.Event) -> None:
                     origin="daemon",
                     autonomy="observe",
                 ):
-                    if isinstance(event, TurnFinished) and event.text.strip() not in ("", "NOTHING"):
+                    if isinstance(event, Answer) and event.text.strip() not in ("", "NOTHING"):
                         await repo_agenda.notify(
                             source="heartbeat", title="Suggestion", body=event.text[:2000]
                         )

@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from agentd.agent.events import TurnFinished
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.stream import Answer
 from agentd.llm.base import CallParams, Finish, LLMError, LLMEvent
 from agentd.llm.fake import FakeProvider
 from agentd.obs import telemetry
@@ -68,7 +68,7 @@ async def test_a_task_produces_one_complete_record(cfg):
     events = await _run(_loop(cfg, provider, "fs_read", "fs_list"), session, "what does it say?")
 
     row = _only(cfg)
-    turn_id = [e for e in events if isinstance(e, TurnFinished)][0].turn_id
+    turn_id = [e for e in events if isinstance(e, Answer)][0].turn_id
     assert row["request_id"] == turn_id
     assert row["session_id"] == str(session.id)
     assert row["status"] == "completed"
@@ -300,7 +300,7 @@ async def test_a_broken_telemetry_path_does_not_break_the_turn(cfg, tmp_path):
     session = await Session.create("test")
     events = await _run(_loop(cfg, provider, "fs_read"), session, "hi")
 
-    assert [e for e in events if isinstance(e, TurnFinished)][0].text == "Hello there."
+    assert [e for e in events if isinstance(e, Answer)][0].text == "Hello there."
     assert telemetry.write_failures == before + 1
 
 
