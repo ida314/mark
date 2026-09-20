@@ -6,6 +6,8 @@ so validation, policy, approval and the audit trail cannot be bypassed.
 
 from __future__ import annotations
 
+import difflib
+import hashlib
 import json
 import time
 from typing import Any
@@ -43,6 +45,11 @@ class ToolExecutor:
         self.approver = approver
         self.max_result_chars = max_result_chars
         self.grants = grants or SessionGrants()
+        # (tool, arguments) fingerprints that already failed validation this turn, so a
+        # model that cannot find the right argument shape is told so instead of being
+        # allowed to spend the whole step budget rediscovering it.
+        self._rejected: dict[tuple[str, str], int] = {}
+        self._rejected_turn: str | None = None
 
     async def run(
         self, name: str, raw_args: dict[str, Any] | str, ctx: ToolContext, *, parent_id: UUID | None = None
@@ -63,12 +70,13 @@ class ToolExecutor:
         # The justification is for the human record, not for the handler.
         reason = args.pop("reason", None) if isinstance(args, dict) else None
 
-        try:
-            jsonschema.validate(args, tool.parameters)
-        except jsonschema.ValidationError as exc:
+        faults = _argument_faults(args, tool)
+        if faults:
+            attempt = self._count_rejection(ctx, tool.name, args)
             return await self._fail(
                 action_id, parent_id, ctx, name, args,
-                f"Invalid arguments: {exc.message}", started, rationale=reason,
+                _argument_error(tool, faults, attempt), started, rationale=reason,
+                data={"invalid_args": True, "attempt": attempt},
             )
 
         call = ToolCallInfo(
@@ -181,8 +189,23 @@ class ToolExecutor:
         )
         return ToolResult(content=body, ok=False, data={"denied": True})
 
+    def _count_rejection(self, ctx: ToolContext, name: str, args: dict[str, Any]) -> int:
+        """How many times these exact arguments have been rejected this turn, including now.
+
+        Scoped to the turn and bounded, because the executor outlives both: one `AgentLoop`
+        serves a whole session, and the MCP seam calls in with no turn at all.
+        """
+        turn = str(ctx.turn_id)
+        if turn != self._rejected_turn or len(self._rejected) > 64:
+            self._rejected.clear()
+            self._rejected_turn = turn
+        key = (name, _fingerprint(args))
+        self._rejected[key] = self._rejected.get(key, 0) + 1
+        return self._rejected[key]
+
     async def _fail(
-        self, action_id, parent_id, ctx, name, args, message, started, rationale=None
+        self, action_id, parent_id, ctx, name, args, message, started, rationale=None,
+        data: dict[str, Any] | None = None,
     ) -> ToolResult:
         await repo_ops.write_action(
             ActionRecord(
@@ -193,7 +216,7 @@ class ToolExecutor:
                 **otel.current_ids(),
             )
         )
-        return ToolResult(content=json.dumps({"error": message}), ok=False)
+        return ToolResult(content=json.dumps({"error": message}), ok=False, data=data or {})
 
 
 def _parse_args(raw: dict[str, Any] | str) -> tuple[dict[str, Any], str | None]:
@@ -207,6 +230,66 @@ def _parse_args(raw: dict[str, Any] | str) -> tuple[dict[str, Any], str | None]:
     if not isinstance(parsed, dict):
         return {}, "Arguments must be a JSON object"
     return parsed, None
+
+
+def _argument_faults(args: dict[str, Any], tool: Tool) -> list[str]:
+    """Every way `args` fails `tool`'s schema, phrased so the caller can repair it.
+
+    Every fault, not the first one: `jsonschema.validate` raises on one error, so a call
+    that both omits a required argument and puts an out-of-range number in another gets
+    told about the second only after fixing the first. A model paying a round trip per
+    fault is a model that runs out of steps before it runs out of mistakes.
+
+    Unknown argument names are reported here rather than by the schema, because the tool
+    schemas deliberately do not set `additionalProperties: false` - a stray key is not
+    worth failing a call that is otherwise right. It is still worth *saying*: the shape
+    this exists for is a proposal arriving as `content=` when the parameter is `statement`,
+    where the only reported fault is the missing one and nothing points at the cause.
+    """
+    faults: list[str] = []
+    properties = tool.parameters.get("properties") or {}
+    for error in sorted(
+        jsonschema.Draft202012Validator(tool.parameters).iter_errors(args),
+        key=lambda e: list(e.absolute_path),
+    ):
+        where = ".".join(str(part) for part in error.absolute_path)
+        faults.append(f"{where}: {error.message}" if where else error.message)
+    if properties:
+        for key in args:
+            if key in properties:
+                continue
+            near = difflib.get_close_matches(key, properties, n=1, cutoff=0.7)
+            hint = f", did you mean '{near[0]}'" if near else ""
+            faults.append(f"'{key}' is not a parameter of this tool{hint}")
+    return faults
+
+
+def _argument_error(tool: Tool, faults: list[str], attempt: int) -> str:
+    accepted = list(tool.parameters.get("properties") or {})
+    if tool.needs_reason:
+        accepted.append("reason")
+    required_names = set(tool.parameters.get("required") or ())
+    if tool.needs_reason:
+        required_names.add("reason")
+    listed = ", ".join(f"{n} (required)" if n in required_names else n for n in accepted)
+    message = f"Invalid arguments: {'; '.join(faults)}."
+    if listed:
+        message += f" {tool.name} accepts: {listed}."
+    if attempt > 1:
+        message += (
+            f" You have now sent these exact arguments {attempt} times and they are"
+            " rejected before the tool runs, so sending them again cannot work."
+            " Change them, or tell the user what you were unable to do."
+        )
+    return message
+
+
+def _fingerprint(args: dict[str, Any]) -> str:
+    try:
+        payload = json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        payload = repr(sorted(args.items(), key=lambda kv: kv[0]))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _seal(body: str) -> str:

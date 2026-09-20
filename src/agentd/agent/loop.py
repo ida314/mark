@@ -38,6 +38,18 @@ FINAL_NUDGE = (
     "Summarize what you found, what you changed, and what is still open."
 )
 
+# How many times one tool may reject the identical arguments before the loop takes it away
+# for the rest of the turn. Argument validation is deterministic - the same arguments
+# against the same schema fail the same way every time - so a repeat is not a retry, it is
+# the turn being spent on a call that provably cannot run. Two attempts, because the first
+# rejection is the one that carries the repair advice and the model deserves to act on it.
+STUCK_LIMIT = 2
+STUCK_NUDGE = (
+    "`{name}` rejected the same arguments {attempts} times, so it has been withdrawn for "
+    "the rest of this turn. Do not look for another way to call it. Carry on without it, "
+    "and tell the user plainly what you were unable to do."
+)
+
 
 @dataclass
 class Session:
@@ -258,6 +270,7 @@ class AgentLoop:
                 if assistant_text:
                     final_text.append(assistant_text)
 
+                stuck: list[str] = []
                 for call in calls:
                     args_preview = _safe_args(call.arguments)
                     yield ToolStarted(name=call.name, args=args_preview)
@@ -299,6 +312,29 @@ class AgentLoop:
                     )
                     for candidate in result.candidates:
                         await _store_candidate(candidate, session, turn_id, self.actor)
+
+                    attempts = int(result.data.get("attempt", 0))
+                    if attempts >= STUCK_LIMIT and call.name in exposed:
+                        del exposed[call.name]
+                        tool_schemas = [
+                            schema
+                            for schema in tool_schemas
+                            if schema["function"]["name"] != call.name
+                        ]
+                        stuck.append(
+                            STUCK_NUDGE.format(name=call.name, attempts=attempts)
+                        )
+                        yield Notice(
+                            text=(
+                                f"({call.name} kept being called with arguments it rejects; "
+                                "withdrawn for this turn)"
+                            ),
+                            level="warn",
+                        )
+
+                # After the batch, never between an assistant's tool calls and their results.
+                for note in stuck:
+                    messages.append({"role": "system", "content": note})
 
                 # Tools added mid-turn by tool_search become visible on the next step.
                 for name in tctx.extra.pop("added_tools", []):
