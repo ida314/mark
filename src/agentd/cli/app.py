@@ -39,6 +39,7 @@ mcp_app = typer.Typer(help="Model Context Protocol server.")
 watchers_app = typer.Typer(help="Timers, intervals and file watchers.")
 secrets_app = typer.Typer(help="Credentials the agent itself cannot read.")
 connectors_app = typer.Typer(help="Daemon-side feeds. They hold credentials the agent cannot read.")
+telegram_app = typer.Typer(help="The Telegram chat channel.")
 
 app.add_typer(db_app, name="db")
 app.add_typer(memory_app, name="memory")
@@ -53,6 +54,7 @@ app.add_typer(mcp_app, name="mcp")
 app.add_typer(watchers_app, name="watchers")
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(connectors_app, name="connectors")
+app.add_typer(telegram_app, name="telegram")
 
 console = Console()
 
@@ -218,6 +220,17 @@ async def _doctor() -> None:
         except vault.VaultPermissionError:
             entries = 0
         row("secrets", problem is None, problem or f"{entries} entries, mode 0600")
+
+    # the chat channel: whether it can run, never the token
+    if cfg.telegram.enabled:
+        from ..daemon import telegram as tg
+
+        why = tg.configured(cfg)
+        row(
+            "channel:telegram",
+            None if why else True,
+            why or f"{len(cfg.telegram.allowed_chat_ids)} allowed chat id(s)",
+        )
 
     # connectors: status only, never a credential
     if db_ok and cfg.connectors.enabled:
@@ -425,6 +438,62 @@ def connectors_reset(name: str) -> None:
     from . import commands_connect
 
     raise typer.Exit(run(commands_connect.reset(get_config(), name, console)))
+
+
+@telegram_app.command("check")
+def telegram_check() -> None:
+    """Is the bot token good, and who is the bot?"""
+    from ..daemon import telegram as tg
+
+    async def go() -> int:
+        cfg = get_config()
+        if tg.token() is None:
+            console.print("[yellow]no token:[/yellow] agent secrets set telegram/bot token")
+            return 1
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            me = await tg.call(cfg, client, "getMe")
+        console.print(f"[green]ok[/green] @{me.get('username')} ({me.get('first_name')})")
+        allowed = cfg.telegram.allowed_chat_ids
+        console.print(
+            f"allowed chat ids: {allowed}" if allowed
+            else "[yellow]allowed_chat_ids is empty, so nobody can talk to it[/yellow]"
+        )
+        return 0
+
+    raise typer.Exit(run(go()))
+
+
+@telegram_app.command("whoami")
+def telegram_whoami() -> None:
+    """Print the chat id of whoever has messaged the bot, so you can allowlist yourself.
+
+    Reads pending updates without consuming them, so the daemon still sees the message.
+    """
+    from ..daemon import telegram as tg
+
+    async def go() -> int:
+        cfg = get_config()
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            updates = await tg.call(cfg, client, "getUpdates", timeout=0)
+        seen: dict[int, str] = {}
+        for update in updates:
+            chat = ((update.get("message") or {}).get("chat")) or {}
+            if chat.get("id") is not None:
+                seen[int(chat["id"])] = str(chat.get("username") or chat.get("first_name") or "")
+        if not seen:
+            console.print("[dim]no recent messages — send the bot anything, then re-run[/dim]")
+            return 1
+        for chat_id, who in seen.items():
+            marked = " [green](already allowed)[/green]" if chat_id in cfg.telegram.allowed_chat_ids else ""
+            console.print(f"{chat_id}  {who}{marked}")
+        console.print("\n[dim]add to config.toml: [telegram] allowed_chat_ids = [...][/dim]")
+        return 0
+
+    raise typer.Exit(run(go()))
 
 
 # --- backups -----------------------------------------------------------------
@@ -1096,44 +1165,22 @@ def approvals_deny(approval_id: str, note: str | None = typer.Option(None)) -> N
 
 
 async def _approvals_decide(approval_id: str, approve: bool, note: str | None) -> None:
-    from ..db import repo_ops
-    from ..policy.approvals import AutoApprover
-    from ..policy.engine import engine_from_config
-    from ..tools.base import ToolContext
-    from ..tools.executor import ToolExecutor
-    from ..tools.registry import get_registry
+    """Thin wrapper. What approving *means* lives in policy/replay.py, because the Telegram
+    channel decides the same thing and two definitions would eventually disagree."""
+    from ..policy.replay import deny_approval, execute_approved
 
-    cfg = get_config()
-    row = await repo_ops.get_approval(UUID(approval_id))
-    if row is None:
-        console.print("[red]no such approval[/red]")
-        raise typer.Exit(1)
-    if row["status"] != "pending":
-        console.print(f"[yellow]already {row['status']}[/yellow]")
-        return
-    if not approve:
-        await repo_ops.decide_approval(UUID(approval_id), "denied", "user", note)
-        console.print("[green]denied[/green]")
-        return
+    try:
+        target = UUID(approval_id)
+    except ValueError:
+        console.print("[red]not an approval id[/red]")
+        raise typer.Exit(1) from None
 
-    args = row["args"]
-    if repo_ops.args_hash(args) != row["args_sha256"]:
-        console.print("[red]arguments changed since the request; refusing[/red]")
-        raise typer.Exit(1)
-
-    await repo_ops.decide_approval(UUID(approval_id), "approved", "user", note)
-    registry = get_registry()
-    executor = ToolExecutor(registry.tools, engine_from_config(cfg), AutoApprover(True))
-    ctx = ToolContext(
-        session_id=row.get("session_id"), turn_id=row.get("turn_id"), actor="user",
-        origin="interactive", autonomy="act",
+    ok, message = await (
+        execute_approved(target, origin="interactive", note=note)
+        if approve
+        else deny_approval(target, note)
     )
-    result = await executor.run(row["tool_name"], args, ctx)
-    await repo_ops.finish_approval(
-        UUID(approval_id), "executed" if result.ok else "failed",
-        {"content": result.content[:2000], "ok": result.ok},
-    )
-    console.print(result.content[:2000])
+    console.print(message if ok else f"[yellow]{message}[/yellow]")
 
 
 # --- observability -----------------------------------------------------------

@@ -23,6 +23,7 @@ from ..obs import otel
 from .heartbeat import heartbeat_loop
 from .notifier import notifier_loop
 from .scheduler import scheduler_loop
+from .telegram import telegram_loop
 
 DAEMON_LOCK_KEY = 0x4147_4544  # "AGED"
 
@@ -216,6 +217,9 @@ async def run(cfg: Config | None = None) -> int:
             asyncio.create_task(supervise("heartbeat", heartbeat_loop, cfg, stop)),
             asyncio.create_task(supervise("housekeeping", housekeeping_loop, cfg, stop)),
             asyncio.create_task(supervise("notifier", notifier_loop, cfg, stop)),
+            # A channel, not a connector: it carries your words in and the loop's words out.
+            # Supervised separately so a Telegram outage never touches the connectors.
+            asyncio.create_task(supervise("channel:telegram", telegram_loop, cfg, stop)),
         ]
         # One supervised task per connector rather than one loop fanning out: supervise()
         # names the failing task in its crash notification, so a broken Gmail poller reports

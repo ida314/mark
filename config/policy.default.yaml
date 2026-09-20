@@ -162,6 +162,16 @@ rules:
       tags: [connector]
       risk: [external]
     outcome: require_approval
+  # Telegram is a channel, so a human is present — but a phone is not a terminal, and the
+  # approval panel with its diff preview cannot be rendered there. This restates what the
+  # risk matrix already does at `assist`, so that a future loosening of the matrix cannot
+  # quietly take it away. `/approve <id>` from the chat is how you say yes.
+  - id: telegram-outbound-always-asks
+    reason: anything leaving this machine from a chat waits for an explicit yes
+    match:
+      origin: [telegram]
+      risk: [external, destructive]
+    outcome: require_approval
   - id: daemon-never-external
     reason: background turns never reach the outside world unattended
     match:

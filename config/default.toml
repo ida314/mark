@@ -242,3 +242,31 @@ poll_interval_s = 1800
 all_day_loops = false   # reading week is not a deadline
 require = []            # e.g. ["due"] once you have seen what your own feed contains
 notify = true
+
+# --- Telegram: a chat front end, not a connector and not a tool ---------------
+#
+# A connector is inbound-only and holds a credential the agent cannot reach. A tool is
+# something the model calls. This is neither: it is a way for *you* to reach the loop from
+# a phone, in the same category as `agent chat`. The model cannot send a message of its own
+# choosing to anyone of its choosing — it answers you, on the thread you started.
+#
+#   1. Talk to @BotFather on Telegram, /newbot, copy the token
+#   2. agent secrets set telegram/bot token
+#   3. agent telegram check                 # is the token good, and who is the bot
+#   4. message the bot anything, then: agent telegram whoami
+#   5. put that id in allowed_chat_ids below, enable, restart the daemon
+#
+# allowed_chat_ids is the entire security boundary: anyone who learns the bot's username
+# can message it. An empty list means nobody, not everybody.
+#
+# Worth knowing before switching this on: Telegram bot messages are NOT end-to-end
+# encrypted. They cross Telegram's servers in a form Telegram can read. Everything else in
+# this system was built so nothing leaves hardware you control — ntfy is self-hosted on the
+# tailnet for exactly that reason — and this is the one place that stops being true. An
+# answer about your mail is an answer that reached Telegram.
+[telegram]
+enabled = false
+allowed_chat_ids = []
+autonomy = "assist"      # same as the CLI; external work still queues for /approve
+poll_timeout_s = 50      # long polling, so this box needs no inbound port
+max_message_chars = 4000

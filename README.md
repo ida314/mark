@@ -262,6 +262,53 @@ One design note worth knowing: **one loop per sender, not per message.** Five em
 same person while you have not replied is one thing waiting on you. The sweep closes it when
 nothing from them is unread any more.
 
+## Channels
+
+A **channel** is the third category beside connectors and tools, and keeping the three apart
+is what keeps the rest of the design honest:
+
+| | holds a credential | model can call it | direction |
+|---|---|---|---|
+| connector | yes, fenced from the agent | never | inbound only |
+| tool | no | yes, policy-gated | whatever the tool does |
+| channel | yes, fenced from the agent | never | your words in, the loop's words out |
+
+`agent chat` is a channel. So is ntfy, for the outbound half. Telegram is both halves.
+
+```bash
+# @BotFather -> /newbot -> copy the token
+agent secrets set telegram/bot token
+agent telegram check          # token good? which bot is it?
+# message the bot anything, then:
+agent telegram whoami         # prints the chat id to allowlist
+# [telegram] enabled = true, allowed_chat_ids = [<that id>]
+```
+
+`allowed_chat_ids` is the entire security boundary — anyone who learns a bot's username can
+message it, so an empty list means *nobody*, not everybody. An unlisted sender is dropped
+without a reply (answering confirms the bot is alive), every attempt is audited, and the
+first one notifies you once.
+
+In the chat: `/new` starts a fresh conversation and is how you lift the private-data
+interlock; `/status`, `/approvals` and `/approve <id>` are there because a queued approval
+you cannot see from your phone is a queued approval you will not act on. `/approve` shares
+`policy.replay.execute_approved` with the CLI rather than reimplementing consent — a half
+approval that marked a row `approved` without running it would strand the action forever,
+since the CLI returns early on anything that is not `pending`.
+
+What a channel is *not* is a way for the model to send something. There is no tool here, the
+`no-mail-send-tool` tripwires are untouched, and the only addresses reachable are the ones in
+the allowlist. A turn from Telegram runs at `origin: telegram`, which the policy treats as
+interactive — a human is present — except that anything `external` still stops at an
+approval, stated as its own rule so a future loosening of the risk matrix cannot take it away.
+
+**The honest cost.** Telegram bot messages are not end-to-end encrypted; they cross
+Telegram's servers in a form Telegram can read. Everything else here was built so nothing
+leaves hardware you control — ntfy is self-hosted on the tailnet for precisely that reason —
+and this is the one place that stops being true. An answer about your mail is an answer that
+reached Telegram. If that trade is not acceptable, the same channel shape would fit Signal or
+a self-hosted Matrix homeserver, which is a different `call()` and the same everything else.
+
 ## Operating notes
 
 - **Local model.** `llm.base_url` points at the OpenAI-compatible endpoint: the SIR router on

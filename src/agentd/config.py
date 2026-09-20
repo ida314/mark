@@ -146,6 +146,39 @@ class NtfyConfig(BaseModel):
     quiet_hours: tuple[int, int] | None = None
 
 
+class TelegramConfig(BaseModel):
+    """A chat front end, in the same category as `agent chat` — not a connector, not a tool.
+
+    A connector is inbound-only and holds a credential the agent is fenced out of. A tool is
+    something the model calls. This is neither: it is a way for *you* to reach the loop, and
+    for the loop to answer you, which is what the CLI already is and what ntfy is half of.
+
+    Two properties worth stating before switching it on:
+
+    - `allowed_chat_ids` is the entire security boundary. Anyone who learns the bot's
+      username can message it, and an empty allowlist therefore means nobody, not everybody.
+    - Bot messages are **not** end-to-end encrypted. They cross Telegram's servers in a form
+      Telegram can read. Everything else in this system was built so nothing leaves hardware
+      you control — ntfy is self-hosted on the tailnet for exactly that reason — and this is
+      the one place that stops being true. It is a real trade, not an oversight.
+    """
+
+    enabled: bool = False
+    # Numeric chat ids, not usernames: a username can be changed by its owner, an id cannot.
+    # `agent telegram whoami` prints the id of whoever messages the bot next.
+    allowed_chat_ids: list[int] = Field(default_factory=list)
+    # Long polling, so this box needs no inbound port, no public address and no certificate.
+    # A webhook would need all three and it is a headless machine on a tailnet.
+    poll_timeout_s: int = 50
+    api_base: str = "https://api.telegram.org"
+    autonomy: Autonomy = "assist"
+    # Telegram refuses anything longer; replies are split rather than truncated.
+    max_message_chars: int = 4000
+    # A turn that runs longer than this gets a "still working" nudge, because a silent bot
+    # is indistinguishable from a broken one.
+    slow_turn_s: float = 20.0
+
+
 class GithubConnectorConfig(BaseModel):
     enabled: bool = False
     user: str = ""  # your login. The token lives in the vault at github/<user>, never here.
@@ -345,6 +378,7 @@ class Config(BaseModel):
     obs: ObsConfig = Field(default_factory=ObsConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig)
 
     policy_file: Path = POLICY_FILE
