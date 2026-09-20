@@ -17,7 +17,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 3a | complete | 2026-09-20 | pass-03-outcome.md | committed as cae2f75. effect_class mandatory, no default; 26/26 builtins declare UNAUDITED (= unsafe_write), none classified. 5 deviations, no Must not crossed. |
 | 3b | complete | 2026-09-20 | pass-03-outcome.md | committed as 0eda557. effect table (schema v2) + idempotency keys + announce-before-dispatch in the executor. 7 deviations, no Must not crossed. |
 | 3c | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as 100e0ff. 19 of 26 ruled (11 read, 2 idempotent_write, 6 unsafe_write); UNAUDITED 26 → 7. 5 deviations, no Must not crossed. **Ran autonomously under the standing policy in place of its supervised hard stop — the table still needs Dylan's review before Pass 4.** |
-| 3d | pending | — | — | **hard stop — human runs this** (effect classification) |
+| 3d | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as a5ba017. Last 6 ruled: fs_write/shell_exec/web_fetch unsafe_write, gmail_search/gmail_message/web_search read. UNAUDITED 7 → 1. 5 deviations, no Must not crossed. No live external call was made. **Ran autonomously in place of its supervised hard stop — needs Dylan's review before Pass 4.** |
 | 4a | pending | — | — | |
 | 4b | pending | — | — | |
 | 4c | pending | — | — | **hard stop — human runs this** (user-facing wording) |
@@ -95,3 +95,17 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
   literally `read` nor plausibly unsafe. It holds the conservative value until Dylan rules
   on it. The whole 3c/3d table wants his eyes at the pass boundary regardless — it was
   produced under the autonomous standing policy, not by the human the plan assumed.
+- **3d → human, before Pass 4 (two rulings, both one word in two places):** `web_fetch` was
+  ruled `unsafe_write`, reversing 3c's expectation of `read` — the model picks the URL,
+  often from untrusted text, so a GET at somebody's confirmation link is a duplicate
+  real-world action. And `memory_search` is still the one name left in `UNAUDITED_TOOLS`,
+  so Pass 4 reconciliation will prompt on the runtime's hottest tool until it is ruled.
+- **3d → whoever adds a send path:** the pass file's `gmail send` and `calendar create` do
+  not exist in this registry. Gmail send accepts no client-supplied id; Calendar
+  `events.insert` does. Nothing is `idempotent_write` today, so the id check gated nothing.
+
+## Pass 3 complete
+
+3a–3d all committed, tests 661 green, ruff clean, no Must not crossed in any session.
+Pass 4 is not clear to start: it depends on the two rulings above, and Pass 4 was already
+barred from shipping before 3c/3d for exactly this reason.
