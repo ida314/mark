@@ -5,9 +5,67 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from ..db import repo_agenda
+from ..config import Config
+from ..db import repo_agenda, repo_connectors
 from ..ids import parse_when, utcnow
-from .base import Tool, ToolContext, ToolResult, obj, required, tool
+from .base import Polled, Tool, ToolContext, ToolResult, feed_health, obj, required, tool
+
+# --- how much a loop can be believed -----------------------------------------
+#
+# A loop opened by a connector closes when that connector next sweeps and finds the thing
+# gone from the source. So a feed that is switched off - a rejected credential parks one
+# permanently - keeps every loop it ever opened at `open`, long after they were answered.
+# That is the calendar's empty-window bug wearing different clothes: open-because-waiting
+# and open-because-blind must not render the same way, so the freshness of the feed is part
+# of the answer here too.
+
+
+def feed_config(cfg: Config, connector: str) -> Polled | None:
+    """The config entry a connector name refers to, or None if the config no longer has one.
+
+    Names are composed in `connectors/__init__.py` as `<service>-<label>`, or the bare
+    service where there can only ever be one of them. Resolved through `Config` rather than
+    through `all_connectors()` on purpose: building a connector object inside a tool would
+    put a credential-holding object on the agent's side of the fence to obtain one float.
+    """
+    service, _, label = connector.partition("-")
+    if label and service in ("gmail", "gcal"):
+        return cfg.connectors.google.accounts.get(label)
+    if label and service == "imap":
+        return cfg.connectors.imap.accounts.get(label)
+    if connector == "github":
+        return cfg.connectors.github
+    if connector == "brightspace":
+        return cfg.connectors.brightspace
+    return None
+
+
+async def feed_caveats(rows: list[dict]) -> list[str]:
+    """One line for each feed in `rows` that cannot currently be believed.
+
+    Silent when every feed is healthy, and silent for a connector the config no longer
+    declares - there is no honest staleness threshold for a feed whose cadence is unknown,
+    and a guessed one would cry stale forever.
+    """
+    named = sorted({row["connector"] for row in rows if row.get("connector")})
+    if not named:
+        return []
+    # Imported here, not at module scope, for the same reason `builtin_calendar` does it:
+    # the test fixture swaps `get_config` after this module is already imported.
+    from ..config import get_config
+
+    cfg = get_config()
+    now = utcnow()
+    states = {row["name"]: row for row in await repo_connectors.list_state()}
+    out: list[str] = []
+    for name in named:
+        source = feed_config(cfg, name)
+        if source is None:
+            continue
+        reading, healthy = feed_health(states.get(name, {}), source, now, noun=name)
+        if not healthy:
+            out.append(f"{reading}, so loops it opened may already be resolved.")
+    return out
 
 
 @tool(
@@ -92,22 +150,30 @@ async def open_loop_add(args: dict, ctx: ToolContext) -> ToolResult:
 
 @tool(
     "open_loops_list",
-    "List open loops (unfinished threads).",
+    "List open loops (unfinished threads). Each one records something that was true when it "
+    "was noticed, not a live reading: where a loop names the feed it came from, that is "
+    "where to check whether it is still true before acting on it.",
     obj(status={"type": "string", "enum": ["open", "waiting", "closed"]}),
     tags=("agenda", "core"),
 )
 async def open_loops_list(args: dict, ctx: ToolContext) -> ToolResult:
-    rows = await repo_agenda.list_open_loops(args.get("status", "open"))
+    rows = await repo_agenda.list_open_loops_with_source(args.get("status", "open"))
     if not rows:
         return ToolResult(content="No open loops.")
+    # The connector name and nothing else. `detail` and the archived `source_title` hold
+    # their words - see `connectors/mail.py:detail` - and this result is not wrapped in
+    # <untrusted_content>. The external id stays out too: it is an implementation detail of
+    # somebody else's service, and it belongs in an explicit dereference, not in a listing.
     lines = [
         f"- {r['title']}"
         + (f" (due {r['due_at']:%Y-%m-%d})" if r.get("due_at") else "")
         + (f" waiting on {r['waiting_on']}" if r.get("waiting_on") else "")
         + f" [{r['id']}]"
+        + (f" from {r['connector']}" if r.get("connector") else "")
         for r in rows
     ]
-    return ToolResult(content="\n".join(lines))
+    caveats = await feed_caveats(rows)
+    return ToolResult(content="\n".join(lines + ([""] + caveats if caveats else [])))
 
 
 @tool(

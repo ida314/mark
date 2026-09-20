@@ -119,6 +119,33 @@ async def list_open_loops(status: str | None = "open", limit: int = 50) -> list[
     )
 
 
+async def list_open_loops_with_source(status: str | None = "open", limit: int = 50) -> list[dict]:
+    """`list_open_loops`, plus which feed opened each one.
+
+    The join is `open_loops.source_event_id -> raw_events.event_id`, the same one
+    `connectors.base.tracked_loops` makes for the sweeps - stated once more here rather than
+    generalised, because that one asks "which of my items are still open" and this one asks
+    "where did this row come from", and they want different columns.
+
+    LEFT, and deliberately: a loop from `open_loop_add`, from the MCP server or from the
+    review gate has no `source_event_id` at all, and a loop the agent opened itself is not a
+    loop with a broken provenance link. Those rows come back with `connector` as None.
+    """
+    where = "WHERE l.status = %s" if status else ""
+    params: tuple[Any, ...] = (status, limit) if status else (limit,)
+    order = "l.due_at NULLS LAST, l.created_at" if status else "l.created_at DESC"
+    return await fetch_all(
+        f"""
+        SELECT l.*, e.payload->>'connector' AS connector
+        FROM open_loops l
+        LEFT JOIN raw_events e ON e.event_id = l.source_event_id
+        {where}
+        ORDER BY {order} LIMIT %s
+        """,
+        params,
+    )
+
+
 async def close_open_loop(loop_id: UUID) -> None:
     async with connection() as conn:
         await conn.execute(

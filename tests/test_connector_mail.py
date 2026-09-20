@@ -386,3 +386,77 @@ async def test_imap_drains_a_backlog_over_successive_polls(cfg, imap):
     assert len(await repo_agenda.list_open_loops("open")) == 1
     await poll_once(imap, cfg, _client(lambda r: httpx.Response(500)))
     assert len(await repo_agenda.list_open_loops("open")) == 2
+
+
+# --- what the agent is told about where a loop came from ----------------------
+
+
+async def _listed() -> str:
+    from agentd.tools.base import ToolContext
+    from agentd.tools.builtin_agenda import open_loops_list
+
+    result = await open_loops_list.handler({}, ToolContext(actor="user", origin="interactive"))
+    return result.content
+
+
+async def test_a_loop_says_which_feed_opened_it(cfg, gmail):
+    await poll_once(gmail, cfg, _client(_google([_message()])))
+
+    listed = await _listed()
+    assert "Reply to alice@example.com (nyu)" in listed
+    assert "from gmail-nyu" in listed
+
+
+async def test_the_feed_name_is_the_only_provenance_that_reaches_the_model(cfg, gmail):
+    """The connector name is ours. The message id is Google's and the subject is theirs, and
+    this result is not wrapped in <untrusted_content>."""
+    await poll_once(gmail, cfg, _client(_google([_message("m1")])))
+
+    listed = await _listed()
+    assert HOSTILE not in listed
+    assert "m1" not in listed
+
+
+async def test_a_loop_the_agent_opened_itself_has_no_feed_and_no_caveat(cfg):
+    await repo_agenda.add_open_loop(title="Ask about the lease")
+
+    listed = await _listed()
+    assert "Ask about the lease" in listed
+    assert "from " not in listed
+    assert "feed" not in listed
+
+
+async def test_a_switched_off_feed_says_its_loops_may_be_stale(cfg, gmail):
+    """A rejected credential parks a connector for good, and a parked connector never sweeps
+    - so every loop it opened stays `open` long after it was answered."""
+    await poll_once(gmail, cfg, _client(_google([_message()])))
+    await repo_connectors.set_enabled("gmail-nyu", False, reason="credential rejected")
+
+    listed = await _listed()
+    assert "the gmail-nyu feed is disabled" in listed
+    assert "may already be resolved" in listed
+
+
+async def test_a_feed_that_is_keeping_up_says_nothing(cfg, gmail):
+    await poll_once(gmail, cfg, _client(_google([_message()])))
+
+    listed = await _listed()
+    assert "may already be resolved" not in listed
+
+
+async def test_a_feed_that_stopped_polling_says_so(cfg, gmail):
+    from datetime import timedelta
+
+    from agentd.db.pool import connection
+    from agentd.ids import utcnow
+
+    await poll_once(gmail, cfg, _client(_google([_message()])))
+    behind = utcnow() - timedelta(seconds=cfg.connectors.google.accounts["nyu"].poll_interval_s * 40)
+    async with connection() as conn:
+        await conn.execute(
+            "UPDATE connector_state SET last_success_at = %s WHERE name = 'gmail-nyu'", (behind,)
+        )
+
+    listed = await _listed()
+    assert "the gmail-nyu feed is behind" in listed
+    assert "may already be resolved" in listed
