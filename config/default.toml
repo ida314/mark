@@ -113,6 +113,18 @@ jaeger_ui = "http://127.0.0.1:16686"
 enabled = true
 # path = "~/.local/share/agent/logs/telemetry.jsonl"   # unset means exactly this
 
+# The run journal: one append-only event log per run, and the durability substrate the
+# checkpoint, resume and effect machinery in Passes 3-5 fold over. Unlike [telemetry] there
+# is no way to switch it off - it is the source of truth, not a measurement of one.
+[journal]
+# path = "~/.local/share/agent/journal.db"   # unset means exactly this
+synchronous = "FULL"       # fsync every commit; NORMAL survives a kill but not a power cut
+buffering = true           # effect_* and checkpoint_written ignore this and always go now
+buffer_max = 32
+buffer_max_age_s = 1.0
+retention = "keep_everything"    # the other mode is "max_age_days"; pruning drops whole runs
+# retention_max_age_days = 90
+
 [mcp]
 http_port = 8770
 

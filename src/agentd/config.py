@@ -141,6 +141,35 @@ class TelemetryConfig(BaseModel):
     path: Path | None = None
 
 
+class JournalConfig(BaseModel):
+    """The run journal (Pass 2). One append-only SQLite log per run.
+
+    There is no `enabled` flag, unlike [telemetry]. The journal is the source of truth for
+    execution state - `state = fold(reduce, journal, initial)` - so a switch that turns it
+    off is a switch that makes checkpoints, resume and the effect ledger silently wrong.
+    A journal that cannot be written is a fatal condition, not a disabled feature.
+    """
+
+    # None means <paths.data_dir>/journal.db. WAL puts -wal and -shm next to it.
+    path: Path | None = None
+    # FULL fsyncs each commit. NORMAL survives a killed process but not a power cut, and
+    # the effect ledger exists precisely for the second case. Batching is what keeps the
+    # cost off the chatty event types; see buffering below.
+    synchronous: Literal["FULL", "NORMAL", "OFF"] = "FULL"
+    busy_timeout_ms: int = 5000
+    # Buffer the event types that are not effects or checkpoints. Those two always go
+    # straight to disk regardless of this setting. Turning it off costs one fsync per event
+    # and removes the in-memory tail entirely.
+    buffering: bool = True
+    buffer_max: int = 32
+    # Checked when an event is appended, not on a timer - a quiet process holds its tail
+    # until the next append, the next synchronous event, or close().
+    buffer_max_age_s: float = 1.0
+    # keep_everything | max_age_days. Pruning is whole-run only, always.
+    retention: Literal["keep_everything", "max_age_days"] = "keep_everything"
+    retention_max_age_days: int | None = None
+
+
 class NtfyConfig(BaseModel):
     """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never
     leave hardware you control."""
@@ -415,6 +444,7 @@ class Config(BaseModel):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     obs: ObsConfig = Field(default_factory=ObsConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    journal: JournalConfig = Field(default_factory=JournalConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
