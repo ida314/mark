@@ -121,6 +121,7 @@ def build_registry() -> Registry:
     """Assemble every builtin tool. Imports are local to keep startup cheap."""
     from . import (
         builtin_agenda,
+        builtin_calendar,
         builtin_delegate,
         builtin_fs,
         builtin_mail,
@@ -132,6 +133,7 @@ def build_registry() -> Registry:
     reg = Registry()
     reg.add(*builtin_memory.TOOLS)
     reg.add(*builtin_mail.TOOLS)
+    reg.add(*builtin_calendar.TOOLS)
     reg.add(*builtin_fs.TOOLS)
     reg.add(*builtin_shell.TOOLS)
     reg.add(*builtin_web.TOOLS)

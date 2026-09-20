@@ -40,7 +40,7 @@ from ..config import Config
 from ..connectors import google_auth
 from ..connectors.base import ConnectorAuthError, ConnectorRateLimited, ConnectorTransient
 from ..connectors.gmail import METADATA_HEADERS
-from .base import ToolContext, ToolResult, obj, required, tool
+from .base import ToolContext, ToolResult, flat, obj, required, tool
 
 MAX_RESULTS = 25
 DEFAULT_RESULTS = 10
@@ -212,20 +212,6 @@ def headers_of(message: dict) -> dict[str, str]:
         for h in (message.get("payload") or {}).get("headers") or []
         if isinstance(h, dict) and h.get("name")
     }
-
-
-def flat(value: str, limit: int) -> str:
-    """Their field, on one line.
-
-    Not cosmetic. These are rendered as `- ` bullets, and a `Subject` containing a newline
-    followed by `- [id] ...` forges an entry that looks like one this code wrote. Collapsing
-    whitespace is what makes the bullet list a structure the model can trust even though
-    every value in it is a stranger's.
-    """
-    # Gmail's `snippet` arrives HTML-escaped, so an apostrophe reaches the model as `&#39;`
-    # unless it is unescaped here. Safe to do after the split: whatever it produces is still
-    # one line, and the executor seals the one tag sequence that would matter.
-    return htmllib.unescape(" ".join(str(value or "").split()))[:limit]
 
 
 def one_line(message: dict) -> str:

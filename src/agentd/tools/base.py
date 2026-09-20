@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as htmllib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -126,6 +127,22 @@ def tool(
         )
 
     return decorate
+
+
+def flat(value: str | None, limit: int) -> str:
+    """Their field, on one line.
+
+    Not cosmetic. Values from outside are rendered as `- ` bullets, and a subject or an
+    event summary containing a newline followed by `- ...` forges an entry that looks like
+    one this code wrote. Collapsing whitespace is what makes a bullet list a structure the
+    model can trust even though every value in it is a stranger's.
+
+    Lives here rather than in one tool module because the second caller proved it general:
+    a mail subject and a calendar summary are the same problem, written by the same kind of
+    stranger. Unescaping happens after the split, so whatever it produces is still one line,
+    and the executor seals the one tag sequence that would matter.
+    """
+    return htmllib.unescape(" ".join(str(value or "").split()))[:limit]
 
 
 def obj(**properties: Any) -> dict[str, Any]:

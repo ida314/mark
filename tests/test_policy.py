@@ -414,6 +414,11 @@ def test_the_mailbox_is_never_read_unattended():
 # Tools that may still run once the mailbox has been opened. Everything else must be denied,
 # so adding a tool forces a deliberate decision here rather than silently widening the door.
 PRIVATE_SAFE = {
+    # A local SELECT over rows the daemon already archived. The interlock exists to shut
+    # the *egress* door once untrusted mail is in context, and this sends nothing anywhere.
+    # Denying it would break the one workflow the pairing is for: read the invitation, then
+    # look at what it collides with.
+    "calendar_upcoming",
     "fs_list", "fs_read", "fs_search", "gmail_message", "gmail_search", "goal_upsert",
     "goals_list", "memory_history", "memory_remember", "memory_search", "notify_user",
     "open_loop_add", "open_loop_close", "open_loops_list", "profile_read", "reminder_set",
