@@ -220,7 +220,9 @@ async def test_a_denied_tool_is_explained_rather_than_swallowed(bot, monkeypatch
         await tg.handle_message(
             bot, client, tg.Conversation(bot), {"chat": {"id": 4242}, "text": "look it up"}
         )
-    answer = wire.said()[0]
+    # The progress line is sent first, so the explanation is the last message, not the
+    # first. Assert on the answer itself rather than on ordering.
+    answer = wire.said()[-1]
     assert "web_fetch" in answer and "/new" in answer
 
 
@@ -360,3 +362,122 @@ def test_negative_ids_are_fine():
     from agentd.config import TelegramConfig
 
     assert TelegramConfig(allowed_chat_ids=[-1001234567890]).allowed_chat_ids == [-1001234567890]
+
+
+# --- showing what it did -----------------------------------------------------
+
+
+def test_tool_lines_read_in_the_order_things_happened():
+    rendered = tg.render_tools(
+        [("gmail_search", "ok"), ("memory_search", "running"), ("web_fetch", "denied")]
+    )
+    assert rendered.splitlines() == [
+        "✓ gmail_search",
+        "… memory_search",
+        "✗ web_fetch (refused by policy)",
+    ]
+
+
+def test_tool_lines_carry_names_but_never_arguments():
+    """An argument can hold a query built from something a stranger emailed. The rule about
+    rendering their words is one rule, not one per surface."""
+    rendered = tg.render_tools([("gmail_search", "ok")])
+    assert "gmail_search" in rendered
+    assert "query" not in rendered and "{" not in rendered
+
+
+async def test_a_turn_shows_its_tools_and_edits_one_message(bot, monkeypatch):
+    """Edited rather than re-sent: a trail of near-identical messages is what makes a phone
+    unusable."""
+    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
+
+    class FakeLoop:
+        def __init__(self, **kw):
+            pass
+
+        async def run_turn(self, session, text, **kwargs):
+            yield ToolStarted(name="gmail_search", args={})
+            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
+            yield ToolStarted(name="web_fetch", args={})
+            yield ToolFinished(name="web_fetch", ok=False, summary="", denied=True)
+            yield TurnFinished(text="here you go", turn_id=None, steps=2)
+
+    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    wire = Wire(results={"sendMessage": {"message_id": 77}})
+    async with wire.client() as client:
+        await tg.handle_message(
+            bot, client, tg.Conversation(bot), {"chat": {"id": 4242}, "text": "check my mail"}
+        )
+
+    edits = [args for method, args in wire.calls if method == "editMessageText"]
+    assert edits, "the status message is edited, not re-sent"
+    assert all(e["message_id"] == 77 for e in edits), "always the same message"
+    assert "gmail_search" in edits[-1]["text"] and "refused by policy" in edits[-1]["text"]
+    assert "here you go" in wire.said()
+
+
+async def test_tools_off_says_nothing_about_them(bot, monkeypatch):
+    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
+
+    class FakeLoop:
+        def __init__(self, **kw):
+            pass
+
+        async def run_turn(self, session, text, **kwargs):
+            yield ToolStarted(name="gmail_search", args={})
+            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
+            yield TurnFinished(text="done", turn_id=None, steps=1)
+
+    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+    conv = tg.Conversation(bot)
+    conv.verbose[4242] = False
+    wire = Wire(results={"sendMessage": {"message_id": 77}})
+    async with wire.client() as client:
+        await tg.handle_message(bot, client, conv, {"chat": {"id": 4242}, "text": "hi"})
+
+    assert wire.said() == ["done"]
+    assert not [m for m, _ in wire.calls if m == "editMessageText"]
+
+
+async def test_the_tools_command_toggles_per_chat(bot):
+    wire = Wire()
+    conv = tg.Conversation(bot)
+    async with wire.client() as client:
+        await tg.handle_command(bot, client, conv, 4242, "/tools off")
+        assert conv.show_tools(4242) is False
+        assert conv.show_tools(9999) is True, "other chats keep the default"
+        await tg.handle_command(bot, client, conv, 4242, "/tools on")
+        assert conv.show_tools(4242) is True
+
+
+async def test_a_failing_status_edit_never_costs_the_answer(bot, monkeypatch):
+    """Telegram rate-limits edits. Losing the progress line is a cosmetic problem; losing
+    the answer because of it is not."""
+    from agentd.agent.events import ToolFinished, ToolStarted, TurnFinished
+
+    class FakeLoop:
+        def __init__(self, **kw):
+            pass
+
+        async def run_turn(self, session, text, **kwargs):
+            yield ToolStarted(name="gmail_search", args={})
+            yield ToolFinished(name="gmail_search", ok=True, summary="", denied=False)
+            yield TurnFinished(text="the answer", turn_id=None, steps=1)
+
+    monkeypatch.setattr(tg, "AgentLoop", FakeLoop)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        method = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content or b"{}")
+        if method == "editMessageText":
+            return httpx.Response(429, json={"ok": False, "description": "Too Many Requests"})
+        if method == "sendMessage" and body.get("text") == "the answer":
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await tg.handle_message(
+            bot, client, tg.Conversation(bot), {"chat": {"id": 4242}, "text": "hi"}
+        )  # must not raise

@@ -221,16 +221,28 @@ async def _doctor() -> None:
             entries = 0
         row("secrets", problem is None, problem or f"{entries} entries, mode 0600")
 
-    # the chat channel: whether it can run, never the token
-    if cfg.telegram.enabled:
-        from ..daemon import telegram as tg
+    # the chat channel: whether it can run, never the token.
+    #
+    # Reported whenever there is any evidence of intent — a token, an allowlist, or the
+    # flag — rather than only when enabled. `enabled = false` with everything else in place
+    # is a real state somebody gets stuck in, and a doctor that says nothing about it is a
+    # doctor that helped them get stuck.
+    from ..daemon import telegram as tg
 
+    set_up = bool(cfg.telegram.allowed_chat_ids) or tg.token() is not None
+    if cfg.telegram.enabled or set_up:
         why = tg.configured(cfg)
-        row(
-            "channel:telegram",
-            None if why else True,
-            why or f"{len(cfg.telegram.allowed_chat_ids)} allowed chat id(s)",
-        )
+        if not cfg.telegram.enabled:
+            row(
+                "channel:telegram", None,
+                "set up but [telegram] enabled = false in config.toml, so nothing polls",
+            )
+        else:
+            row(
+                "channel:telegram",
+                None if why else True,
+                why or f"{len(cfg.telegram.allowed_chat_ids)} allowed chat id(s)",
+            )
 
     # connectors: status only, never a credential
     if db_ok and cfg.connectors.enabled:

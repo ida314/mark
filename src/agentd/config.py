@@ -196,6 +196,11 @@ class TelegramConfig(BaseModel):
     # A turn that runs longer than this gets a "still working" nudge, because a silent bot
     # is indistinguishable from a broken one.
     slow_turn_s: float = 20.0
+    # Show which tools ran, as they run. On by default: in a terminal you watch the tool
+    # lines scroll past, and losing that on a phone turns the agent into something that
+    # produces answers with no visible account of where they came from. `/tools` toggles it
+    # per chat.
+    show_tools: bool = True
 
 
 class GithubConnectorConfig(BaseModel):

@@ -270,3 +270,7 @@ allowed_chat_ids = []
 autonomy = "assist"      # same as the CLI; external work still queues for /approve
 poll_timeout_s = 50      # long polling, so this box needs no inbound port
 max_message_chars = 4000
+# Show which tools each answer used, as they run, in a single message that fills in. In a
+# terminal you watch the tool lines scroll past; without this a phone answer arrives with
+# no account of where it came from. `/tools off` turns it off for one chat.
+show_tools = true

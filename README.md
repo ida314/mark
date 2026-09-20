@@ -291,7 +291,23 @@ first one notifies you once.
 
 In the chat: `/new` starts a fresh conversation and is how you lift the private-data
 interlock; `/status`, `/approvals` and `/approve <id>` are there because a queued approval
-you cannot see from your phone is a queued approval you will not act on. `/approve` shares
+you cannot see from your phone is a queued approval you will not act on; `/tools on|off`
+controls the progress line.
+
+That line is on by default and is the phone's version of watching tool calls scroll past in
+a terminal — one message that fills in as the turn runs:
+
+```
+✓ gmail_search
+… memory_search
+✗ web_fetch (refused by policy)
+```
+
+Names, never arguments: an argument can hold a query built out of something a stranger
+emailed, and there is already one rule in this codebase about rendering their words rather
+than one rule per surface. It is edited rather than re-sent, because a trail of
+near-identical messages is what makes a phone unusable, and every edit is best-effort — a
+rate limit costs you the progress line, never the answer. `/approve` shares
 `policy.replay.execute_approved` with the CLI rather than reimplementing consent — a half
 approval that marked a row `approved` without running it would strand the action forever,
 since the CLI returns early on anything that is not `pending`.

@@ -50,6 +50,7 @@ HELP = (
     "I'm your agent.\n\n"
     "/new — start a fresh conversation (also how you lift the mail interlock)\n"
     "/status — what I'm watching and whether it's working\n"
+    "/tools on|off — show which tools each answer used\n"
     "/approvals — anything waiting on your yes\n"
     "/approve <id> — say yes to one\n"
     "/whoami — your chat id"
@@ -122,9 +123,74 @@ def chunk(text: str, limit: int) -> list[str]:
     return [p for p in parts if p]
 
 
-async def say(cfg: Config, client: httpx.AsyncClient, chat_id: int, text: str) -> None:
+async def say(cfg: Config, client: httpx.AsyncClient, chat_id: int, text: str) -> int | None:
+    """Returns the id of the last message sent, so it can be edited in place."""
+    sent = None
     for part in chunk(text, cfg.telegram.max_message_chars):
-        await call(cfg, client, "sendMessage", chat_id=chat_id, text=part)
+        result = await call(cfg, client, "sendMessage", chat_id=chat_id, text=part)
+        sent = result.get("message_id", sent)
+    return sent
+
+
+SYMBOL = {"running": "\u2026", "ok": "\u2713", "error": "\u2717", "denied": "\u2717"}
+NOTE = {"denied": " (refused by policy)", "error": " (failed)"}
+
+
+def render_tools(lines: list[tuple[str, str]]) -> str:
+    """One line per tool call, in the order they happened.
+
+    Names only, never arguments. A tool's arguments can hold a query built out of something
+    a stranger emailed; this text goes to a phone rather than to the model, so it is not an
+    injection boundary - but there is already one rule in this codebase about rendering
+    their words, and having a second rule for the same question is how the two drift.
+    """
+    return "\n".join(
+        f"{SYMBOL.get(state, '')} {name}{NOTE.get(state, '')}".strip() for name, state in lines
+    )
+
+
+class Progress:
+    """The status message that shows tools as they run, edited rather than re-sent.
+
+    Re-sending would leave a trail of near-identical messages on a phone; editing keeps one
+    line that fills in. Every Telegram call here is best-effort: a rate limit or a deleted
+    message must not cost the answer the user actually asked for.
+    """
+
+    def __init__(self, cfg: Config, client: httpx.AsyncClient, chat_id: int, *, show: bool):
+        self.cfg, self.client, self.chat_id, self.show = cfg, client, chat_id, show
+        self.lines: list[tuple[str, str]] = []
+        self.message_id: int | None = None
+
+    async def started(self, name: str) -> None:
+        self.lines.append((name, "running"))
+        await self._flush()
+
+    async def finished(self, name: str, *, ok: bool, denied: bool) -> None:
+        state = "denied" if denied else ("ok" if ok else "error")
+        for index in range(len(self.lines) - 1, -1, -1):
+            if self.lines[index] == (name, "running"):
+                self.lines[index] = (name, state)
+                break
+        else:
+            self.lines.append((name, state))
+        await self._flush()
+
+    async def _flush(self) -> None:
+        if not self.show or not self.lines:
+            return
+        text = render_tools(self.lines)
+        with contextlib.suppress(Exception):
+            if self.message_id is None:
+                result = await call(
+                    self.cfg, self.client, "sendMessage", chat_id=self.chat_id, text=text
+                )
+                self.message_id = result.get("message_id")
+            else:
+                await call(
+                    self.cfg, self.client, "editMessageText",
+                    chat_id=self.chat_id, message_id=self.message_id, text=text,
+                )
 
 
 # --- sessions ----------------------------------------------------------------
@@ -141,6 +207,10 @@ class Conversation:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.sessions: dict[int, UUID] = {}
+        self.verbose: dict[int, bool] = {}
+
+    def show_tools(self, chat_id: int) -> bool:
+        return self.verbose.get(chat_id, self.cfg.telegram.show_tools)
 
     async def session_for(self, chat_id: int, *, fresh: bool = False) -> Session:
         existing = self.sessions.get(chat_id)
@@ -170,6 +240,10 @@ async def handle_command(
     elif command == "/new":
         session = await conv.session_for(chat_id, fresh=True)
         await say(cfg, client, chat_id, f"new conversation ({str(session.id)[:8]}).")
+    elif command == "/tools":
+        want = rest.lower() not in ("off", "no", "false", "0")
+        conv.verbose[chat_id] = want
+        await say(cfg, client, chat_id, f"tool lines {'on' if want else 'off'}.")
     elif command == "/status":
         await say(cfg, client, chat_id, await status_line())
     elif command == "/approvals":
@@ -241,16 +315,21 @@ async def handle_message(
 
     answer = ""
     denied: list[str] = []
+    progress = Progress(cfg, client, chat_id, show=conv.show_tools(chat_id))
 
     async def run() -> None:
         nonlocal answer
-        from ..agent.events import ToolFinished
+        from ..agent.events import ToolFinished, ToolStarted
 
         async for event in loop.run_turn(
             session, text, origin="telegram", autonomy=cfg.telegram.autonomy
         ):
-            if isinstance(event, ToolFinished) and event.denied:
-                denied.append(event.name)
+            if isinstance(event, ToolStarted):
+                await progress.started(event.name)
+            if isinstance(event, ToolFinished):
+                await progress.finished(event.name, ok=event.ok, denied=event.denied)
+                if event.denied:
+                    denied.append(event.name)
             if isinstance(event, TurnFinished):
                 answer = event.text
 
