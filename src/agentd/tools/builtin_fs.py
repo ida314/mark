@@ -10,7 +10,7 @@ from pathlib import Path
 from ..config import get_config
 from ..ids import utcnow
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import READ, UNAUDITED
+from .effects import READ, UNSAFE_WRITE
 
 MAX_READ_BYTES = 400_000
 
@@ -150,7 +150,13 @@ def _write_preview(args: dict) -> str:
     tags=("fs",),
     path_args=("path",),
     preview=_write_preview,
-    effect_class=UNAUDITED,
+    # unsafe_write in every mode, not only in `append`. `append` duplicates the content
+    # and `create` fails the second time, but even `overwrite` does not converge: the
+    # backup this tool takes before writing is what makes the change undoable, and a
+    # replay backs up the *first attempt's* output. The undo then restores that, not the
+    # file the user had. One class per tool cannot say "except in overwrite mode" anyway
+    # (pass-03 outcome, 3a open question 3).
+    effect_class=UNSAFE_WRITE,
 )
 async def fs_write(args: dict, ctx: ToolContext) -> ToolResult:
     cfg = get_config()

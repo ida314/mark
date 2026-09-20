@@ -15,7 +15,7 @@ definition the one nobody thought about, and the resume path would read that sil
 promise that re-running is free.
 
 Session 3b writes the ledger keyed by these values; Pass 4 reconciles against them.
-This module is the vocabulary, the gate, and the list of tools nobody has ruled on yet.
+This module is the vocabulary, the gate, and the list of tools still awaiting a ruling.
 """
 
 from __future__ import annotations
@@ -50,30 +50,26 @@ MEANING: dict[EffectClass, str] = {
 # this" rather than "somebody decided this is unsafe", which are not the same claim and
 # would otherwise be indistinguishable in the source.
 #
-# Session 3c replaced nineteen of these with a ruling and dropped those names from
-# UNAUDITED_TOOLS below; 3d owns the six that are left, plus the one 3c deferred.
+# Session 3c ruled on nineteen of these and 3d on the last six, dropping each name from
+# UNAUDITED_TOOLS below as it was ruled on. One name is left, and it is a deferral to a
+# human rather than an omission - see below.
 UNAUDITED: EffectClass = UNSAFE_WRITE
 
 # Which tools are in that state, as data rather than as a paragraph that goes stale. A
 # name in here means: registered, declaring `unsafe_write`, and carrying no recorded
-# ruling. After session 3c that is two different situations, and
-# `docs/records/effect-classification.md` says which is which for every name:
+# ruling. `docs/records/effect-classification.md` says why, for every name.
 #
-#   - nobody has looked yet (session 3d's six: the filesystem write, the shell, the two
-#     Gmail tools and the two web tools);
-#   - 3c looked, could not settle it alone, and left the conservative value standing for a
-#     human to rule on (`memory_search`).
+# After sessions 3c and 3d the audit is complete except for one tool, and what is left is
+# not "nobody has looked" - it is "somebody looked and would not decide alone".
+# `memory_search` moves a counter (`access_count = access_count + 1` on every fact it
+# returned), so it is not literally `read`; nothing outside this machine changes, so it is
+# not plausibly `unsafe_write` either. It holds the conservative value until a human picks,
+# and the reasoning is at the declaration and in the record.
 #
-# Both deserve the same value and neither deserves to be mistaken for a decision, which is
-# what this set exists to prevent. When it is empty the audit is done.
+# When this set is empty the audit is done. A *new* tool added with `UNAUDITED` belongs in
+# here too, and `tests/test_tool_effect_class.py` will insist on it.
 UNAUDITED_TOOLS: frozenset[str] = frozenset({
-    "fs_write",
-    "gmail_message",
-    "gmail_search",
     "memory_search",
-    "shell_exec",
-    "web_fetch",
-    "web_search",
 })
 
 

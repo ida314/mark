@@ -8,7 +8,7 @@ import socket
 import httpx
 
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED
+from .effects import READ, UNSAFE_WRITE
 
 MAX_BYTES = 5_000_000
 
@@ -61,7 +61,14 @@ def check_url(url: str, resolver=None) -> str | None:
     ),
     tags=("web", "untrusted", "egress"),
     trust_output=False,
-    effect_class=UNAUDITED,
+    # unsafe_write, against the expectation 3c wrote down. An HTTP GET is only
+    # *conventionally* safe: the far end decides what its URLs do, and one-click
+    # unsubscribe links, confirmation links and GET-shaped API endpoints all act. This
+    # tool has no contract with that server and cannot tell those apart, and the URL is
+    # chosen by the model - often from untrusted text this tool itself returned. A
+    # replay of the wrong one is a real-world action taken twice, which is the cost the
+    # pass says never to accept for the sake of avoiding a prompt.
+    effect_class=UNSAFE_WRITE,
 )
 async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
     url = args["url"]
@@ -109,7 +116,10 @@ async def web_fetch(args: dict, ctx: ToolContext) -> ToolResult:
     required(obj(query={"type": "string"}, n={"type": "integer"}), "query"),
     tags=("web", "untrusted", "egress"),
     trust_output=False,
-    effect_class=UNAUDITED,
+    # read: one query against DDGS's search endpoint. Unlike `web_fetch` the endpoint is
+    # fixed and the model supplies only the query, so there is no URL whose far end
+    # might act; a repeated search spends quota and changes nothing.
+    effect_class=READ,
 )
 async def web_search(args: dict, ctx: ToolContext) -> ToolResult:
     import asyncio

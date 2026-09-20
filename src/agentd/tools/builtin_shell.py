@@ -11,7 +11,7 @@ import shutil
 from ..config import get_config
 from ..ids import uuid7
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED
+from .effects import UNSAFE_WRITE
 
 
 def docker_command(command: str, *, network: bool, timeout_s: int, name: str) -> list[str]:
@@ -57,7 +57,11 @@ def _preview(args: dict) -> str:
     risk="write",
     tags=("sandbox", "shell", "egress"),
     preview=_preview,
-    effect_class=UNAUDITED,
+    # unsafe_write: the argument is a command line the model wrote, so there is nothing
+    # generic to reason about. The container is throwaway but `/workspace` is mounted rw
+    # and survives it, and with `network=true` the command can reach anything the host
+    # can. No class short of this one is defensible for an arbitrary program.
+    effect_class=UNSAFE_WRITE,
 )
 async def shell_exec(args: dict, ctx: ToolContext) -> ToolResult:
     cfg = get_config()

@@ -670,3 +670,165 @@ be asserting over placeholders. It becomes writable when `UNAUDITED_TOOLS` is em
 
 **5. Still open, untouched by 3c:** everything in 3b's open questions 1-6 except the fsync
 cost, which is now smaller but still unmeasured.
+
+---
+
+## Session 3d — Audit: writes and integrations
+
+Run autonomously under the orchestrator's standing policy: no human to ask mid-session,
+the conservative class under any uncertainty, every uncertain call recorded in
+`docs/records/effect-classification.md` with the reasoning and the rejected alternative.
+Explicitly barred and observed: no live external API was called to settle a classification.
+Every "does this API accept a client-supplied id" question was answered by reading this
+repo's client code and the provider's documented contract. No mail was sent, no calendar
+event created, no remote state mutated, and nothing was run against the live memory store.
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `docs/records/effect-classification.md` | the 3d rulings, the id-acceptance table, the uncertain calls | +82 −20 |
+| `src/agentd/tools/effects.py` | `UNAUDITED_TOOLS` 7 → 1; the comment now says the leftover is a deferral, not an omission | +17 −17 |
+| `src/agentd/tools/builtin_fs.py` | `fs_write` → `unsafe_write`, with the backup argument at the declaration | +9 −2 |
+| `src/agentd/tools/builtin_shell.py` | `shell_exec` → `unsafe_write` | +7 −2 |
+| `src/agentd/tools/builtin_mail.py` | `gmail_search`, `gmail_message` → `read`, justified by the OAuth scope | +13 −3 |
+| `src/agentd/tools/builtin_web.py` | `web_search` → `read`; `web_fetch` → `unsafe_write` | +14 −3 |
+| `tests/test_tool_effect_class.py` | 3 tests | +49 |
+
+Suite 658 → 661 passing. `.venv/bin/ruff check src tests scripts` clean. No tool was added,
+removed, moved or renamed; no already-ruled class was changed. Registry built in a real
+process: 26 tools, **14 `read`, 2 `idempotent_write`, 10 `unsafe_write`** — of which one
+(`memory_search`) is still the unruled placeholder.
+
+### what deviated from the plan, and why
+
+**1. `web_fetch` is `unsafe_write`, reversing the expectation 3c wrote into the table.**
+This is the session's one judgement call and the one most likely to be argued with. The
+case for `read` is real: the tool cannot write, `GET` is defined as safe, and refetching a
+page is normally nothing. It was rejected because "safe" is a promise the *server* makes
+and routinely breaks — one-click unsubscribe links, email confirmation links and
+GET-shaped API endpoints all act — this tool has no contract with the far end and cannot
+tell them apart, and the URL is chosen by the model, frequently out of untrusted text this
+same tool returned. The pass file's own asymmetry then settles it. The accepted cost is
+four fsyncs per fetch and a Pass 4 prompt on a commonly used tool; recorded so a human can
+overturn it cheaply, since overturning it is one word in two places.
+
+**2. The two Gmail tools are `read`, and the reason is the OAuth scope rather than the
+handlers.** `google_auth.GMAIL_SCOPE` is `.../auth/gmail.readonly`, so Google refuses any
+mutation with that token regardless of what this codebase asks for; `users.messages.get`
+does not clear UNREAD (only a labels modify does, which the scope forbids). Their
+`private_output=True` raises `session.private`, which was considered and is not an external
+effect: it is in-process session state that a replay merely re-raises. Rejected
+alternative: `unsafe_write` because mail is private. A replay re-exposes the same mail to
+the same agent in the same run, which is not a duplicated real-world action.
+
+**3. The pass file's list of "calls worth arguing about" names two calls that do not
+exist.** There is no `gmail send` tool and no `calendar create` tool in this registry — no
+tool sends mail, and both Google scopes are read-only. Rather than skip those rows, the
+record states what a future implementer needs: `users.messages.send` accepts **no**
+client-supplied idempotency id (server-assigned id, a repeat is a second mail), while
+Google Calendar's `events.insert` **does** accept a client-generated `id`, which is the
+only thing that could make a calendar create `idempotent_write`. `reminder_set` — the
+other name on that list — is a local watcher row and was already ruled `unsafe_write` by
+3c; no external API is involved, so no id question arises.
+
+**4. `memory_search` was left unruled, as 3c left it.** It is not in 3d's scope (it touches
+no filesystem, shell, mailbox, calendar or external API) and 3c referred it to a human by
+name. Ruling it here would have been this session overriding a deferral it was not asked to
+resolve. Consequence: `UNAUDITED_TOOLS` is one name, not empty, so the pass's "every tool
+covered" is met in the record (every tool has a row and an argument) but not in the sense
+of "every tool has a decided class".
+
+**5. Nothing in 3d is `idempotent_write`**, so the id-acceptance check gated nothing. It was
+still performed and written down for all six integrations, because the value of the check is
+mostly in the case where the answer would have changed a class, and the next reader cannot
+tell "checked, no" from "never checked" unless it is recorded.
+
+### what is now true about the code that was not before
+
+- **Every registered tool but one carries a class somebody chose**, each with a one-line
+  justification in `docs/records/effect-classification.md` and, for the non-obvious ones, a
+  comment at the declaration saying what specifically decides it.
+- **The two cheapest-looking network tools are split down the middle**, deliberately:
+  `web_search` is `read` because the endpoint is fixed and the model supplies only a query;
+  `web_fetch` is `unsafe_write` because the model supplies the URL. That distinction — who
+  chooses the far end — is the operative one and is written at both declarations.
+- **The Gmail ruling is pinned to the fact that justifies it.**
+  `test_the_gmail_tools_are_read_because_the_scope_makes_them_read` fails if
+  `GMAIL_SCOPE` or `CALENDAR_SCOPE` stops ending in `readonly`. Widening the scope later to
+  mark a thread read would otherwise leave two tools classified `read` whose handlers still
+  look exactly like reads.
+- **`fs_write` cannot be quietly downgraded while `append` is still one of its modes.**
+  `test_fs_write_cannot_be_downgraded_while_append_is_still_a_mode_it_accepts` reads the
+  `mode` enum out of the tool's own schema, so the eventual (correct) argument that
+  `overwrite` converges cannot land without either splitting the tool or removing `append`.
+- **The audit's remaining work is an equality, not a subset.**
+  `test_the_only_tool_left_unruled_is_the_one_a_human_was_asked_to_settle` asserts
+  `UNAUDITED_TOOLS == {"memory_search"}`, so a tool added later with the placeholder fails
+  the suite at the moment someone is still in a position to classify it.
+- **Ten tools pay the ledger cost and sixteen do not.** `gmail_search`, `gmail_message` and
+  `web_search` stopped writing a ledger row and two journal events per call.
+
+**Mutation-checked rather than trusted for being green.** Three mutations, all caught:
+`GMAIL_SCOPE` → `gmail.modify` (1 failure); `fs_write` → `read` in source (2, including the
+table-agreement test); adding `web_fetch` to `UNAUDITED_TOOLS` (2). Registry built in a real
+process to confirm the counts above rather than reading them off the suite.
+
+### schemas as actually implemented
+
+No schema changed. The only structural change is the contents of one frozenset:
+
+```python
+UNAUDITED_TOOLS: frozenset[str] = frozenset({
+    "memory_search",
+})
+```
+
+The classification table keeps 3c's three-cell row format, which the parser in
+`tests/test_tool_effect_class.py` reads. The new id-acceptance table is deliberately
+**four** cells wide so the parser ignores it: it is evidence about integrations, not a
+claim about a tool's class, and a row in it must never be mistaken for a ruling.
+
+### deferred items, and where they went
+
+- **`memory_search` — a human**, unchanged from 3c. One row in the record's deferred
+  section, the reasoning also at the declaration.
+- **An argument-aware effect class — Pass 8.** `fs_write` (mode) and `goal_upsert` (slug)
+  both carry a tool-level label over an argument-level property. Splitting a tool is
+  explicitly out of this pass (*Must not*: do not change which tools exist).
+- **A per-host policy for `web_fetch`.** If the `unsafe_write` ruling proves expensive, the
+  cheap remedy is an allowlist of hosts whose GETs are known inert, not a downgrade of the
+  tool. Not built, not designed.
+- **The `risk` / `effect_class` cross-check (3a #4, 3c #4).** Now writable — the factual
+  relationship exists for 25 of 26 tools — but not written, because one tool is still a
+  placeholder and the first version of that check would be asserting over it. It belongs to
+  whoever rules `memory_search`.
+- **`agent tools list` still does not show the effect class**, and persisting the class to
+  the Postgres `tools` table is still undone (additive migration, nothing queries it).
+- **`docs/records/session-ledger.md`** was not edited by this session; the orchestrator's
+  dispatch row was already there.
+
+### open questions for later passes
+
+**1. `web_fetch` is the row to review first.** It is the only reversal of a previous
+session's stated expectation, it falls on a frequently used tool, and it is one word in two
+places to overturn. The argument for and against is in the record.
+
+**2. `memory_search` is still the pass's one unresolved judgement**, and it is the most
+frequently called tool in the runtime — so it is the one Pass 4 will most often ask about.
+Settling it is now the whole of what stands between `UNAUDITED_TOOLS` and empty.
+
+**3. The Gmail rulings are scope-shaped, and the scope is a config-time decision.** The test
+pins the constants, but a *new* mail tool authorised under a wider scope would be a new
+ruling, not an extension of these. Anyone adding one should read the 3d section of the
+record before reusing `read`.
+
+**4. Nothing relates an effect class to the arguments it was chosen for.** The record now
+contains three tools (`fs_write`, `goal_upsert`, `web_fetch`) whose honest class varies by
+argument, all three labelled at their worst case. That is safe and lossy, and it is the
+first thing an argument-aware design in Pass 8 should take.
+
+**5. Still open, untouched by 3d:** everything in 3b's open questions 1-6 and 3c's 2, 3 and
+5 — the detached-run fold, the unmeasured fsync cost (now smaller again), the one bit the
+journal cannot reproduce, worker attribution on effect events, and the two-attempts-both-run
+property that Pass 4 exists to stop.

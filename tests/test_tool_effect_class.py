@@ -18,10 +18,12 @@ import pathlib
 
 import pytest
 
+from agentd.connectors import google_auth
 from agentd.tools import builtin_fs
 from agentd.tools.base import Tool, ToolContext, ToolResult, obj, tool
 from agentd.tools.effects import (
     EFFECT_CLASSES,
+    READ,
     UNAUDITED,
     UNAUDITED_TOOLS,
     UNSAFE_WRITE,
@@ -166,3 +168,50 @@ def test_every_tool_in_the_classification_table_declares_what_the_table_says():
         else:
             assert name not in UNAUDITED_TOOLS, f"{name} has a ruling but is still UNAUDITED"
             assert declared == klass, f"{name}: source says {declared}, the record says {klass}"
+
+
+def test_the_gmail_tools_are_read_because_the_scope_makes_them_read():
+    """The ruling and the fact that justifies it must not be able to drift apart.
+
+    Session 3d called `gmail_search` and `gmail_message` `read` for one reason only: the
+    OAuth scope is read-only, so Google refuses a mutation with that token whatever this
+    codebase asks for. That is a much stronger guarantee than "these handlers only issue
+    GETs", and it is the reason a replay after a crash is free. If somebody later widens
+    the scope to `gmail.modify` or `gmail.send` - to mark a thread read, say - the two
+    rulings stop being true the moment the token can act, and nothing else in the suite
+    would notice: the handlers would still look like reads.
+    """
+    assert google_auth.GMAIL_SCOPE.endswith("/auth/gmail.readonly")
+    assert google_auth.CALENDAR_SCOPE.endswith("/auth/calendar.readonly")
+
+    registry = build_registry()
+    assert registry.tools["gmail_search"].effect_class == READ
+    assert registry.tools["gmail_message"].effect_class == READ
+
+
+def test_fs_write_cannot_be_downgraded_while_append_is_still_a_mode_it_accepts():
+    """One class per tool has to cover the tool's worst argument.
+
+    `fs_write` takes `mode`, and `append` adds the same content again on every replay -
+    the plainest duplicate-action there is. The argument that will eventually be made for
+    downgrading this tool is that `overwrite` converges, which is true of the file and
+    false of the backup the tool takes to make the write undoable. This test does not
+    forbid the downgrade; it forbids doing it while `append` is still reachable from the
+    same name, which is the version of the change that would be a silent lie.
+    """
+    modes = builtin_fs.fs_write.parameters["properties"]["mode"]["enum"]
+    if "append" in modes:
+        assert builtin_fs.fs_write.effect_class == UNSAFE_WRITE
+
+
+def test_the_only_tool_left_unruled_is_the_one_a_human_was_asked_to_settle():
+    """The audit is finished when this set is empty, and it is one name from empty.
+
+    Keeping the remaining work as an equality rather than a subset is deliberate: a tool
+    added later with the `UNAUDITED` placeholder fails here, which is the moment somebody
+    is still in a position to say what its effect class actually is. `memory_search` is
+    not an oversight - sessions 3c and 3d both looked at it and neither would decide it
+    alone; `docs/records/effect-classification.md` carries the argument and the rejected
+    alternative for whoever does.
+    """
+    assert UNAUDITED_TOOLS == frozenset({"memory_search"})

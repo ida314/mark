@@ -41,7 +41,7 @@ from ..connectors import google_auth
 from ..connectors.base import ConnectorAuthError, ConnectorRateLimited, ConnectorTransient
 from ..connectors.gmail import METADATA_HEADERS
 from .base import ToolContext, ToolResult, flat, obj, required, tool
-from .effects import UNAUDITED
+from .effects import READ
 
 MAX_RESULTS = 25
 DEFAULT_RESULTS = 10
@@ -247,7 +247,12 @@ def one_line(message: dict) -> str:
     always_on=True,
     trust_output=False,
     private_output=True,
-    effect_class=UNAUDITED,
+    # read: `GET users.messages.list`, then `GET users.messages.get?format=metadata`
+    # per hit, under `gmail.readonly` (google_auth.GMAIL_SCOPE). The class rests on the
+    # scope, which Google enforces, rather than on this file's care: a token with that
+    # scope cannot send, label, delete or archive, and a `messages.get` does not clear
+    # UNREAD - only a `labels.modify` does. Replaying one costs quota and nothing else.
+    effect_class=READ,
 )
 async def gmail_search(args: dict, ctx: ToolContext) -> ToolResult:
     from ..config import get_config
@@ -299,7 +304,11 @@ async def gmail_search(args: dict, ctx: ToolContext) -> ToolResult:
     always_on=True,
     trust_output=False,
     private_output=True,
-    effect_class=UNAUDITED,
+    # read: one `GET users.messages.get?format=full`, same read-only scope. It raises
+    # `session.private` for the rest of the session (private_output), which is
+    # in-process state that a replay merely re-raises - not something outside this
+    # machine, and not something a second call can duplicate.
+    effect_class=READ,
 )
 async def gmail_message(args: dict, ctx: ToolContext) -> ToolResult:
     from ..config import get_config
