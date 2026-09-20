@@ -16,7 +16,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 2c | complete | 2026-09-20 | pass-02-outcome.md | committed as b34f153. In-memory UIEvent bus deleted; journal is the only event path. 8 deviations, none crossing a Must not. Kill test passed at 3 points. |
 | 3a | complete | 2026-09-20 | pass-03-outcome.md | committed as cae2f75. effect_class mandatory, no default; 26/26 builtins declare UNAUDITED (= unsafe_write), none classified. 5 deviations, no Must not crossed. |
 | 3b | complete | 2026-09-20 | pass-03-outcome.md | committed as 0eda557. effect table (schema v2) + idempotency keys + announce-before-dispatch in the executor. 7 deviations, no Must not crossed. |
-| 3c | pending | — | — | **hard stop — human runs this** (effect classification) |
+| 3c | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as 100e0ff. 19 of 26 ruled (11 read, 2 idempotent_write, 6 unsafe_write); UNAUDITED 26 → 7. 5 deviations, no Must not crossed. **Ran autonomously under the standing policy in place of its supervised hard stop — the table still needs Dylan's review before Pass 4.** |
 | 3d | pending | — | — | **hard stop — human runs this** (effect classification) |
 | 4a | pending | — | — | |
 | 4b | pending | — | — | |
@@ -90,3 +90,8 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
   `fs_read` as `read` must delete that assertion, not work around it.
 - **3b → 3c/3d, the cost that makes the audit urgent:** every effecting call now costs four
   synchronous fsyncs, and with all 26 builtins `UNAUDITED` that applies to `time_now`.
+- **3c → human, before Pass 4:** `memory_search` is examined but deliberately unruled.
+  `retrieval.pack` ends in `touch_accessed` (`access_count + 1`), so it is neither
+  literally `read` nor plausibly unsafe. It holds the conservative value until Dylan rules
+  on it. The whole 3c/3d table wants his eyes at the pass boundary regardless — it was
+  produced under the autonomous standing policy, not by the human the plan assumed.
