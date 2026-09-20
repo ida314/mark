@@ -10,6 +10,11 @@ ExecStart=%h/Projects/agent/.venv/bin/agent daemon run
 Restart=on-failure
 RestartSec=10
 Environment=OTEL_SERVICE_NAME=agent-daemon
+# The box is Etc/UTC, but the person is not. quiet_hours, nightly_at and the agent's own
+# "what time is it" line all read the *process* timezone via .astimezone(), so without this
+# the daemon holds notifications until 08:00 UTC — 04:00 in New York — and tells the model
+# the wrong local time all day.
+Environment=TZ=America/New_York
 
 [Install]
 WantedBy=default.target

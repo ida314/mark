@@ -31,6 +31,17 @@ services:
       NTFY_LISTEN_HTTP: ":80"
       NTFY_BEHIND_PROXY: "false"
       NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      # deny-all is the default for every topic. The `agent` topic is opened to anonymous
+      # read-write by a grant held in the ntfy volume, not here, so a stack recreated from
+      # this file alone will 403 every push until you re-run:
+      #
+      #   docker exec agentd-ntfy-1 ntfy access everyone agent rw
+      #   docker exec agentd-ntfy-1 ntfy access --reset everyone agent   # to undo
+      #
+      # "Anonymous" is bounded by the ports below: loopback and the tailnet address only,
+      # so it means a device you own, and the topic name stays the secret. To tighten it
+      # instead, add a user and put a token at `ntfy/default` in the vault — the notifier
+      # already reads one from there (see notifier._headers).
       NTFY_AUTH_DEFAULT_ACCESS: deny-all
       NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
     volumes:
