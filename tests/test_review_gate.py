@@ -452,3 +452,87 @@ def test_its_not_x_its_y_extracts_what_is_being_replaced():
 
 def test_a_plain_statement_carries_no_cue():
     assert detect_correction("Dylan prefers terse answers") is None
+
+
+# The vocabulary below is the one that failed live: a user typing "where i live is wrong,
+# i live in the east village" got the canned "Queued for review" note, because
+# `detect_correction` only knew the literal "that's wrong" contraction.
+
+
+def test_saying_what_is_wrong_is_read_as_a_correction():
+    cue = detect_correction(
+        "where i live is wrong, i live in the east village, manhattan. "
+        "I go to nyu and i graduate 05/2027"
+    )
+    assert cue is not None
+    assert cue.relation == "corrects"
+
+
+def test_a_wrong_stored_value_is_read_as_a_correction():
+    for text in (
+        "that address is wrong, i live in Manhattan",
+        "your info is wrong, my graduation is May 2027",
+        "where i live is wrong. i live in the east village",
+    ):
+        cue = detect_correction(text)
+        assert cue is not None, text
+        assert cue.relation == "corrects"
+
+
+def test_calling_a_file_wrong_is_not_a_correction_of_memory():
+    """This fires on every turn the user types in their own repo, where "the test is wrong"
+    and "the CI config is wrong, fix it" are ordinary instructions about code. What makes a
+    sentence a correction is the first-person restatement after it, not which noun is wrong —
+    enumerating memory-ish nouns would never generalise."""
+    assert detect_correction("the CI config is wrong, fix it") is None
+    assert detect_correction("the test is wrong, fix it") is None
+    assert detect_correction("the migration is wrong") is None
+    assert detect_correction("what if the assumption is wrong") is None
+
+
+def test_naming_an_error_without_stating_the_truth_stays_in_the_queue():
+    """A bare "your info is wrong" leaves nothing for the fast path to adjudicate against,
+    so queuing it is the correct outcome rather than a missed correction."""
+    assert detect_correction("your info is wrong") is None
+
+
+def test_reporting_someone_elses_error_is_not_a_correction_of_memory():
+    """A cue means *this sentence corrects what you believe about me*. An opinion about a
+    document being wrong, and a question about whether someone was wrong, are neither."""
+    assert detect_correction("I think the docs are wrong about this") is None
+    assert detect_correction("was I wrong?") is None
+    assert detect_correction("tell me if I'm wrong") is None
+    assert detect_correction("Let me know if the plan is wrong about the ordering") is None
+    assert detect_correction("the test is wrong about the ordering, can you fix it") is None
+
+
+def test_not_x_im_y_extracts_what_is_being_replaced():
+    cue = detect_correction("I'm not in Brooklyn, I'm in the East Village")
+    assert cue is not None
+    assert cue.relation == "corrects"
+    assert cue.replaces == "in Brooklyn"
+    assert cue.replacement == "in the East Village"
+
+    short = detect_correction("not Brooklyn, I'm in the East Village")
+    assert short is not None
+    assert short.replaces == "Brooklyn"
+
+
+def test_hedging_is_not_a_replacement_cue():
+    """"I'm not sure, I'm going to check" is the same shape as "not X, I'm Y" and corrects
+    nothing; a cue that fires here would adjudicate a non-correction inline."""
+    assert detect_correction("I'm not sure, I'm going to check the docs") is None
+    assert detect_correction("i'm not certain, i'm leaning towards option B") is None
+
+
+def test_denying_a_stored_claim_is_read_as_a_correction():
+    for text in ("I don't live in Brooklyn", "I don't work at Google"):
+        cue = detect_correction(text)
+        assert cue is not None, text
+        assert cue.relation == "corrects"
+
+
+def test_ive_moved_is_read_as_the_world_having_changed():
+    cue = detect_correction("I've moved to the East Village")
+    assert cue is not None
+    assert cue.relation == "updates"
