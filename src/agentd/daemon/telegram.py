@@ -40,7 +40,7 @@ from uuid import UUID
 import httpx
 
 from .. import secrets as vault
-from ..agent.events import TurnFinished
+from ..agent.events import TurnFinished, brief_args
 from ..agent.loop import AgentLoop, Session
 from ..config import Config
 from ..db import repo_agenda, repo_ops
@@ -50,7 +50,7 @@ HELP = (
     "I'm your agent.\n\n"
     "/new — start a fresh conversation (also how you lift the mail interlock)\n"
     "/status — what I'm watching and whether it's working\n"
-    "/tools on|off — show which tools each answer used\n"
+    "/tools on|off — show which tools each answer used, and with what\n"
     "/approvals — anything waiting on your yes\n"
     "/approve <id> — say yes to one\n"
     "/whoami — your chat id"
@@ -136,16 +136,26 @@ SYMBOL = {"running": "\u2026", "ok": "\u2713", "error": "\u2717", "denied": "\u2
 NOTE = {"denied": " (refused by policy)", "error": " (failed)"}
 
 
-def render_tools(lines: list[tuple[str, str]]) -> str:
-    """One line per tool call, in the order they happened.
+def render_tools(lines: list[tuple[str, str, str]]) -> str:
+    """One line per tool call, in the order they happened, with its arguments.
 
-    Names only, never arguments. A tool's arguments can hold a query built out of something
-    a stranger emailed; this text goes to a phone rather than to the model, so it is not an
-    injection boundary - but there is already one rule in this codebase about rendering
-    their words, and having a second rule for the same question is how the two drift.
+    The same thing `agent chat` prints, because the person reading a phone is the person
+    reading the terminal and "which tools ran" without "on what" is not an account of what
+    the agent did - it is a list of verbs. Both surfaces render through
+    `events.brief_args`, so there is one rule about how much of somebody's words to show
+    rather than one per surface.
+
+    What that rule has to survive here: an argument can hold a subject line a stranger
+    wrote, and this function joins calls with newlines. `brief_args` collapses whitespace
+    for exactly that reason - without it a value containing a newline and a tick would
+    forge a line claiming a tool ran that never did.
+
+    Still not rendered: the tool's *result*. `ToolFinished.summary` is the output rather
+    than the request, which for a mail search is a stranger's subject lines in full.
     """
     return "\n".join(
-        f"{SYMBOL.get(state, '')} {name}{NOTE.get(state, '')}".strip() for name, state in lines
+        f"{SYMBOL.get(state, '')} {name}({args}){NOTE.get(state, '')}".strip()
+        for name, args, state in lines
     )
 
 
@@ -159,21 +169,23 @@ class Progress:
 
     def __init__(self, cfg: Config, client: httpx.AsyncClient, chat_id: int, *, show: bool):
         self.cfg, self.client, self.chat_id, self.show = cfg, client, chat_id, show
-        self.lines: list[tuple[str, str]] = []
+        self.lines: list[tuple[str, str, str]] = []
         self.message_id: int | None = None
 
-    async def started(self, name: str) -> None:
-        self.lines.append((name, "running"))
+    async def started(self, name: str, args: dict | None = None) -> None:
+        self.lines.append((name, brief_args(args or {}), "running"))
         await self._flush()
 
     async def finished(self, name: str, *, ok: bool, denied: bool) -> None:
         state = "denied" if denied else ("ok" if ok else "error")
+        # Matched on the name alone: `ToolFinished` does not carry the arguments, and the
+        # most recent running call of that name is the one that just ended.
         for index in range(len(self.lines) - 1, -1, -1):
-            if self.lines[index] == (name, "running"):
-                self.lines[index] = (name, state)
+            if self.lines[index][0] == name and self.lines[index][2] == "running":
+                self.lines[index] = (name, self.lines[index][1], state)
                 break
         else:
-            self.lines.append((name, state))
+            self.lines.append((name, "", state))
         await self._flush()
 
     async def _flush(self) -> None:
@@ -325,7 +337,7 @@ async def handle_message(
             session, text, origin="telegram", autonomy=cfg.telegram.autonomy
         ):
             if isinstance(event, ToolStarted):
-                await progress.started(event.name)
+                await progress.started(event.name, event.args)
             if isinstance(event, ToolFinished):
                 await progress.finished(event.name, ok=event.ok, denied=event.denied)
                 if event.denied:

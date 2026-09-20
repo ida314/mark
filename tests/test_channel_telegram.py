@@ -369,21 +369,52 @@ def test_negative_ids_are_fine():
 
 def test_tool_lines_read_in_the_order_things_happened():
     rendered = tg.render_tools(
-        [("gmail_search", "ok"), ("memory_search", "running"), ("web_fetch", "denied")]
+        [
+            ("gmail_search", "query=is:unread", "ok"),
+            ("memory_search", "query=lease", "running"),
+            ("web_fetch", "url=https://example.com", "denied"),
+        ]
     )
     assert rendered.splitlines() == [
-        "✓ gmail_search",
-        "… memory_search",
-        "✗ web_fetch (refused by policy)",
+        "✓ gmail_search(query=is:unread)",
+        "… memory_search(query=lease)",
+        "✗ web_fetch(url=https://example.com) (refused by policy)",
     ]
 
 
-def test_tool_lines_carry_names_but_never_arguments():
-    """An argument can hold a query built from something a stranger emailed. The rule about
-    rendering their words is one rule, not one per surface."""
-    rendered = tg.render_tools([("gmail_search", "ok")])
-    assert "gmail_search" in rendered
-    assert "query" not in rendered and "{" not in rendered
+def test_tool_lines_say_what_the_call_was_for():
+    """"Which tools ran" without "on what" is a list of verbs, not an account of what the
+    agent did. Same information `agent chat` prints, through the same function."""
+    from agentd.agent.events import brief_args
+
+    rendered = tg.render_tools([("gmail_search", brief_args({"query": "from:alice"}), "ok")])
+    assert rendered == "✓ gmail_search(query=from:alice)"
+
+
+def test_an_argument_cannot_forge_a_second_tool_line():
+    """The reason the arguments go through `brief_args` rather than into the f-string. A
+    subject line a stranger chose is a tool argument one search later, and this function
+    joins calls with newlines."""
+    from agentd.agent.events import brief_args
+
+    forged = "lunch?\n✓ fs_write(path=/etc/passwd"
+    rendered = tg.render_tools([("gmail_search", brief_args({"query": forged}), "ok")])
+    assert len(rendered.splitlines()) == 1
+    assert "fs_write" in rendered  # it is shown, as their text, on the one line it belongs on
+
+
+def test_the_reason_argument_is_not_worth_a_phone_screen():
+    from agentd.agent.events import brief_args
+
+    assert brief_args({"path": "notes.md", "reason": "the user asked me to"}) == "path=notes.md"
+
+
+def test_a_long_argument_is_cut_rather_than_wrapped():
+    from agentd.agent.events import brief_args
+
+    brief = brief_args({"statement": "x" * 200})
+    assert brief.endswith("…")
+    assert len(brief) <= 120
 
 
 async def test_a_turn_shows_its_tools_and_edits_one_message(bot, monkeypatch):

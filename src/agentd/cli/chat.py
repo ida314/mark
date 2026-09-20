@@ -21,6 +21,7 @@ from ..agent.events import (
     ToolFinished,
     ToolStarted,
     TurnFinished,
+    brief_args,
 )
 from ..agent.loop import AgentLoop, Session
 from ..config import Config
@@ -169,7 +170,7 @@ async def run_chat(cfg: Config, *, autonomy: str, resume: str | None, show_think
                     if streaming:
                         console.print()
                         streaming = False
-                    console.print(f"[dim]→ {event.name}({_brief(event.args)})[/dim]")
+                    console.print(f"[dim]→ {event.name}({brief_args(event.args)})[/dim]")
                 elif isinstance(event, ToolFinished):
                     mark = "✗" if event.denied else ("✓" if event.ok else "!")
                     color = "yellow" if event.denied else ("green" if event.ok else "red")
@@ -264,11 +265,3 @@ async def _slash(
     return True, autonomy, session
 
 
-def _brief(args: dict) -> str:
-    parts = []
-    for key, value in args.items():
-        if key == "reason":
-            continue
-        text = str(value)
-        parts.append(f"{key}={text[:60]}{'…' if len(text) > 60 else ''}")
-    return ", ".join(parts)[:120]
