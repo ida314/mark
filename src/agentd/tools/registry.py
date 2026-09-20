@@ -13,7 +13,7 @@ from typing import Any
 from ..config import Config, get_config
 from ..db import repo_ops
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED, check_effect_class
+from .effects import READ, check_effect_class
 
 ALWAYS_EXPOSE_LIMIT = 20
 SIMILARITY_FLOOR = 0.30
@@ -162,7 +162,10 @@ def tool_search_tool(registry: Registry) -> Tool:
         "tool_search",
         "Find tools available beyond the ones already listed, by describing what you need.",
         required(obj(query={"type": "string"}), "query"),
-        effect_class=UNAUDITED,
+        # read: a SELECT over `tools` plus an embedding call that stores nothing. It does
+        # append to `ctx.extra["added_tools"]`, which is turn-scoped context and dies with
+        # the turn - execution state, not something a crash could leave half-done.
+        effect_class=READ,
         tags=("core",),
         always_on=True,
     )

@@ -304,17 +304,16 @@ async def test_a_complete_turn_is_readable_from_the_journal_alone(cfg, tmp_path)
         "message_appended",   # step 1: the assistant's tool call
         "tool_requested",
         "tool_started",
-        # Session 3b: the effect ledger announces the call before it runs and records how
-        # it ended. `fs_read` is in this pair only because it still declares the `UNAUDITED`
-        # placeholder (= unsafe_write); when 3c classifies it as `read` these two lines go
-        # away, and that is the expected shape of that change rather than a regression.
-        "effect_intended",
-        "effect_committed",
+        # No `effect_intended` / `effect_committed` pair: session 3c classified `fs_read`
+        # as `read`, and a read gets no ledger row because there is nothing a crash could
+        # leave half-done. 3b's version of this test carried the pair and said in place
+        # that it would go when 3c ruled. A `read` tool that starts journaling effects
+        # again means somebody changed its class, which is the thing worth noticing here.
         "tool_finished",
         "message_appended",   # step 2: the answer
         "agent_finished",
     ]
-    assert [e.seq for e in events] == list(range(1, 12))
+    assert [e.seq for e in events] == list(range(1, 10))
     started, finished_event = events[0], events[-1]
     assert started.payload["turn_id"] == finished.turn_id
     assert started.payload["parent_turn_id"] is None
@@ -326,11 +325,10 @@ async def test_a_complete_turn_is_readable_from_the_journal_alone(cfg, tmp_path)
     assert call["name"] == "fs_read" and call["visible"] is True and call["known"] is True
     assert by_type["tool_finished"]["trust"] == "trusted"
     assert by_type["tool_finished"]["result_chars"] > 0
-    # Every event of a step says which step it was, which is what lets the effect the
+    # Every event of a step says which step it was, which is what lets an effect the
     # ledger recorded be tied back to the call that caused it.
-    assert {e.payload["step_id"] for e in events[3:9]} == {"s1"}
-    assert by_type["effect_intended"]["tool_name"] == "fs_read"
-    assert by_type["effect_committed"]["status"] == "committed"
+    assert {e.payload["step_id"] for e in events[3:7]} == {"s1"}
+    assert "effect_intended" not in by_type and "effect_committed" not in by_type
     writer.close()
 
 

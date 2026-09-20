@@ -517,3 +517,156 @@ Telegram (2c #2); `risk` and `effect_class` will drift and cannot be cross-check
 audit exists (3a #4); the per-argument effect class of `fs_write` (3a #3) is now concrete —
 the ledger records one class per *tool*, so an `fs_write` with `mode="append"` and one with
 `mode="overwrite"` are the same class and different keys.
+
+---
+
+## Session 3c — Audit: reads and internal tools
+
+Run autonomously under the orchestrator's standing policy: no human to ask mid-session,
+default to the conservative class under any uncertainty, and record every uncertain call
+in the table with the reasoning and the rejected alternative rather than deciding quietly.
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `docs/records/effect-classification.md` | the audit table: 26 rows, 19 rulings, 1 deferral, 6 left to 3d | 91 |
+| `src/agentd/tools/effects.py` | `UNAUDITED_TOOLS` 26 → 7; the comment now says why a name can be in it | +11 −24 |
+| `src/agentd/tools/builtin_fs.py` | `fs_list`/`fs_read`/`fs_search` → `read` | +3 −4 |
+| `src/agentd/tools/builtin_agenda.py` | all 8 ruled: 2 `read`, 2 `idempotent_write`, 4 `unsafe_write` | +13 −9 |
+| `src/agentd/tools/builtin_memory.py` | 3 `read`, `memory_remember` → `unsafe_write`, `memory_search` deferred with the reason in place | +13 −3 |
+| `src/agentd/tools/builtin_calendar.py`, `builtin_coursework.py` | `calendar_upcoming`, `coursework_due` → `read` | +2 −2 |
+| `src/agentd/tools/builtin_delegate.py` | `delegate` → `unsafe_write` | +3 −2 |
+| `src/agentd/tools/registry.py` | `tool_search` → `read` | +4 −2 |
+| `tests/test_tool_effect_class.py` | the table and the declarations must agree | +42 |
+| `tests/test_journal_events.py` | the complete-turn sequence loses its effect pair | +5 −8 |
+
+Suite 657 → 658 passing. `.venv/bin/ruff check src tests scripts` clean. No tool was added,
+removed, moved or renamed. Registry built in a real process: 26 tools, 11 `read`,
+2 `idempotent_write`, 13 `unsafe_write` — of which 7 are the unruled placeholder.
+
+### what deviated from the plan, and why
+
+**1. One tool in 3c's scope was examined and deliberately left unruled: `memory_search`.**
+The pass expects 3c to classify every tool that reads or touches only local state, and this
+one does. `retrieval.pack` ends in `repo_memory.touch_accessed`, which runs
+`access_count = access_count + 1` on every fact it returned, so re-execution does not
+converge and the tool is not literally `read`. Nor is it plausibly `unsafe_write`: nothing
+outside the machine changes, and a replay genuinely *is* another access, so the counter is
+arguably right either way. Under the standing policy — take the conservative option and
+record the alternative — the placeholder stays and the reasoning is written at the
+declaration site and in the table. The cost of leaving it is visible and bounded: four
+fsyncs on the most-called tool in the runtime, and a Pass 4 prompt asking the user to
+confirm a search.
+
+**2. `calendar_upcoming` and `coursework_due` were ruled here although 3d's scope sentence
+names "calendar".** Both are pure `SELECT`s over the `raw_events` archive the daemon fills;
+neither touches Google, D2L, a credential or the network, and both module docstrings argue
+that at length. They are read-only local state, which is 3c's subject. If 3d wants them
+back the class does not change.
+
+**3. `tool_search` lives in `registry.py`, not in a `builtin_*` module**, and was easy to
+miss: it is constructed by `tool_search_tool(reg)` at the bottom of `build_registry`. Ruled
+`read` — a `SELECT` over `tools`, an embedding call that stores nothing, and an append to
+`ctx.extra["added_tools"]` which is turn-scoped context, not state a crash can leave
+half-done.
+
+**4. The record is held to the code by a test, which the pass did not ask for.**
+`test_every_tool_in_the_classification_table_declares_what_the_table_says` parses the
+markdown table and fails if a row is missing, duplicated, or disagrees with the declared
+class, and checks `unaudited` rows against `UNAUDITED_TOOLS` in both directions. An audit
+whose justification and whose value can drift apart is worth less than either: the next
+reader would find a reason for a decision nobody made. Mutation-checked both ways
+(`fs_list` → `unsafe_write` in source; `notify_user` → `read` in the table).
+
+**5. 3b's exit-criterion test changed, as 3b said it would.**
+`test_a_complete_turn_is_readable_from_the_journal_alone` no longer expects
+`effect_intended` / `effect_committed` around the `fs_read` call, because `fs_read` is now
+`read` and a read gets no ledger row. The assertion is now positive about the absence
+(`"effect_intended" not in by_type`) so that a `read` tool which starts journaling effects
+again fails here.
+
+### what is now true about the code that was not before
+
+- **19 of 26 builtins carry a class somebody chose, with the reason in two places**: one
+  line in `docs/records/effect-classification.md` and, for every tool that is not a plain
+  `read`, a comment at the declaration saying what specifically makes it that class (the
+  `ON CONFLICT (slug)`, the missing dedup key, the notification the daemon pushes).
+- **Reading costs nothing again.** `time_now`, `fs_read`, `goals_list`, `memory_history`,
+  `profile_read`, `calendar_upcoming` and the rest no longer write a ledger row or two
+  journal events, so 3b's four synchronous commits per call now fall only on calls that
+  can actually change something. 11 of 26 tools stopped paying it; `memory_search`, the
+  hottest of them, still does, pending the ruling above.
+- **Two tools are `idempotent_write`, and both earn it structurally rather than by
+  intention**: `goal_upsert` through `INSERT ... ON CONFLICT (slug) DO UPDATE` with a slug
+  derived deterministically from the title, `open_loop_close` through an `UPDATE ... WHERE
+  id` that is a no-op the second time.
+- **`UNAUDITED_TOOLS` now means two things and says which.** A name is in it either because
+  nobody has looked (3d's six) or because 3c looked and could not settle it alone
+  (`memory_search`). The comment in `effects.py` names both and points at the table.
+- **The audit's remaining work is still data**: seven names, and the set is empty when the
+  audit is done.
+
+### schemas as actually implemented
+
+No schema changed. The only structural change is the contents of one frozenset:
+
+```python
+UNAUDITED_TOOLS: frozenset[str] = frozenset({
+    "fs_write", "gmail_message", "gmail_search", "memory_search",
+    "shell_exec", "web_fetch", "web_search",
+})
+```
+
+The classification table's format, which the test parses:
+
+```
+| `tool_name` | read | idempotent_write | unsafe_write | unaudited | one line of justification |
+```
+
+— three pipe-delimited cells per row, name first, class second, reason third; any row whose
+second cell is not a class word is ignored, which is what lets the file carry prose tables
+alongside.
+
+### deferred items, and where they went
+
+- **The six tools that touch the filesystem for writing, the shell, Gmail and the web —
+  3d**, unchanged. The table records an expectation for each (`fs_write` and `shell_exec`
+  unsafe; the four network reads probably `read`) explicitly marked as not a ruling.
+- **`memory_search` — a human.** Deviation 1. It is the one row in the table's "deferred"
+  section and the reasoning is written at the declaration too.
+- **`agent tools list` still does not show the effect class** (3a's deferral). The audit is
+  now readable from one markdown file instead, which was the reason that column was wanted.
+- **Persisting the class to the `tools` table** — still not done, still needs an additive
+  migration, still queried by nothing.
+- **`docs/records/session-ledger.md` row for 3c** was not edited; the ledger is maintained
+  by whoever commits the session.
+
+### open questions for later passes
+
+**1. `memory_search` is the pass's one unresolved judgement.** Read the deferred row in
+`docs/records/effect-classification.md` before Pass 4 ships, because until it is settled the
+most frequently called tool in the runtime is the one Pass 4 will most often ask about.
+
+**2. `goal_upsert`'s idempotence is an argument-level property wearing a tool-level
+label** — the same shape as 3a's open question 3 about `fs_write`, and now on a tool that is
+*already* classified. It converges because `slug` defaults to `slugify(title)`, which is
+deterministic. A caller that passes a per-attempt `slug`, or a change to `slugify`, silently
+turns an `idempotent_write` into a duplicate-producing insert, and nothing tests that
+relationship. The honest fix is an argument-aware class, which is Pass 8's.
+
+**3. A replayed `delegate` is double-counted.** Its sub-agent's calls each write their own
+ledger rows through the executor, so one delegation appears as itself and again as
+everything underneath it. Conservative in the right direction, but a Pass 4 reconciliation
+that re-runs a `delegate` row will re-run children that already have committed rows of their
+own, and nothing yet relates a child row to its parent beyond the step id (3b open
+question 4).
+
+**4. `risk` and `effect_class` can finally be cross-checked** (3a open question 4). The
+factual relationship now exists: `calendar_upcoming` is `risk="read"` and `read`;
+`notify_user` is `risk="draft"` and `unsafe_write`; `memory_remember` likewise. No assertion
+was written, because six tools are still unruled and the first version of that check would
+be asserting over placeholders. It becomes writable when `UNAUDITED_TOOLS` is empty.
+
+**5. Still open, untouched by 3c:** everything in 3b's open questions 1-6 except the fsync
+cost, which is now smaller but still unmeasured.

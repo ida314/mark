@@ -14,8 +14,8 @@ fallback is precisely the failure that sends the email twice: the unlabelled too
 definition the one nobody thought about, and the resume path would read that silence as a
 promise that re-running is free.
 
-Nothing consumes these values yet. Session 3b writes the ledger keyed by them; Pass 4
-reconciles against them. This module is only the vocabulary and the gate.
+Session 3b writes the ledger keyed by these values; Pass 4 reconciles against them.
+This module is the vocabulary, the gate, and the list of tools nobody has ruled on yet.
 """
 
 from __future__ import annotations
@@ -50,37 +50,28 @@ MEANING: dict[EffectClass, str] = {
 # this" rather than "somebody decided this is unsafe", which are not the same claim and
 # would otherwise be indistinguishable in the source.
 #
-# Sessions 3c and 3d replace each use with a real class and drop the tool from
-# UNAUDITED_TOOLS below. When that set is empty the audit is done.
+# Session 3c replaced nineteen of these with a ruling and dropped those names from
+# UNAUDITED_TOOLS below; 3d owns the six that are left, plus the one 3c deferred.
 UNAUDITED: EffectClass = UNSAFE_WRITE
 
 # Which tools are in that state, as data rather than as a paragraph that goes stale. A
-# name in here means: registered, declaring `unsafe_write`, and unexamined.
+# name in here means: registered, declaring `unsafe_write`, and carrying no recorded
+# ruling. After session 3c that is two different situations, and
+# `docs/records/effect-classification.md` says which is which for every name:
+#
+#   - nobody has looked yet (session 3d's six: the filesystem write, the shell, the two
+#     Gmail tools and the two web tools);
+#   - 3c looked, could not settle it alone, and left the conservative value standing for a
+#     human to rule on (`memory_search`).
+#
+# Both deserve the same value and neither deserves to be mistaken for a decision, which is
+# what this set exists to prevent. When it is empty the audit is done.
 UNAUDITED_TOOLS: frozenset[str] = frozenset({
-    "calendar_upcoming",
-    "coursework_due",
-    "delegate",
-    "fs_list",
-    "fs_read",
-    "fs_search",
     "fs_write",
     "gmail_message",
     "gmail_search",
-    "goal_upsert",
-    "goals_list",
-    "memory_history",
-    "memory_remember",
     "memory_search",
-    "notify_user",
-    "open_loop_add",
-    "open_loop_close",
-    "open_loops_list",
-    "profile_read",
-    "reminder_set",
     "shell_exec",
-    "time_now",
-    "tool_search",
-    "watcher_add",
     "web_fetch",
     "web_search",
 })

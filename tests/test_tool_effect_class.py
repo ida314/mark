@@ -14,6 +14,7 @@ is free. The tool that would suffer from it is the one that sends mail.
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -123,3 +124,45 @@ def test_the_tools_nobody_has_judged_yet_are_listed_rather_than_assumed_safe():
     assert UNAUDITED_TOOLS <= set(registry.names())
     for name in UNAUDITED_TOOLS:
         assert registry.tools[name].effect_class == UNSAFE_WRITE, name
+
+
+def _classification_rows() -> dict[str, str]:
+    """The tool -> class mapping written down in `docs/records/effect-classification.md`."""
+    path = pathlib.Path(__file__).resolve().parents[1] / "docs/records/effect-classification.md"
+    rows: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        cells = [c.strip().strip("`") for c in line.split("|")[1:-1]]
+        if len(cells) != 3:
+            continue
+        name, klass = cells[0], cells[1]
+        if klass not in (*EFFECT_CLASSES, "unaudited"):
+            continue
+        assert name not in rows, f"{name} is in the table twice"
+        rows[name] = klass
+    return rows
+
+
+def test_every_tool_in_the_classification_table_declares_what_the_table_says():
+    """The audit is a judgement, so it lives in prose - and prose drifts from the code.
+
+    The class in `effect-classification.md` is the reason a human accepted the risk; the
+    class in the source is what the ledger and Pass 4 actually act on. If those two ever
+    disagree, the record stops being evidence of anything and the next auditor reads a
+    justification for a decision nobody made. Neither one alone can catch that.
+
+    `unaudited` in the table means "no ruling recorded", which is a claim about
+    `UNAUDITED_TOOLS` rather than about the declared value, so it is checked both ways.
+    """
+    registry = build_registry()
+    table = _classification_rows()
+    assert set(table) == set(registry.names()), (
+        "every registered tool needs a row, and every row a registered tool"
+    )
+    for name, klass in table.items():
+        declared = registry.tools[name].effect_class
+        if klass == "unaudited":
+            assert name in UNAUDITED_TOOLS, f"{name} is listed unruled but is not in UNAUDITED_TOOLS"
+            assert declared == UNSAFE_WRITE, name
+        else:
+            assert name not in UNAUDITED_TOOLS, f"{name} has a ruling but is still UNAUDITED"
+            assert declared == klass, f"{name}: source says {declared}, the record says {klass}"

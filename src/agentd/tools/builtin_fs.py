@@ -10,7 +10,7 @@ from pathlib import Path
 from ..config import get_config
 from ..ids import utcnow
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED
+from .effects import READ, UNAUDITED
 
 MAX_READ_BYTES = 400_000
 
@@ -29,7 +29,7 @@ def _p(path: str) -> Path:
     required(obj(path={"type": "string", "description": "Directory to list"}), "path"),
     tags=("fs",),
     path_args=("path",),
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def fs_list(args: dict, ctx: ToolContext) -> ToolResult:
     path = _p(args["path"])
@@ -59,7 +59,7 @@ async def fs_list(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     tags=("fs",),
     path_args=("path",),
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def fs_read(args: dict, ctx: ToolContext) -> ToolResult:
     path = _p(args["path"])
@@ -92,7 +92,9 @@ async def fs_read(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     tags=("fs",),
     path_args=("path",),
-    effect_class=UNAUDITED,
+    # read: rg/grep by argv, never through a shell, and neither can write.
+    # Spawning a process is not the same as changing something.
+    effect_class=READ,
 )
 async def fs_search(args: dict, ctx: ToolContext) -> ToolResult:
     rg = shutil.which("rg")

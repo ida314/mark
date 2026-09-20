@@ -9,7 +9,7 @@ from ..config import Config
 from ..db import repo_agenda, repo_connectors
 from ..ids import parse_when, utcnow
 from .base import Polled, Tool, ToolContext, ToolResult, feed_health, obj, required, tool
-from .effects import UNAUDITED
+from .effects import IDEMPOTENT_WRITE, READ, UNSAFE_WRITE
 
 # --- how much a loop can be believed -----------------------------------------
 #
@@ -75,7 +75,7 @@ async def feed_caveats(rows: list[dict]) -> list[str]:
     obj(status={"type": "string", "enum": ["active", "paused", "done", "dropped"]}),
     tags=("agenda", "core"),
     always_on=True,
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def goals_list(args: dict, ctx: ToolContext) -> ToolResult:
     rows = await repo_agenda.list_goals(args.get("status", "active"))
@@ -110,7 +110,9 @@ async def goals_list(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     risk="draft",
     tags=("agenda",),
-    effect_class=UNAUDITED,
+    # idempotent_write: keyed on `slug`, which defaults to slugify(title), so a
+    # replay of the same arguments lands on the same row (ON CONFLICT DO UPDATE).
+    effect_class=IDEMPOTENT_WRITE,
 )
 async def goal_upsert(args: dict, ctx: ToolContext) -> ToolResult:
     goal_id = await repo_agenda.upsert_goal(
@@ -140,7 +142,9 @@ async def goal_upsert(args: dict, ctx: ToolContext) -> ToolResult:
     ),
     risk="draft",
     tags=("agenda",),
-    effect_class=UNAUDITED,
+    # unsafe_write: a fresh uuid7 per call and no dedup key, so a replay opens a
+    # second loop the user then has to close twice.
+    effect_class=UNSAFE_WRITE,
 )
 async def open_loop_add(args: dict, ctx: ToolContext) -> ToolResult:
     loop_id = await repo_agenda.add_open_loop(
@@ -159,7 +163,7 @@ async def open_loop_add(args: dict, ctx: ToolContext) -> ToolResult:
     "where to check whether it is still true before acting on it.",
     obj(status={"type": "string", "enum": ["open", "waiting", "closed"]}),
     tags=("agenda", "core"),
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def open_loops_list(args: dict, ctx: ToolContext) -> ToolResult:
     rows = await repo_agenda.list_open_loops_with_source(args.get("status", "open"))
@@ -187,7 +191,9 @@ async def open_loops_list(args: dict, ctx: ToolContext) -> ToolResult:
     required(obj(id={"type": "string"}), "id"),
     risk="draft",
     tags=("agenda",),
-    effect_class=UNAUDITED,
+    # idempotent_write: UPDATE ... WHERE id, and closing a closed loop is a no-op.
+    # The only thing a replay moves is `closed_at`.
+    effect_class=IDEMPOTENT_WRITE,
 )
 async def open_loop_close(args: dict, ctx: ToolContext) -> ToolResult:
     try:
@@ -203,7 +209,9 @@ async def open_loop_close(args: dict, ctx: ToolContext) -> ToolResult:
     required(obj(text={"type": "string"}, at={"type": "string"}), "text", "at"),
     risk="draft",
     tags=("agenda",),
-    effect_class=UNAUDITED,
+    # unsafe_write: inserts a watcher that fires a notification at the user. A replay
+    # is a second reminder, which is a real-world action nobody can take back.
+    effect_class=UNSAFE_WRITE,
 )
 async def reminder_set(args: dict, ctx: ToolContext) -> ToolResult:
     when = parse_when(args["at"])
@@ -250,7 +258,9 @@ def _watcher_preview(args: dict) -> str:
     risk="write",
     tags=("agenda",),
     preview=_watcher_preview,
-    effect_class=UNAUDITED,
+    # unsafe_write: a replay is a second watcher, and an `agent` action watcher wakes
+    # the agent to do arbitrary work on a schedule.
+    effect_class=UNSAFE_WRITE,
 )
 async def watcher_add(args: dict, ctx: ToolContext) -> ToolResult:
     from ..daemon.scheduler import next_fire
@@ -278,7 +288,9 @@ async def watcher_add(args: dict, ctx: ToolContext) -> ToolResult:
     risk="draft",
     tags=("core",),
     always_on=True,
-    effect_class=UNAUDITED,
+    # unsafe_write: the row is what the daemon pushes to chat and inbox, so a replay
+    # is a second notification. `Queued` is not the same as `not yet real`.
+    effect_class=UNSAFE_WRITE,
 )
 async def notify_user(args: dict, ctx: ToolContext) -> ToolResult:
     level = args.get("level", "info")

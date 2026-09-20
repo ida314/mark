@@ -49,7 +49,7 @@ from ..config import BrightspaceConnectorConfig, Config
 from ..db import repo_archive, repo_connectors
 from ..ids import utcnow
 from .base import ToolContext, ToolResult, feed_health, flat, obj, tool
-from .effects import UNAUDITED
+from .effects import READ
 
 STATE_NAME = "brightspace"  # one feed, so unlike gcal the state row carries no label
 KIND_LIKE = "brightspace.%"
@@ -163,7 +163,7 @@ def matches(row: dict[str, Any], needle: str) -> bool:
     tags=("coursework", "untrusted"),
     always_on=True,
     trust_output=False,
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def coursework_due(args: dict, ctx: ToolContext) -> ToolResult:
     # Imported here, not at module scope, for the same reason `builtin_calendar` does it:

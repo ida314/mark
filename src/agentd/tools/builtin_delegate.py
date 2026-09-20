@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED
+from .effects import UNSAFE_WRITE
 
 
 @tool(
@@ -29,7 +29,9 @@ from .effects import UNAUDITED
     ),
     tags=("core",),
     always_on=True,
-    effect_class=UNAUDITED,
+    # unsafe_write: the sub-agent may call anything, including `fs_write` and the shell,
+    # so replaying the delegation replays whatever it chose to do.
+    effect_class=UNSAFE_WRITE,
 )
 async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     agent_name = args["agent"]

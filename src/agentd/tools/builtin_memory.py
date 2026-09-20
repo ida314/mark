@@ -15,7 +15,7 @@ from ..embed import get_embedder
 from ..ids import parse_when, utcnow
 from ..memory.predicates import UNSPECIFIED, Predicate, coerce, vocabulary_for_prompt
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import UNAUDITED
+from .effects import READ, UNAUDITED, UNSAFE_WRITE
 
 
 @tool(
@@ -38,6 +38,14 @@ from .effects import UNAUDITED
     ),
     tags=("memory", "core"),
     always_on=True,
+    # Still UNAUDITED after 3c looked at it, which is a deferral and not an oversight.
+    # `retrieval.pack` ends in `repo_memory.touch_accessed`: `access_count = access_count
+    # + 1` on every fact it returned. That is a counter, so re-execution does not converge
+    # and the tool is not literally `read` - but the state it moves is retrieval
+    # bookkeeping about accesses, and a replay *is* another access. Calling it `read` is a
+    # judgement about what counts as state; calling it `unsafe_write` puts four fsyncs and
+    # a Pass 4 confirmation prompt on the most-called tool in the runtime. A human picks.
+    # See docs/records/effect-classification.md.
     effect_class=UNAUDITED,
 )
 async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
@@ -122,7 +130,10 @@ async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
     risk="draft",
     tags=("memory", "core"),
     always_on=True,
-    effect_class=UNAUDITED,
+    # unsafe_write: `insert_candidate` has no dedup key, so a replay queues the claim
+    # twice; on the correction-cue path it reaches `review.propose_and_review`, which
+    # writes canonical memory. Pass 7's `idempotent_write (if keyed)` needs the key.
+    effect_class=UNSAFE_WRITE,
 )
 async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
     structured = {
@@ -234,7 +245,7 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
     "Show how what you believe about a subject changed over time, including former beliefs.",
     required(obj(subject={"type": "string"}), "subject"),
     tags=("memory",),
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def memory_history(args: dict, ctx: ToolContext) -> ToolResult:
     rows = await repo_memory.facts_for_subject(args["subject"])
@@ -261,7 +272,7 @@ async def memory_history(args: dict, ctx: ToolContext) -> ToolResult:
     obj(section={"type": "string", "description": "e.g. profile/core, goals, projects"}),
     tags=("memory", "core"),
     always_on=True,
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def profile_read(args: dict, ctx: ToolContext) -> ToolResult:
     from ..memory.mdrepo import MarkdownRepo
@@ -278,7 +289,7 @@ async def profile_read(args: dict, ctx: ToolContext) -> ToolResult:
     obj(),
     tags=("core",),
     always_on=True,
-    effect_class=UNAUDITED,
+    effect_class=READ,
 )
 async def time_now(args: dict, ctx: ToolContext) -> ToolResult:
     now = utcnow().astimezone()
