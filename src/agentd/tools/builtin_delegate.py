@@ -68,6 +68,8 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
         parent_autonomy=ctx.autonomy,
         approver=approver,
         parent_action_id=ctx.action_id,
+        parent_run_id=ctx.run_id,
+        parent_step_id=ctx.step_id,
     )
     payload = {
         "status": result.status,

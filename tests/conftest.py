@@ -11,6 +11,7 @@ from agentd.config import DEFAULT_POLICY, Config, PathsConfig, load_config
 from agentd.db import migrate as migrate_mod
 from agentd.db import pool as pool_mod
 from agentd.embed import HashEmbedder, set_embedder
+from agentd.journal import runtime as journal_runtime
 from agentd.llm.fake import FakeProvider
 from agentd.llm.roles import set_provider
 
@@ -76,6 +77,7 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
         "agentd.tools.builtin_shell", "agentd.memory.retrieval", "agentd.memory.review",
         "agentd.memory.consolidate", "agentd.agent.context", "agentd.agent.loop",
         "agentd.tools.registry", "agentd.embed", "agentd.llm.roles", "agentd.cli.app",
+        "agentd.journal.runtime",
     ):
         import importlib
 
@@ -88,6 +90,10 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
     set_embedder(HashEmbedder(dim=cfg.embed.dim))
     yield cfg
     await pool_mod.close_pool()
+    # The journal writer is cached per process and per file. Closing it here flushes the
+    # tail and drops the handle on a `tmp_path` that is about to disappear, so no test can
+    # inherit a writer pointed at the previous test's directory.
+    journal_runtime.close_writer()
     config_mod.get_config = original
     set_provider(None)
 

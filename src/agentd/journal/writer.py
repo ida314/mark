@@ -26,6 +26,7 @@ from typing import Any
 
 from ..config import Config
 from ..ids import utcnow
+from .events import check_type
 from .store import Event, JournalStore, PendingEvent, default_path
 
 # Written synchronously, no matter what the buffer settings say. Everything else may sit in
@@ -36,8 +37,15 @@ from .store import Event, JournalStore, PendingEvent, default_path
 # crash in between is detectable. `checkpoint_written` because Pass 4's snapshot may lag the
 # journal but may never disagree with it, and a checkpoint whose own announcement was lost
 # is a snapshot nothing points at.
+#
+# `agent_finished` was added by session 2b, and it is the reason nothing has to remember to
+# call `flush()` at the end of a turn. The age check runs on append and not on a timer, so a
+# process that goes quiet holds its tail: without this, a finished run would sit half-written
+# until something unrelated happened, and 2c's feed would appear to stall at exactly the
+# moment the run stopped producing events. One fsync per turn buys the whole turn's tail,
+# because a synchronous append carries the buffer with it in the same transaction.
 SYNC_PREFIXES = ("effect_",)
-SYNC_TYPES = frozenset({"checkpoint_written"})
+SYNC_TYPES = frozenset({"checkpoint_written", "agent_finished"})
 
 
 def is_synchronous(event_type: str) -> bool:
@@ -104,7 +112,15 @@ class JournalWriter:
         `worker_id` and `step_id` are named arguments rather than free payload keys because
         Pass 2b requires them on every event that has them, and naming them here means a
         later decision to promote either to a column does not touch a single call site.
+
+        The *type* is checked here, at the one door every append goes through, because a
+        journal holding a type `reduce` has no case for is a journal that folds to the wrong
+        state without erroring. The *payload* is checked one level up, in
+        `RunJournal.emit`: the durability tests write deliberately arbitrary payloads to
+        prove a killed process loses a suffix and not a hole, and making them schema-correct
+        would only test the schema.
         """
+        check_type(event_type)
         body = dict(payload or {})
         if worker_id is not None:
             body["worker_id"] = worker_id

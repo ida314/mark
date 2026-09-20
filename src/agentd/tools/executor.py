@@ -187,7 +187,19 @@ class ToolExecutor:
                 **otel.current_ids(),
             )
         )
-        return ToolResult(content=body, ok=False, data={"denied": True})
+        # `rule` and `queued_id` are on the result, not only inside the JSON body the model
+        # reads back: the journal records why a call was refused, and re-parsing a string we
+        # just serialized in order to find out is how a field ends up quietly null when the
+        # body's shape changes.
+        return ToolResult(
+            content=body,
+            ok=False,
+            data={
+                "denied": True,
+                "rule": decision.rule_id,
+                "queued_id": str(queued_id) if queued_id else None,
+            },
+        )
 
     def _count_rejection(self, ctx: ToolContext, name: str, args: dict[str, Any]) -> int:
         """How many times these exact arguments have been rejected this turn, including now.

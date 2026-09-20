@@ -21,6 +21,13 @@ class ToolContext:
     session_id: UUID | None = None
     turn_id: UUID | None = None
     action_id: UUID | None = None
+    # Where this call sits in the run journal. `run_id` is the orchestration run (the
+    # top-level turn), `step_id` the position inside it; a worker's steps are scoped by its
+    # worker id, so they cannot collide with its caller's. Both are None only where there is
+    # genuinely no run - `policy/replay.execute_approved` runs a queued call long after the
+    # turn that asked for it ended. Pass 3 hashes them into `idempotency_key`.
+    run_id: str | None = None
+    step_id: str | None = None
     actor: str = "main"
     origin: str = "interactive"
     autonomy: str = "assist"

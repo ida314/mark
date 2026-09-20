@@ -1,16 +1,22 @@
 # Pass 2 — Durable Run Journal — outcome
 
-Sessions completed: **2a**. Sessions 2b (event coverage) and 2c (frontend subscription) are
-not started, so **the pass's exit criteria are not met**: no complete run produces a journal,
-because nothing emits events yet, and no frontend replays from one. Three of the five items
-under "outcome record must capture" are answered below; the other two belong to 2b and 2c and
-are marked open rather than guessed at.
+Sessions completed: **2a**, **2b**. Session 2c (frontend subscription) is not started, so
+**the pass's exit criteria are not met** as a whole: no frontend replays from the journal, and
+the kill-mid-run exercise has been done at the store level (2a) but not against a real turn.
+2b's own exit criterion — "a complete run produces a journal from which the sequence of what
+happened is readable without reference to any other source" — is met, and is asserted as a
+sequence rather than a set in `tests/test_journal_events.py`.
 
-What 2a means in practice: **the journal exists and nothing writes to it.** That is the scope
-the session was given, and it is visible in the diff — no file under `src/agentd/agent/`,
-`src/agentd/tools/`, `src/agentd/daemon/` or `src/agentd/cli/` was touched, and outside its
-own package the string `journal` appears only in `config.py`. The pass's "do not build a
-second event path" constraint is satisfied by there being no path at all yet.
+Four of the five items under "outcome record must capture" are now answered: the schema (2a),
+the full event list with payload shapes (2b), the synchronous/buffered split (2a, extended
+once by 2b), and retention (2a). The frontend replay mechanism belongs to 2c and is still
+marked open rather than guessed at.
+
+What 2a meant in practice: **the journal existed and nothing wrote to it.** 2b is the session
+that connected it — one path, through `RunJournal`, from `agent/loop.py` and
+`agent/subagents.py`. The pre-existing in-process `UIEvent` stream is untouched and still
+feeds the CLI and Telegram; removing it is 2c's job, and until then the two coexist by the
+pass's own sequencing rather than by accident.
 
 ---
 
@@ -303,3 +309,299 @@ destroys the only record that it might have happened.
 **8. Still open from Pass 1, untouched by this session:** token accounting (the SIR router
 drops the usage chunk, so `usage.reported` is `false` on every turn), and the approval-wall
 question for Passes 6 and 8a. Both block what they blocked.
+
+---
+
+## Session 2b — Event coverage
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/journal/events.py` | the vocabulary: 17 types, their payload shapes, the validator | 431 |
+| `src/agentd/journal/runtime.py` | the process's writer, and `RunJournal` — the door the runtime writes through | 129 |
+| `src/agentd/journal/writer.py` | type checking on append; `agent_finished` added to `SYNC_TYPES` | +18 |
+| `src/agentd/agent/loop.py` | `_TurnRecord` and nine emission points | +226 |
+| `src/agentd/agent/subagents.py` | `worker_created` / `worker_finished`, run and worker plumbing | +47 |
+| `src/agentd/tools/base.py` | `ToolContext.run_id`, `ToolContext.step_id` | +7 |
+| `src/agentd/tools/executor.py` | a denial carries its `rule` and `queued_id` on the result | +14 |
+| `src/agentd/tools/builtin_delegate.py` | threads the run and the step into the worker | +2 |
+| `tests/conftest.py` | journal writer in the monkeypatch list, and closed at teardown | +6 |
+| `tests/test_journal_events.py` | 20 tests | 526 |
+
+Suite 562 → 582 passing, no existing test modified. `ruff check src tests scripts` clean.
+
+**Nine of the seventeen types are emitted today.** `agent_started`, `agent_finished`,
+`message_appended`, `tool_requested`, `tool_started`, `tool_finished`, `tool_failed`,
+`worker_created`, `worker_finished`. The set is exported as `journal.EMITTED_TYPES` and
+asserted in a test, so the gap between the vocabulary and what is reachable is data rather
+than a paragraph that goes stale.
+
+**Eight are defined and written by nobody:** `tool_progress`, `handoff_started`,
+`handoff_finished`, `checkpoint_written`, `effect_intended`, `effect_committed`,
+`run_resumed`, `run_forked`. Each is *constructed* once in
+`test_the_types_later_passes_write_already_have_a_shape_that_validates`, so the later passes
+inherit a shape something has actually built.
+
+### what deviated from the plan, and why
+
+**The pass file says "the last six" are written by Passes 3, 4 and 5. The real number is
+eight, and the membership differs.** `handoff_started` / `handoff_finished` are Pass 5's and
+cannot be written now either — the pass file's own list puts them ahead of the six and then
+does not count them. Going the other way, **`message_appended` is in the pass's "last six"
+and is emitted now**, because 2b's exit criterion is that the sequence of what happened is
+readable without another source, and a journal that shows tool calls but never the messages
+that caused them does not meet it. So: the vocabulary is complete as specified, but the
+defined-but-unwritten set is `{tool_progress, handoff_*, checkpoint_written, effect_*,
+run_*}`, not the six the plan names.
+
+**`tool_progress` is defined and not wired, and that was a *Must not* call.** A tool handler
+has no channel to report progress on. Giving it one means changing `Handler` or `ToolResult`,
+which is "change the tool surface". The shape is specified (`call_id`, `name`, `message`,
+optional `pct`) and the slot is empty.
+
+**Payload validation is not in `JournalWriter.append`; the event *type* check is.** Two
+levels, deliberately. The type is checked at the one door every append goes through, because
+a type `reduce` has no case for is a journal that folds to the wrong state rather than to an
+error. The payload is checked one level up, in `RunJournal.emit`, because 2a's durability
+tests append deliberately arbitrary payloads (`{"i": 0}`, `{}`) to prove that a killed
+process loses a suffix and not a hole — making those schema-correct would have tested the
+schema instead of the kill. The cost is honest: a caller who goes to `JournalWriter` directly
+gets its type checked and its payload not.
+
+**`agent_finished` was added to `SYNC_TYPES` instead of calling `flush()` at turn end.** 2a's
+open question 5 asked 2b to call `flush()`. Classifying the turn's terminal event as
+synchronous is strictly stronger and cannot be forgotten by a future call site: a synchronous
+append carries the buffered tail in the same transaction, so one fsync per turn puts the whole
+turn on disk, in call order. This changes 2a's durability table by one row.
+
+**A worker does not get a run of its own.** The alternative — a sub-agent opens a new run and
+the parent references it — was rejected: a fold of the caller's run would then show a gap
+where the delegation happened, and `run_forked` would have had to mean two different things.
+A worker's events are in its caller's run with `worker_id` set, bracketed by `worker_created`
+and `worker_finished`. `run_id` for a top-level turn is `str(turn_id)`; `run_subagent` falls
+back to `str(parent_turn_id)` when no `parent_run_id` is threaded, which is the same
+derivation and therefore lands in the run that turn opened rather than in an orphan.
+
+**`ToolContext` gained `run_id` and `step_id`.** Not free-form `ctx.extra` keys: Pass 3's
+idempotency key is `hash(run_id, step_id, tool_name, canonical_args)`, so both are things a
+handler is entitled to know, and `extra` would have made them optional by convention. They
+are `None` only where there genuinely is no run — `policy/replay.execute_approved` runs a
+queued call long after its turn ended.
+
+**A denial now carries `rule` and `queued_id` on `ToolResult.data`.** The information was
+already in the JSON body the model reads back, and `tool_failed` would otherwise have had to
+re-parse a string this process had just serialized. That is precisely the shape that becomes
+a quietly-null field the first time the body changes.
+
+**`_TurnRecord` is a context manager, not a pair of calls.** Because "every way out of a
+turn" includes the one nobody writes code for: a consumer that stops iterating gets
+`GeneratorExit` thrown at the suspended `yield`, and in that case neither the telemetry record
+nor the `actions` row is written at all (Pass 1, open question 4). A `with` block unwinds
+there, so the run still ends with `agent_finished` — `status: "cancelled"`.
+
+### what is now true about the code that was not before
+
+- **A run has one event path and it is the journal.** Everything emitted goes through
+  `RunJournal.emit` → `JournalWriter.append` → `JournalStore.append`. There is no second
+  store, no queue, no background thread. The `UIEvent` generator still exists and still
+  renders the CLI; it is 2c's to remove, and nothing was built alongside it.
+- **A turn cannot end silently.** Four exits — a normal finish, budget exhaustion, an
+  `LLMError`, and a consumer that walked away — all produce `agent_finished`, with
+  `completed` / `abandoned` / `failed` / `cancelled` respectively. `status` starts as `None`
+  and every deliberate exit sets it; `None` at `__exit__` is recorded as `cancelled` rather
+  than defaulted to `completed`.
+- **The Pass 1 budget-exhaustion crash is now legible in the journal, and is otherwise
+  untouched.** `loop.py` still appends `FINAL_NUDGE` as a trailing `system` message on the
+  last step and this backend still rejects it. What the journal now shows is
+  `message_appended(role=system)` followed by `agent_finished(status="failed", error="HTTP
+  400 System message must be at the beginning.")` — so the turn that 2a's open question 1
+  worried would produce nothing produces a complete, readable sequence.
+  `test_a_turn_that_the_model_kills_still_says_how_it_ended` is named for it. Fixing the
+  underlying bug is a behaviour change and was left alone.
+- **An unmeasured turn is not journaled as a free one.** `agent_finished.usage_reported` is
+  `False` whenever the router dropped the usage chunk, which is every streamed turn today.
+  Without it the zeros would read as a measurement.
+- **The schema refuses the house bug.** A missing required field, a `None` in a field not
+  declared nullable, a misspelled key, a `bool` where a count is declared, and a string
+  outside its enum all raise `EventSchemaError` before anything reaches disk. `nullable` is
+  separate from `required` on purpose: "resumed with no checkpoint behind it" is a statement,
+  and an absent key is not.
+- **One writer per process per file.** `journal.runtime.get_writer` caches by resolved path.
+  A sub-agent builds a second `AgentLoop` inside its caller's turn, and two writers on one
+  file would race each other for `seq` positions in the run they are both writing.
+
+**The suite was mutation-checked rather than trusted for being green.** Eight mutations, all
+caught: drop the `cancelled` path; accept an unannounced `None`; make `step_id` ignore the
+worker; give a worker its own run; remove the type check from `append`; move `agent_finished`
+back to buffered; hardcode `usage_reported = True`; drop the denial rule. One observation
+worth recording: with `step_id` mutated, the worker-run test still passed because it compares
+against `jevents.step_id(...)` — the collision test is the one that bites, and it asserts the
+strings literally for that reason.
+
+### schemas as actually implemented
+
+Every event carries `run_id`, `seq`, `ts` and `type` as columns (2a's schema, unchanged — no
+migration, and `SCHEMA_VERSION` is still 1). `worker_id` and `step_id` remain payload keys
+fed by named arguments on `append`; **neither was promoted to a column**, so 2a's open
+question 6 (`_migrate` cannot migrate) has not been triggered yet.
+
+Notation: `?` = optional, `| null` = explicitly nullable, `∈ {}` = enum.
+
+```
+agent_started      session_id, turn_id, role, actor, origin, channel, autonomy, model: str
+                   max_steps, input_chars: int; input_preview: str
+                   parent_turn_id: str | null      (required — a top-level turn states None)
+agent_finished     turn_id: str; status ∈ {completed, abandoned, failed, cancelled}
+                   steps, duration_ms, answer_chars: int; usage: dict; usage_reported: bool
+                   answer_preview?: str; error?: str | null
+tool_requested     call_id, name: str; args: dict; visible, known: bool
+tool_started       call_id, name: str
+tool_progress      call_id, name, message: str; pct?: int | float | null      (unwritten)
+tool_finished      call_id, name: str; duration_ms, result_chars: int
+                   trust ∈ {trusted, untrusted}; summary?: str; private?, has_undo?: bool
+tool_failed        call_id, name, error: str; duration_ms: int
+                   denied, invalid_args: bool; attempt?: int
+                   rule?: str | null; queued_id?: str | null
+worker_created     worker_id, name, role, autonomy, task_preview: str
+                   max_steps, task_chars: int; tools: list; parent_step_id?: str | null
+worker_finished    worker_id, name: str; status ∈ {ok, partial, failed, budget_exhausted}
+                   summary_chars, artifacts, citations, candidates, tokens, duration_ms: int
+                   tainted: bool; summary_preview?: str
+message_appended   role ∈ {user, assistant, tool, system}; actor, preview: str; chars: int
+                   trust? ∈ {trusted, untrusted}; private?: bool
+                   tool_call_id?: str | null; tool_calls?: int
+checkpoint_written checkpoint_id: str; trigger ∈ {turn_end, worker_finished, pre_effect,
+                   handoff, manual}; covers_seq: int; memory_watermark: dict
+                   messages?, bytes?, duration_ms?: int; location?: str | null   (unwritten)
+effect_intended    effect_id, step_id, tool_name, idempotency_key, args_digest: str
+                   effect_class ∈ {read, idempotent_write, unsafe_write}
+                   attempt?: int                                                 (unwritten)
+effect_committed   effect_id, step_id, idempotency_key: str
+                   status ∈ {committed, failed, uncertain}; duration_ms: int
+                   result_digest?: str | null; error?: str | null; attempt?: int (unwritten)
+run_resumed        from_seq, replayed_events: int; checkpoint_id: str | null
+                   reason: str; uncertain_effects: list                          (unwritten)
+run_forked         parent_run_id, reason: str; fork_point_seq: int
+                   checkpoint_id?: str | null; handoff_id?: str | null           (unwritten)
+handoff_started    handoff_id, reason: str; messages: int
+                   context_tokens?, ceiling_tokens?: int                         (unwritten)
+handoff_finished   handoff_id: str; status ∈ {ok, failed}
+                   summary_chars, kept_messages, dropped_messages, duration_ms: int
+                   error?: str | null; successor_run_id?: str | null             (unwritten)
+```
+
+**Decisions inside those shapes that later passes should not re-litigate:**
+
+- `checkpoint_written.covers_seq` is the last journal position the snapshot accounts for,
+  always lower than the checkpoint event's own `seq`. Named for what it means so nobody reads
+  it as the checkpoint's position: "a checkpoint may lag the journal" is exactly this number.
+- `effect_intended` and `effect_committed` **require `step_id`**, because the idempotency key
+  is `hash(run_id, step_id, tool_name, canonical_args)` and a key computed from a missing step
+  collides across steps.
+- `effect_committed.status` includes `uncertain`, which is what an `unsafe_write` interrupted
+  between intent and commit surfaces as. It is never retried automatically.
+- `run_resumed.checkpoint_id` is required **and** nullable: folding a whole journal from seq 0
+  is a legitimate resume and has to be stated.
+- `run_forked` is emitted as the **first event of the new run**, naming the parent. The parent
+  run gets no event — a completed run's journal must not keep growing.
+- Enums were imposed only where `CLAUDE.md` / the architecture doc already fix the values
+  (effect classes, checkpoint triggers, effect statuses). `handoff_started.reason` and
+  `run_forked.reason` are free strings, because an enum invented here for an unwritten pass is
+  a constraint that pass would have to migrate away from.
+- `message_appended` covers the messages no other event describes — the user's message, the
+  assembled system block, each step's assistant output, and the mid-turn system nudges. **A
+  tool result is deliberately not one of them**: `tool_finished` / `tool_failed` already carry
+  its size, trust and summary, and emitting both would put the same body in the journal twice
+  under two names. A Pass 4 fold that wants the message list must read the tool events too.
+- Previews are truncated to 200 characters and whitespace-collapsed (`journal.events.preview`).
+  The journal is a record of what happened, not a second copy of the conversation; the archive
+  in Postgres holds the content.
+
+**The sequence a complete one-tool turn produces**, verbatim from
+`test_a_complete_turn_is_readable_from_the_journal_alone`:
+
+```
+seq 1  agent_started
+seq 2  message_appended   role=user
+seq 3  message_appended   role=system     (the assembled prompt, incl. the memory block)
+seq 4  message_appended   role=assistant  step_id=s1  tool_calls=1
+seq 5  tool_requested     step_id=s1      visible=true known=true
+seq 6  tool_started       step_id=s1
+seq 7  tool_finished      step_id=s1      trust=trusted
+seq 8  message_appended   role=assistant  step_id=s2
+seq 9  agent_finished     status=completed steps=2
+```
+
+A delegating turn interleaves `worker_created` … the worker's own `agent_started` … its tool
+events … `agent_finished` … `worker_finished`, all in the same run, every one of them tagged
+`worker_id`, with the worker's steps scoped as `<worker_id>.s<N>` so they cannot collide with
+the caller's `s<N>`.
+
+**Durability classes, as amended:** `effect_*` and `checkpoint_written` (2a) plus
+`agent_finished` (2b) are synchronous; everything else is buffered subject to `[journal]`.
+`writer.is_synchronous` is still the single definition.
+
+### deferred items, and where they went
+
+- **Frontend replay — session 2c.** Unchanged from 2a: the substrate is
+  `JournalStore.read_all(after_id=...)`. The in-memory `UIEvent` stream that 2c must remove is
+  `agent/events.py` plus its consumers in `cli/chat.py`, `daemon/telegram.py`,
+  `daemon/scheduler.py` and `daemon/heartbeat.py`; 2b left every one of them working
+  unchanged, because removing them is 2c's exit criterion and doing it here would have left
+  the CLI blind for a session.
+- **`tool_progress` needs a progress channel on the tool surface.** Not built; *Must not*.
+- **Anything that reads the journal** — Pass 4. Nothing folds it. `EMITTED_TYPES` is the list
+  a `reduce` will have to handle first.
+- **No `agent journal` CLI**, still. 2c surfaces the journal.
+- **`worker_id` / `step_id` are still payload keys.** Promoting them to columns is the
+  migration that will first hit 2a's open question 6.
+
+### open questions for later passes
+
+**1. Nothing has run a live turn against this.** Every assertion here is from the suite; the
+journal file at `~/.local/share/agent/journal.db` does not exist, because no live turn has
+been journaled yet. The suite covers the shapes, but a live run is what would expose a value
+this code assumes is a `str` and the provider returns as something else. **Run one before 2c
+builds a feed on top of it**, and count the payload fields — the `tool_finished.trust` and
+`ToolCall.id` paths were read by hand and are the two most likely to surprise.
+
+**2. A tool call outside a turn is journaled by nobody. → Pass 3.**
+`policy/replay.execute_approved` runs a queued approval long after its turn ended, through the
+executor, with `ctx.run_id = None`. It writes an `actions` row and no journal event. That is
+the *same shape* as baseline finding 3 (an effect with no journal entry cannot be folded), and
+it is where Pass 3's effect ledger has to decide whether a queued call rejoins its original run
+or opens one.
+
+**3. The tool events are emitted by `loop.py`, not by the executor.** The executor is the
+chokepoint every tool call routes through, but it also serves MCP and the approval queue,
+which have no run and no writer. The loop has the run, the step, the visibility and the denial
+in one place, so that is where they are emitted. If Pass 3 wants `effect_intended` to be
+unbypassable, it has to move the emission into the executor and hand the executor a
+`RunJournal` — and at that point the events above should move with it rather than being
+emitted twice.
+
+**4. A synchronous append still happens on the event loop thread.** Unchanged from 2a's open
+question 4, and now real: `agent_finished` fsyncs on the loop thread once per turn, and Pass 3
+will add two `effect_*` fsyncs per write. Still unmeasured. If it ever needs offloading it
+needs one dedicated writer thread with a queue, never a pool — a pool would decide the order
+of a run's history.
+
+**5. The journal now holds 200-character previews of message and tool content, in plaintext,
+in `data_dir`.** Less than the Postgres archive already holds, on the same machine, so this is
+not a new exposure — but it is a new *location*, and it is not covered by `backup.create` (2a
+recorded why) and has no retention pressure under `keep_everything`. Whoever first exports or
+ships a journal off-host needs to look at `message_appended.preview`,
+`tool_finished.summary`, `tool_failed.error` and `agent_started.input_preview` first. The
+`private` flag on `message_appended` and `tool_finished` is there so a redactor has something
+to key on.
+
+**6. `agent_finished.status` has four values and telemetry has three.** They agree on
+`completed` / `abandoned` / `failed`; `cancelled` exists only in the journal, because the
+telemetry record is the thing that is never written in that case. A Pass 10 comparison joining
+the two records must not treat a missing telemetry row as a missing turn.
+
+**7. Still open from 2a, untouched by 2b:** power-loss durability is reasoned rather than
+measured (2a #2); the fsync cost is unmeasured (2a #3); `_migrate` cannot migrate (2a #6);
+retention's two extension points are still unusable (2a #7). And from Pass 1: token accounting
+is still broken upstream, which is why `usage_reported` exists.

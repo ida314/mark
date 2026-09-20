@@ -6,6 +6,7 @@ review gate decides. They also never exceed their caller's autonomy.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
@@ -17,6 +18,9 @@ from ..db import repo_archive, repo_memory, repo_ops
 from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
+from ..journal import events as jevents
+from ..journal.runtime import RunJournal, get_writer
+from ..journal.writer import JournalWriter
 from ..llm.roles import get_provider, params_for
 from ..obs import otel
 from ..policy.approvals import Approver
@@ -101,6 +105,9 @@ async def run_subagent(
     registry: Registry | None = None,
     cfg: Config | None = None,
     parent_action_id: UUID | None = None,
+    parent_run_id: str | None = None,
+    parent_step_id: str | None = None,
+    journal: JournalWriter | None = None,
     provider=None,
 ) -> SubagentResult:
     from .loop import AgentLoop, Session
@@ -109,6 +116,16 @@ async def run_subagent(
     registry = registry or get_registry()
     autonomy = cap_autonomy(parent_autonomy, spec.autonomy_cap)
     action_id = uuid7()
+    started = time.perf_counter()
+
+    # A worker has no run of its own. It writes into the run that created it, tagged with a
+    # worker id, which is what makes `worker_created ... worker_finished` a bracket around
+    # the worker's own `agent_started`/tool events rather than a pointer at another file.
+    # Falling back to the parent turn is the same derivation `run_turn` uses for a top-level
+    # turn, so a caller that does not thread `parent_run_id` still lands in the right run.
+    run_id = parent_run_id or str(parent_turn_id)
+    worker_id = str(action_id)
+    rj = RunJournal(journal or get_writer(cfg), run_id)
 
     restricted = Registry(tools=registry.subset(spec.tool_names, spec.tool_tags))
     loop = AgentLoop(
@@ -118,6 +135,7 @@ async def run_subagent(
         provider=provider or get_provider(cfg),
         role=spec.role,
         actor=f"subagent:{spec.name}",
+        journal=rj.writer,
     )
     loop.cfg = cfg.model_copy(update={"agent": cfg.agent.model_copy(update={"max_steps": spec.max_steps})})
 
@@ -128,6 +146,17 @@ async def run_subagent(
     status: str = "ok"
 
     with otel.span("subagent.run", {"subagent.name": spec.name}):
+        rj.emit(
+            "worker_created",
+            {
+                "worker_id": worker_id, "name": spec.name, "role": spec.role,
+                "autonomy": autonomy, "max_steps": spec.max_steps,
+                "tools": sorted(restricted.tools), "task_chars": len(task),
+                "task_preview": jevents.preview(task),
+                "parent_step_id": parent_step_id,
+            },
+            worker_id=worker_id,
+        )
         await repo_archive.append_event(
             RawEvent(
                 kind="subagent_message", actor=f"subagent:{spec.name}", content=task,
@@ -141,6 +170,9 @@ async def run_subagent(
             autonomy=autonomy,
             record_user_message=False,
             extra_system=spec.prompt,
+            run_id=run_id,
+            worker_id=worker_id,
+            parent_turn_id=parent_turn_id,
         ):
             if isinstance(event, TextChunk):
                 transcript.append(event.text)
@@ -195,6 +227,21 @@ async def run_subagent(
                 session_id=parent_session_id,
                 turn_id=parent_turn_id,
             )
+        rj.emit(
+            "worker_finished",
+            {
+                "worker_id": worker_id, "name": spec.name, "status": result.status,
+                "summary_chars": len(result.summary),
+                "summary_preview": jevents.preview(result.summary),
+                "tainted": bool(result.tainted),
+                "artifacts": len(result.artifacts),
+                "citations": len(result.citations),
+                "candidates": len(result.candidate_memories),
+                "tokens": tokens,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+            worker_id=worker_id,
+        )
         await repo_ops.write_action(
             ActionRecord(
                 id=action_id, parent_id=parent_action_id or parent_turn_id,

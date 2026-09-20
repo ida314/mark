@@ -14,6 +14,9 @@ from ..db import repo_archive, repo_ops
 from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import utcnow, uuid7
+from ..journal import events as jevents
+from ..journal.runtime import RunJournal, get_writer
+from ..journal.writer import JournalWriter
 from ..llm.base import Finish, LLMError, ReasoningDelta, TextDelta, ToolCallDone
 from ..llm.roles import get_provider, params_for
 from ..obs import otel, telemetry
@@ -86,6 +89,74 @@ class Session:
         )
 
 
+@dataclass
+class _TurnRecord:
+    """The journal's view of one turn: `agent_started` on the way in, `agent_finished` on
+    every way out.
+
+    A context manager rather than a pair of calls, because "every way out" includes the one
+    nobody writes code for: a consumer that stops iterating the turn's events mid-stream
+    gets `GeneratorExit` thrown at the suspended `yield`, and neither the telemetry record
+    nor the `actions` row is written in that case (Pass 1, open question 4). A `with` block
+    unwinds there too, so the run still ends with an `agent_finished` - `cancelled` rather
+    than an event sequence that simply stops and never says why.
+
+    `status` starts as None and every deliberate exit sets it. None at `__exit__` therefore
+    means the turn ended without anything having decided how, which is a real state and is
+    recorded as one; it is not defaulted to `completed`.
+    """
+
+    rj: RunJournal
+    turn_id: str
+    started: float
+    status: str | None = None
+    steps: int = 0
+    answer: str = ""
+    error: str | None = None
+    usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+    usage_reported: bool = False
+
+    @classmethod
+    def start(cls, rj: RunJournal, *, turn_id: str, started: float, payload: dict) -> _TurnRecord:
+        rj.emit("agent_started", payload)
+        return cls(rj=rj, turn_id=turn_id, started=started)
+
+    def finish(
+        self, *, status: str, steps: int, answer: str, usage: dict[str, int],
+        usage_reported: bool, error: str | None = None,
+    ) -> None:
+        self.status, self.steps, self.answer = status, steps, answer
+        self.usage, self.usage_reported, self.error = dict(usage), usage_reported, error
+
+    def __enter__(self) -> _TurnRecord:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        status, error = self.status, self.error
+        if status is None:
+            if exc_type is None or issubclass(exc_type, GeneratorExit):
+                status = "cancelled"
+            else:
+                status, error = "failed", f"{exc_type.__name__}: {exc}"
+        # Synchronous by classification (journal.writer.SYNC_TYPES), so this carries the
+        # whole turn's buffered tail to disk with it.
+        self.rj.emit(
+            "agent_finished",
+            {
+                "turn_id": self.turn_id,
+                "status": status,
+                "steps": self.steps,
+                "duration_ms": int((time.perf_counter() - self.started) * 1000),
+                "answer_chars": len(self.answer),
+                "answer_preview": jevents.preview(self.answer),
+                "usage": dict(self.usage),
+                "usage_reported": self.usage_reported,
+                "error": error,
+            },
+        )
+        return False
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -97,6 +168,7 @@ class AgentLoop:
         provider=None,
         role: str = "main",
         actor: str = "main",
+        journal: JournalWriter | None = None,
     ) -> None:
         self.cfg = cfg or get_config()
         self.registry = registry or get_registry()
@@ -112,6 +184,16 @@ class AgentLoop:
             max_result_chars=self.cfg.agent.tool_result_max_chars,
         )
         self.last_pack = None
+        self._journal = journal
+
+    def journal_writer(self) -> JournalWriter:
+        """The writer this loop appends to: the process's, unless one was injected.
+
+        Shared per process and per file rather than per loop. A sub-agent builds a second
+        `AgentLoop` inside the caller's turn, and two writers on one file would race each
+        other for `seq` positions in the run they are both writing.
+        """
+        return self._journal or get_writer(self.cfg)
 
     async def run_turn(
         self,
@@ -122,20 +204,45 @@ class AgentLoop:
         autonomy: str | None = None,
         record_user_message: bool = True,
         extra_system: str | None = None,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        parent_turn_id: UUID | str | None = None,
     ) -> AsyncIterator[UIEvent]:
+        """One turn. `run_id` defaults to this turn, which is what makes a top-level turn a
+        run; a worker is handed its caller's `run_id` and a `worker_id`, so its events are
+        part of the run that created it rather than a second run nothing links to."""
         autonomy = autonomy or session.autonomy
         turn_id = uuid7()
         started = time.perf_counter()
         usage_total = {"input_tokens": 0, "output_tokens": 0}
         # Pass 1 baseline measurement. Reads state this loop already keeps and feeds
         # nothing back into it; see obs/telemetry.py.
+        model = params_for(self.role, self.cfg).model or ""
         tele = telemetry.TurnTelemetry.start(
             cfg=self.cfg, request_id=str(turn_id), session_id=str(session.id),
             role=self.role, actor=self.actor, origin=origin, channel=session.channel,
-            autonomy=autonomy, model=params_for(self.role, self.cfg).model or "",
+            autonomy=autonomy, model=model,
+        )
+        run_id = run_id or str(turn_id)
+        rj = RunJournal(self.journal_writer(), run_id, worker_id=worker_id)
+        rec = _TurnRecord.start(
+            rj,
+            turn_id=str(turn_id),
+            started=started,
+            payload={
+                "session_id": str(session.id), "turn_id": str(turn_id),
+                "role": self.role, "actor": self.actor, "origin": origin,
+                "channel": session.channel, "autonomy": autonomy, "model": model,
+                "max_steps": self.cfg.agent.max_steps,
+                "input_chars": len(user_text),
+                "input_preview": jevents.preview(user_text),
+                "parent_turn_id": str(parent_turn_id) if parent_turn_id else None,
+            },
         )
 
-        with otel.span("agent.turn", {"agentd.autonomy": autonomy, "agentd.origin": origin}):
+        with otel.span(
+            "agent.turn", {"agentd.autonomy": autonomy, "agentd.origin": origin}
+        ), rec:
             trace_ids = otel.current_ids()
             if record_user_message:
                 await repo_archive.append_event(
@@ -144,6 +251,13 @@ class AgentLoop:
                         session_id=session.id, turn_id=turn_id,
                     )
                 )
+            rj.emit(
+                "message_appended",
+                {
+                    "role": "user", "actor": "user", "chars": len(user_text),
+                    "preview": jevents.preview(user_text), "trust": "trusted",
+                },
+            )
 
             # Deterministic, channel-agnostic: `agent ask`, one-shot and daemon turns all
             # pass through here, not just `agent chat`. See `memory/cues.py` for the
@@ -190,9 +304,26 @@ class AgentLoop:
             )
             if extra_system:
                 messages.insert(1, {"role": "system", "content": extra_system})
+            # The system block and the retrieved memory are not appended to the archive -
+            # they are rebuilt every turn - so this event is the journal's only record that
+            # the model was given instructions at all, and how much of the budget they took.
+            system_chars = sum(
+                len(m.get("content") or "") for m in messages if m.get("role") == "system"
+            )
+            rj.emit(
+                "message_appended",
+                {
+                    "role": "system", "actor": self.actor, "chars": system_chars,
+                    "preview": jevents.preview(messages[0].get("content") if messages else ""),
+                    "trust": "trusted",
+                },
+            )
 
             tctx = ToolContext(
                 session_id=session.id, turn_id=turn_id, actor=self.actor, origin=origin,
+                # The run a tool call belongs to, so that a delegated sub-agent's events
+                # land in this run rather than opening one of their own.
+                run_id=run_id,
                 # Both flags are seeded from the session, not reset per turn. Forgetting
                 # `private` here is invisible to any single-turn test: the interlock works
                 # inside the turn that read the mail and is gone by the next message, which
@@ -207,10 +338,23 @@ class AgentLoop:
             steps = 0
             for step in range(self.cfg.agent.max_steps):
                 steps = step + 1
+                sid = rj.step_id(steps)
+                # Mutated rather than rebuilt, exactly as `tainted` and `private` are: the
+                # context is shared with every tool call this step makes, and Pass 3 needs
+                # the step a call belonged to in order to key its idempotency hash.
+                tctx.step_id = sid
                 last_step = step == self.cfg.agent.max_steps - 1
                 step_tools = None if last_step else tool_schemas
                 if last_step:
                     messages.append({"role": "system", "content": FINAL_NUDGE})
+                    rj.emit(
+                        "message_appended",
+                        {
+                            "role": "system", "actor": self.actor, "chars": len(FINAL_NUDGE),
+                            "preview": jevents.preview(FINAL_NUDGE), "trust": "trusted",
+                        },
+                        step_id=sid,
+                    )
 
                 text_parts: list[str] = []
                 calls = []
@@ -247,6 +391,10 @@ class AgentLoop:
                         status="failed", steps=steps, usage=usage_total, answer="",
                         error=str(exc), trace_ids=trace_ids,
                     )
+                    rec.finish(
+                        status="failed", steps=steps, answer="", usage=usage_total,
+                        usage_reported=tele.usage_reported, error=str(exc),
+                    )
                     yield TurnFinished(
                         turn_id=str(turn_id), text="", steps=steps, usage=usage_total
                     )
@@ -264,6 +412,17 @@ class AgentLoop:
                         tokens_out=usage_total["output_tokens"],
                         **trace_ids,
                     )
+                )
+
+                rj.emit(
+                    "message_appended",
+                    {
+                        "role": "assistant", "actor": self.actor,
+                        "chars": len(assistant_text),
+                        "preview": jevents.preview(assistant_text),
+                        "trust": "trusted", "tool_calls": len(calls),
+                    },
+                    step_id=sid,
                 )
 
                 if not calls:
@@ -295,9 +454,22 @@ class AgentLoop:
                     # look like it was to a tool the model had been shown.
                     was_visible = call.name in exposed
                     known = call.name in self.registry.tools
+                    rj.emit(
+                        "tool_requested",
+                        {
+                            "call_id": call.id, "name": call.name, "args": args_preview,
+                            "visible": was_visible, "known": known,
+                        },
+                        step_id=sid,
+                    )
                     call_started = time.perf_counter()
                     if call.name not in exposed and call.name in self.registry.tools:
                         exposed[call.name] = self.registry.tools[call.name]
+                    rj.emit(
+                        "tool_started",
+                        {"call_id": call.id, "name": call.name},
+                        step_id=sid,
+                    )
                     result = await self.executor.run(
                         call.name, call.arguments, tctx, parent_id=turn_id
                     )
@@ -321,6 +493,39 @@ class AgentLoop:
                             duration_ms=int((time.perf_counter() - call_started) * 1000),
                         )
                     )
+                    call_ms = int((time.perf_counter() - call_started) * 1000)
+                    if result.ok:
+                        rj.emit(
+                            "tool_finished",
+                            {
+                                "call_id": call.id, "name": call.name,
+                                "duration_ms": call_ms,
+                                "result_chars": len(result.content),
+                                "trust": result.trust,
+                                "summary": jevents.preview(result.content),
+                                "private": private_call,
+                                "has_undo": result.undo is not None,
+                            },
+                            step_id=sid,
+                        )
+                    else:
+                        # One terminal event per call, whatever went wrong. A denial, a
+                        # rejected argument list and a handler that raised are all failures
+                        # of the call; which one it was is a flag, not a separate type.
+                        rj.emit(
+                            "tool_failed",
+                            {
+                                "call_id": call.id, "name": call.name,
+                                "duration_ms": call_ms,
+                                "error": jevents.preview(result.content),
+                                "denied": denied,
+                                "invalid_args": bool(result.data.get("invalid_args")),
+                                "attempt": int(result.data.get("attempt", 0)),
+                                "rule": result.data.get("rule"),
+                                "queued_id": result.data.get("queued_id"),
+                            },
+                            step_id=sid,
+                        )
                     yield ToolFinished(
                         name=call.name, ok=result.ok,
                         summary=_summarize(result.content), denied=denied,
@@ -365,6 +570,14 @@ class AgentLoop:
                 # After the batch, never between an assistant's tool calls and their results.
                 for note in stuck:
                     messages.append({"role": "system", "content": note})
+                    rj.emit(
+                        "message_appended",
+                        {
+                            "role": "system", "actor": self.actor, "chars": len(note),
+                            "preview": jevents.preview(note), "trust": "trusted",
+                        },
+                        step_id=sid,
+                    )
 
                 # Tools added mid-turn by tool_search become visible on the next step.
                 revealed = tctx.extra.pop("added_tools", [])
@@ -391,9 +604,14 @@ class AgentLoop:
             # the last step is forced tool-free and carries FINAL_NUDGE, so what comes back
             # is a summary of unfinished work, not an answer. Same reading as a sub-agent's
             # `budget_exhausted`.
+            status = "abandoned" if steps >= self.cfg.agent.max_steps else "completed"
             tele.finish(
-                status="abandoned" if steps >= self.cfg.agent.max_steps else "completed",
-                steps=steps, usage=usage_total, answer=answer, trace_ids=trace_ids,
+                status=status, steps=steps, usage=usage_total, answer=answer,
+                trace_ids=trace_ids,
+            )
+            rec.finish(
+                status=status, steps=steps, answer=answer, usage=usage_total,
+                usage_reported=tele.usage_reported,
             )
             yield TurnFinished(
                 turn_id=str(turn_id), text=answer, steps=steps, usage=usage_total
