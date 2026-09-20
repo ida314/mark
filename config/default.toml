@@ -129,6 +129,13 @@ enabled = false
 base_url = "http://127.0.0.1:8088"
 topic = "agent"
 min_level = "info"
+# When push may not wake you. Unset inherits [daemon] quiet_hours; [0, 0] is an empty
+# window, so push never waits. These are deliberately two settings: "may this wake me"
+# and "should the agent spend an LLM turn now" are different questions, and one window
+# cannot answer both. Wake me whenever but do not think overnight:
+#   [ntfy]   quiet_hours = [0, 0]
+#   [daemon] quiet_hours = [23, 8]
+# quiet_hours = [0, 0]
 
 # Connectors are daemon-side code, not tools. They hold the credential, the agent never sees it,
 # and nothing the agent can call reaches them — that is the whole reason this is a connector and

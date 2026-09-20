@@ -138,6 +138,12 @@ class NtfyConfig(BaseModel):
     timeout_s: float = 10.0
     min_level: Literal["info", "warn", "error"] = "info"
     sweep_s: int = 60
+    # When push may not wake you. None inherits [daemon] quiet_hours, which is what one
+    # setting meant before this existed; [0, 0] is an empty window, so push never waits.
+    # Separate from the daemon's because they are different questions wearing one name:
+    # "may this wake me" is about a phone at 3am, "should the agent think now" is about
+    # spending an LLM turn on a situation nobody will read until morning.
+    quiet_hours: tuple[int, int] | None = None
 
 
 class GithubConnectorConfig(BaseModel):

@@ -229,3 +229,34 @@ async def test_notify_user_says_so_when_it_really_will_push(cfg, monkeypatch):
 
     result = await notify_user.handler({"title": "hello"}, ToolContext(actor="main"))
     assert "Queued" in result.content and "not pushed" not in result.content
+
+
+# --- two windows, two questions ----------------------------------------------
+
+
+async def test_push_inherits_the_daemon_window_when_it_has_none(cfg):
+    """Back-compat: a config written before [ntfy] quiet_hours existed must not change
+    behaviour the day this field appears."""
+    cfg.ntfy.quiet_hours = None
+    cfg.daemon.quiet_hours = (23, 8)
+    assert notifier.quiet_window(cfg) == (23, 8)
+
+
+async def test_push_can_keep_its_own_window(cfg, monkeypatch):
+    """The case this exists for: wake me whenever, but do not run the heartbeat overnight."""
+    cfg.ntfy.enabled = True
+    cfg.ntfy.quiet_hours = (0, 0)  # empty window: push never waits
+    cfg.daemon.quiet_hours = (23, 8)  # the heartbeat still sleeps
+
+    assert notifier.quiet_window(cfg) == (0, 0)
+    assert notifier.should_send({"level": "info"}, cfg) is True
+    assert notifier.why_held("info", cfg) is None
+
+    # And the heartbeat, reading its own setting, is unaffected.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from agentd.daemon.heartbeat import in_quiet_hours
+
+    three_am = datetime(2026, 9, 20, 3, tzinfo=ZoneInfo("America/New_York"))
+    assert in_quiet_hours(three_am, tuple(cfg.daemon.quiet_hours)) is True

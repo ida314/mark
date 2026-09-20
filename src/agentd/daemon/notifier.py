@@ -75,13 +75,21 @@ async def _record_attempt(notification_id: int) -> None:
         )
 
 
+def quiet_window(cfg: Config) -> tuple[int, int]:
+    """The hours push may not wake you. Falls back to the daemon's window, so a config
+    written before [ntfy] quiet_hours existed keeps behaving exactly as it did."""
+    if cfg.ntfy.quiet_hours is not None:
+        return tuple(cfg.ntfy.quiet_hours)
+    return tuple(cfg.daemon.quiet_hours)
+
+
 def should_send(row: dict, cfg: Config) -> bool:
     level = row.get("level", "info")
     if LEVEL_ORDER.index(level) < LEVEL_ORDER.index(cfg.ntfy.min_level):
         return False
     from ..ids import utcnow
 
-    if in_quiet_hours(utcnow().astimezone(), tuple(cfg.daemon.quiet_hours)):
+    if in_quiet_hours(utcnow().astimezone(), quiet_window(cfg)):
         # Held, not dropped: pushed_at stays NULL and the safety tick delivers it in the morning.
         return level == "error"
     return True
@@ -105,7 +113,7 @@ def why_held(level: str, cfg: Config) -> str | None:
         )
     from ..ids import utcnow
 
-    start, end = tuple(cfg.daemon.quiet_hours)
+    start, end = quiet_window(cfg)
     if in_quiet_hours(utcnow().astimezone(), (start, end)) and level != "error":
         return (
             f"quiet hours ({start:02d}:00-{end:02d}:00) hold everything below error, "
