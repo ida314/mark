@@ -206,11 +206,19 @@ async def watcher_add(args: dict, ctx: ToolContext) -> ToolResult:
     always_on=True,
 )
 async def notify_user(args: dict, ctx: ToolContext) -> ToolResult:
+    level = args.get("level", "info")
     await repo_agenda.notify(
-        source=ctx.actor, title=args["title"], body=args.get("body"),
-        level=args.get("level", "info"),
+        source=ctx.actor, title=args["title"], body=args.get("body"), level=level,
     )
-    return ToolResult(content="Notification sent.")
+    # Say what actually happens, not what was attempted. This tool writes a row; the daemon
+    # decides whether it leaves the box, and "Notification sent." was a claim about neither.
+    from ..config import get_config
+    from ..daemon.notifier import why_held
+
+    held = why_held(level, get_config())
+    if held:
+        return ToolResult(content=f"Queued, but not pushed: {held}.")
+    return ToolResult(content="Queued; the daemon pushes it within a minute.")
 
 
 TOOLS: list[Tool] = [

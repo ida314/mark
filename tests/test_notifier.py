@@ -124,17 +124,17 @@ async def test_quiet_hours_hold_chatter_but_let_errors_through(cfg, monkeypatch)
     cfg.daemon.quiet_hours = (23, 8)
     monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: True)
 
-    assert notifier._should_send({"level": "info"}, cfg) is False
-    assert notifier._should_send({"level": "warn"}, cfg) is False
-    assert notifier._should_send({"level": "error"}, cfg) is True
+    assert notifier.should_send({"level": "info"}, cfg) is False
+    assert notifier.should_send({"level": "warn"}, cfg) is False
+    assert notifier.should_send({"level": "error"}, cfg) is True
 
 
 async def test_min_level_filters_below_the_threshold(cfg):
     cfg.ntfy.enabled = True
     cfg.ntfy.min_level = "warn"
 
-    assert notifier._should_send({"level": "info"}, cfg) is False
-    assert notifier._should_send({"level": "error"}, cfg) is True
+    assert notifier.should_send({"level": "info"}, cfg) is False
+    assert notifier.should_send({"level": "error"}, cfg) is True
 
 
 async def test_catch_up_finds_what_arrived_while_the_daemon_was_down(cfg):
@@ -167,3 +167,65 @@ async def test_the_bearer_token_comes_from_the_vault_not_the_config(cfg, tmp_pat
     assert headers["Authorization"] == "Bearer tk_secret"
     # and nothing about the token is in the config the doctor prints
     assert "tk_secret" not in repr(cfg.model_dump())
+
+
+# --- saying what actually happened -------------------------------------------
+
+
+async def test_why_held_names_the_reason_push_is_off(cfg):
+    cfg.ntfy.enabled = False
+    assert "ntfy.enabled = false" in notifier.why_held("error", cfg)
+
+
+async def test_why_held_names_the_min_level(cfg):
+    cfg.ntfy.enabled = True
+    cfg.ntfy.min_level = "warn"
+    assert "min_level is warn" in notifier.why_held("info", cfg)
+
+
+async def test_why_held_says_when_quiet_hours_end(cfg, monkeypatch):
+    cfg.ntfy.enabled = True
+    cfg.daemon.quiet_hours = (23, 8)
+    monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: True)
+
+    held = notifier.why_held("info", cfg)
+    assert "quiet hours" in held and "08:00" in held
+    # An error wakes you on purpose; that is the whole point of the level.
+    assert notifier.why_held("error", cfg) is None
+
+
+async def test_why_held_is_none_when_it_really_will_go(cfg, monkeypatch):
+    cfg.ntfy.enabled = True
+    monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: False)
+    assert notifier.why_held("info", cfg) is None
+
+
+async def test_notify_user_does_not_claim_delivery_it_cannot_know(cfg, monkeypatch):
+    """The bug this replaces: the tool answered "Notification sent." while the notifier was
+    holding the row, so the only account of an absent push was the model's imagination."""
+    from agentd.tools.base import ToolContext
+    from agentd.tools.builtin_agenda import notify_user
+
+    cfg.ntfy.enabled = True
+    cfg.daemon.quiet_hours = (23, 8)
+    monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: True)
+
+    result = await notify_user.handler(
+        {"title": "Test push notification", "body": "x"}, ToolContext(actor="main")
+    )
+    assert "not pushed" in result.content and "quiet hours" in result.content
+    assert "sent" not in result.content.lower()
+
+    rows = await repo_agenda.list_notifications()
+    assert any(r["title"] == "Test push notification" for r in rows)
+
+
+async def test_notify_user_says_so_when_it_really_will_push(cfg, monkeypatch):
+    from agentd.tools.base import ToolContext
+    from agentd.tools.builtin_agenda import notify_user
+
+    cfg.ntfy.enabled = True
+    monkeypatch.setattr(notifier, "in_quiet_hours", lambda *_a, **_k: False)
+
+    result = await notify_user.handler({"title": "hello"}, ToolContext(actor="main"))
+    assert "Queued" in result.content and "not pushed" not in result.content

@@ -75,7 +75,7 @@ async def _record_attempt(notification_id: int) -> None:
         )
 
 
-def _should_send(row: dict, cfg: Config) -> bool:
+def should_send(row: dict, cfg: Config) -> bool:
     level = row.get("level", "info")
     if LEVEL_ORDER.index(level) < LEVEL_ORDER.index(cfg.ntfy.min_level):
         return False
@@ -85,6 +85,33 @@ def _should_send(row: dict, cfg: Config) -> bool:
         # Held, not dropped: pushed_at stays NULL and the safety tick delivers it in the morning.
         return level == "error"
     return True
+
+
+def why_held(level: str, cfg: Config) -> str | None:
+    """None when a notification at this level leaves the box now; otherwise a sentence
+    saying what happens to it instead.
+
+    This exists because `notify_user` used to answer "Notification sent." whatever the
+    truth was — it writes a row, and the row is all it knows. Whoever reads that then has
+    to explain an absence with no evidence, which is exactly the situation a model fills in
+    with a plausible story. The three reasons a push does not happen are all knowable at
+    the moment the row is written, so they are said then.
+    """
+    if not cfg.ntfy.enabled:
+        return "push is off (ntfy.enabled = false), so it stays in `agent notifications`"
+    if LEVEL_ORDER.index(level) < LEVEL_ORDER.index(cfg.ntfy.min_level):
+        return (
+            f"ntfy.min_level is {cfg.ntfy.min_level}, so {level} notifications are never pushed"
+        )
+    from ..ids import utcnow
+
+    start, end = tuple(cfg.daemon.quiet_hours)
+    if in_quiet_hours(utcnow().astimezone(), (start, end)) and level != "error":
+        return (
+            f"quiet hours ({start:02d}:00-{end:02d}:00) hold everything below error, "
+            f"so it reaches your phone at {end:02d}:00"
+        )
+    return None
 
 
 def _headers(row: dict, cfg: Config) -> dict[str, str]:
@@ -123,7 +150,7 @@ async def push(row: dict, cfg: Config, client: httpx.AsyncClient) -> bool:
 
 
 async def _deliver(row: dict, cfg: Config, client: httpx.AsyncClient) -> None:
-    if not _should_send(row, cfg):
+    if not should_send(row, cfg):
         return
     try:
         ok = await push(row, cfg, client)
