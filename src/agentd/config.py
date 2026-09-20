@@ -167,6 +167,25 @@ class TelegramConfig(BaseModel):
     # Numeric chat ids, not usernames: a username can be changed by its owner, an id cannot.
     # `agent telegram whoami` prints the id of whoever messages the bot next.
     allowed_chat_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("allowed_chat_ids", mode="before")
+    @classmethod
+    def _ids_not_usernames(cls, value):
+        """The two mistakes worth naming, because the raw parse error names neither.
+
+        A username instead of an id, and — easier to make — the *bot's* identity instead of
+        your own. The allowlist answers "who may talk to the agent", and the agent is not on
+        that list.
+        """
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, str) and not entry.lstrip("-").isdigit():
+                    raise ValueError(
+                        f"{entry!r} is a username, not a chat id. This list holds numeric ids "
+                        "of the people who may message the agent — your own Telegram account, "
+                        "not the bot's. Message the bot, then run `agent telegram whoami`."
+                    )
+        return value
     # Long polling, so this box needs no inbound port, no public address and no certificate.
     # A webhook would need all three and it is a headless machine on a tailnet.
     poll_timeout_s: int = 50

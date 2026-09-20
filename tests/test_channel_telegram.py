@@ -335,3 +335,28 @@ async def test_an_empty_allowlist_is_called_out_even_when_the_token_works(bot, m
     monkeypatch.setattr(httpx, "AsyncClient", ok)
     await _telegram_check(bot)
     assert "nobody can talk to it" in capsys.readouterr().out
+
+
+# --- the allowlist holds people, not the bot ---------------------------------
+
+
+def test_a_username_in_the_allowlist_is_refused_with_an_explanation():
+    """Two mistakes are easy here and the raw parse error names neither: a username instead
+    of a numeric id, and the *bot's* identity instead of your own."""
+    from pydantic import ValidationError
+
+    from agentd.config import TelegramConfig
+
+    with pytest.raises(ValidationError) as caught:
+        TelegramConfig(allowed_chat_ids=["Unsettled0645_bot"])
+    message = str(caught.value)
+    assert "username, not a chat id" in message
+    assert "not the bot's" in message
+    assert "agent telegram whoami" in message
+
+
+def test_negative_ids_are_fine():
+    """Telegram gives groups and channels negative ids; only a *username* is the error."""
+    from agentd.config import TelegramConfig
+
+    assert TelegramConfig(allowed_chat_ids=[-1001234567890]).allowed_chat_ids == [-1001234567890]
