@@ -21,6 +21,7 @@ from agentd.connectors.base import (
     ConnectorTransient,
     Item,
     PollResult,
+    _seconds_until,
     poll_once,
     run_connector,
 )
@@ -421,3 +422,72 @@ async def test_the_command_that_fixes_a_connector_survives_the_renderer(cfg):
         await commands_connect.render_list(cfg, console)
 
     assert "[connectors.imap.accounts.dodds]" in captured.get()
+
+
+# --- a credential that arrives after the daemon did ---------------------------
+#
+# Live 2026-09-20: the daemon came up at 13:39:58 and parked `brightspace` with "no feed
+# URL"; the URL was set at 14:03:20 and nothing ever looked again. `configured()` ran once,
+# at startup, and the connector sat on `stop.wait()` for the life of the process — while
+# `disabled_reason` went on naming a feed URL that by then existed, which is what sent the
+# search after the link rather than after the daemon.
+
+
+async def _one_pass(connector, cfg) -> dict:
+    """Reconcile once and return the row. A pre-set stop leaves before any request."""
+    import asyncio
+
+    stop = asyncio.Event()
+    stop.set()
+    await run_connector(connector, cfg, stop)
+    return await repo_connectors.load_state(connector.name)
+
+
+async def test_a_credential_set_after_startup_brings_the_connector_back(cfg):
+    connector = FakeConnector(why="no feed URL: run `agent secrets set fake/x ics_url`")
+
+    parked = await _one_pass(connector, cfg)
+    assert parked["enabled"] is False
+    assert parked["disabled_reason"].startswith("not configured: ")
+
+    # The credential shows up 23 minutes later. Nothing restarts.
+    connector._why = None
+    revived = await _one_pass(connector, cfg)
+
+    assert revived["enabled"] is True
+    assert revived["disabled_reason"] is None
+    # Re-enabling asks for an immediate retry rather than another `disabled_recheck_s`.
+    assert _seconds_until(revived, connector, cfg) == 0.0
+
+
+async def test_the_parked_reason_tracks_what_is_missing_now(cfg):
+    """A snapshot reason accuses whatever was wrong first, forever — which is how twenty
+    minutes went into checking a feed URL that had been correct the whole time."""
+    connector = FakeConnector(why="no feed URL")
+    assert "no feed URL" in (await _one_pass(connector, cfg))["disabled_reason"]
+
+    connector._why = "feed URL is not https"
+    assert "not https" in (await _one_pass(connector, cfg))["disabled_reason"]
+
+
+async def test_a_rejected_credential_is_not_revived_by_the_recheck(cfg):
+    """`_handle_auth_error` needs a human. Reviving it would retry against an endpoint that
+    is already refusing us, and would bury the notification that asked for the fix."""
+    connector = FakeConnector()  # configured() passes: the token exists, it is just refused
+    await repo_connectors.load_state("fake")
+    await base._handle_auth_error(connector, ConnectorAuthError("token rejected"))
+
+    state = await _one_pass(connector, cfg)
+    assert state["enabled"] is False
+    assert "token rejected" in state["disabled_reason"]
+
+
+async def test_a_connector_switched_off_by_hand_stays_off(cfg):
+    """A decision, not a fault."""
+    connector = FakeConnector()
+    await repo_connectors.load_state("fake")
+    await repo_connectors.set_enabled("fake", False, reason="disabled by hand")
+
+    state = await _one_pass(connector, cfg)
+    assert state["enabled"] is False
+    assert state["disabled_reason"] == "disabled by hand"

@@ -371,6 +371,10 @@ async def _handle_transient(
 
 # --- the supervised loop -----------------------------------------------------
 
+# The one reason string this module writes for itself, and the only one it will undo. See
+# `_reconcile_configuration`.
+NOT_CONFIGURED = "not configured: "
+
 
 def _seconds_until(state: dict, connector: Connector, cfg: Config) -> float:
     if not state.get("enabled", True):
@@ -384,23 +388,54 @@ def _seconds_until(state: dict, connector: Connector, cfg: Config) -> float:
     return max(0.0, (next_at - utcnow()).total_seconds())
 
 
+async def _reconcile_configuration(connector: Connector, state: dict) -> dict:
+    """Keep `connector_state` honest about whether this connector *can* run.
+
+    Called every cycle rather than once at startup, because a credential is usually set
+    *after* the daemon is already up — you install the daemon, then you go and fetch the
+    token. Checking once meant the connector parked forever on a reason that stopped being
+    true minutes later, and `disabled_reason` went on accusing a feed URL that by then
+    existed. The vault is cached on mtime, so re-reading it here is a `stat`, not a parse.
+
+    Re-enabling is deliberately narrow: **only** a row this function itself parked, which
+    it recognises by the reason prefix it itself wrote. Three different things switch a
+    connector off and only one of them should ever heal on its own —
+    `_handle_auth_error` must not (a rejected credential needs a human and would otherwise
+    be retried against an endpoint already refusing us), and `agent connectors disable`
+    must not (a decision, not a fault).
+    """
+    why = connector.configured()
+    reason = state.get("disabled_reason") or ""
+    enabled = bool(state.get("enabled", True))
+
+    if why:
+        wanted = f"{NOT_CONFIGURED}{why}"
+        # Rewrite when the reason itself changed, so the text tracks what is missing now.
+        if enabled or reason != wanted:
+            await repo_connectors.set_enabled(connector.name, False, reason=wanted)
+            return await repo_connectors.load_state(connector.name)
+        return state
+
+    if not enabled and reason.startswith(NOT_CONFIGURED):
+        await repo_connectors.set_enabled(connector.name, True)
+        return await repo_connectors.load_state(connector.name)
+    return state
+
+
 async def run_connector(connector: Connector, cfg: Config, stop: asyncio.Event) -> None:
     """The supervised loop for one connector. Registered in `daemon/main.py`."""
-    why = connector.configured()
-    if why:
-        # The notifier_loop precedent: park, do not crash, do not spin. `agent doctor` reads
-        # the reason out of connector_state and tells you what to do about it.
-        await repo_connectors.load_state(connector.name)
-        await repo_connectors.set_enabled(connector.name, False, reason=f"not configured: {why}")
-        await stop.wait()
-        return
-
     last_sweep = 0.0
     async with httpx.AsyncClient(
         follow_redirects=False, timeout=cfg.connectors.timeout_s
     ) as client:
-        while not stop.is_set():
+        while True:
             state = await repo_connectors.load_state(connector.name)
+            # Before the stop check: parking is a local write, and the reason it records is
+            # what `agent doctor` and `agent connectors list` read. A connector that is
+            # missing its credential should say so even on a daemon that is shutting down.
+            state = await _reconcile_configuration(connector, state)
+            if stop.is_set():
+                return
             try:
                 # Sleep first, so a restart never polls an external API the instant it comes
                 # up, and so shutdown never starts a poll on the way out.
@@ -409,6 +444,8 @@ async def run_connector(connector: Connector, cfg: Config, stop: asyncio.Event) 
             except TimeoutError:
                 pass
 
+            # Cheap no-op while parked: `poll_once` re-reads the row and returns on a
+            # disabled connector, so the guard lives in one place rather than two.
             await poll_once(connector, cfg, client)
 
             now = time.monotonic()
