@@ -22,6 +22,7 @@ from ..embed import cosine, get_embedder
 from ..ids import parse_when, utcnow
 from ..llm.roles import get_provider, params_for
 from ..obs import otel
+from .predicates import coerce
 from .retrieval import to_list
 
 MERGE_THRESHOLD = 0.93
@@ -337,6 +338,9 @@ async def propose_and_review(
     session_id: UUID | None = None,
     turn_id: UUID | None = None,
     kind: str = "fact",
+    subject: str | None = None,
+    predicate: str | None = None,
+    obj: str | None = None,
     relation_hint: str | None = None,
     supersedes_hint: UUID | None = None,
     cfg: Config | None = None,
@@ -349,9 +353,22 @@ async def propose_and_review(
     is allowed to decide: `process_candidate` still runs in full, still enforces the
     untrusted-identity block and the secret scrub, still can reject or park a candidate in
     `needs_review`. It only removes the silent wait, and gives the caller the real outcome.
+
+    `predicate` arrives raw and is reconciled with `category` here, so that every caller
+    gets the same family check: an off-family or unknown predicate is stored as None and
+    kept verbatim under `predicate_as_extracted`. A bucket would be worse than nothing —
+    it is half a grouping key, so unrelated claims would collide as one contradiction.
     """
     cfg = cfg or get_config()
     structured: dict = {"category": category, "importance": importance}
+    if subject:
+        structured["subject"] = subject
+    if predicate is not None:
+        resolved, mismatched = coerce(predicate, category)
+        structured["predicate"] = resolved
+        structured["predicate_as_extracted"] = mismatched
+    if obj:
+        structured["object"] = obj
     if valid_from:
         structured["valid_from"] = valid_from
     if relation_hint:

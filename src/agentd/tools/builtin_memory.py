@@ -7,11 +7,13 @@ decides whether it becomes a fact, merges into one, or supersedes one.
 from __future__ import annotations
 
 import json
+from typing import get_args
 
 from ..config import get_config
 from ..db import repo_memory
 from ..embed import get_embedder
 from ..ids import parse_when, utcnow
+from ..memory.predicates import UNSPECIFIED, Predicate, coerce, vocabulary_for_prompt
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
 
 
@@ -75,6 +77,27 @@ async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
                     "state", "belief", "constraint", "other",
                 ],
             },
+            subject={
+                "type": "string",
+                "description": (
+                    "Who or what the claim is about ('Dylan', 'agentd'). With the predicate "
+                    "and object it is the key that lets a later claim be recognised as "
+                    "contradicting this one, so a vague subject makes the memory unusable."
+                ),
+            },
+            predicate={
+                "type": "string",
+                "enum": list(get_args(Predicate)),
+                "description": (
+                    "The relation, from the list for the category you chose; "
+                    f"'{UNSPECIFIED}' when nothing fits, which is a good answer.\n"
+                    f"{vocabulary_for_prompt()}"
+                ),
+            },
+            object={
+                "type": "string",
+                "description": "The value the predicate points at ('East Village', 'Python')",
+            },
             confidence={"type": "number", "minimum": 0, "maximum": 1},
             valid_from={"type": "string", "description": "ISO date this became true"},
             importance={"type": "number", "minimum": 0, "maximum": 1},
@@ -103,6 +126,11 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
         "category": args.get("category", "other"),
         "importance": float(args.get("importance", 0.5)),
     }
+    # All three are optional: a model that names none of them still gets a reviewable
+    # candidate, just an ungroupable one.
+    subject = (args.get("subject") or "").strip() or None
+    object_text = (args.get("object") or "").strip() or None
+    raw_predicate = (args.get("predicate") or "").strip() or None
     if args.get("valid_from"):
         structured["valid_from"] = args["valid_from"]
     evidence = []
@@ -138,6 +166,9 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
             source_trust="untrusted" if ctx.tainted else "trusted",
             session_id=ctx.session_id,
             turn_id=ctx.turn_id,
+            subject=subject,
+            predicate=raw_predicate,
+            obj=object_text,
             relation_hint=relation_hint,
             supersedes_hint=supersedes_hint,
         )
@@ -152,6 +183,19 @@ async def memory_remember(args: dict, ctx: ToolContext) -> ToolResult:
             data={"status": status, "fact_id": str(fact_id) if fact_id else None},
         )
 
+    if subject:
+        structured["subject"] = subject
+    if raw_predicate is not None:
+        # The JSON schema can hold the predicate to the vocabulary but not to the family of
+        # the category the model also picked, so reconcile here, after decoding. An
+        # off-family predicate is stored as None, never as a per-category bucket: a shared
+        # predicate is half a grouping key, so a bucket would make unrelated claims collide
+        # as one contradiction. The original stays on the record.
+        resolved, mismatched = coerce(raw_predicate, structured["category"])
+        structured["predicate"] = resolved
+        structured["predicate_as_extracted"] = mismatched
+    if object_text:
+        structured["object"] = object_text
     if relation_hint:
         structured["relation_hint"] = relation_hint
     if supersedes_hint:

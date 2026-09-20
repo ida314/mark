@@ -328,3 +328,119 @@ def test_unsalvageable_output_is_returned_untouched_so_the_error_shows_it():
     from agentd.llm.openai_compat import _extract_json
 
     assert _extract_json('{"a": ') == '{"a":'
+
+
+# --- the (subject, predicate, object) key a proposal has to carry --------------
+#
+# Without it `review._resolve_subject` returns (None, None, None) and
+# `retrieval.resolve_conflicts` has nothing to group on, so a claim proposed by this tool
+# could never be recognised as disputing the fact it contradicts. Every claim this tool
+# wrote before these arguments existed had all three null.
+
+
+async def _remember(cfg, args: dict, said: str = "remember this") -> None:
+    provider = FakeProvider(turns=[[("memory_remember", args)], "Noted."])
+    loop = AgentLoop(
+        cfg=cfg, registry=_registry("memory_remember"), engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, said)
+
+
+async def test_a_proposal_carries_the_key_that_makes_it_groupable(cfg):
+    from agentd.db import repo_memory
+
+    await _remember(cfg, {
+        "statement": "Dylan lives in the East Village",
+        "category": "biographical", "subject": "Dylan",
+        "predicate": "lives_in", "object": "the East Village",
+    })
+    structured = (await repo_memory.pending_candidates())[0]["structured"]
+    assert structured["subject"] == "Dylan"
+    assert structured["predicate"] == "lives_in"
+    assert structured["object"] == "the East Village"
+    assert structured["predicate_as_extracted"] is None
+
+
+async def test_an_off_family_predicate_is_stored_as_null_not_as_a_bucket(cfg):
+    """A predicate that does not belong to the chosen category's family groups with nothing.
+    Bucketing it per category would make a favourite colour and a shoe size collide as the
+    same claim, and the gate would supersede one with the other."""
+    from agentd.db import repo_memory
+
+    await _remember(cfg, {
+        "statement": "Dylan lives in the East Village",
+        "category": "preference", "subject": "Dylan",
+        "predicate": "lives_in", "object": "the East Village",
+    })
+    structured = (await repo_memory.pending_candidates())[0]["structured"]
+    assert structured["predicate"] is None
+    assert structured["predicate_as_extracted"] == "lives_in"
+
+
+async def test_a_proposal_without_a_key_still_reaches_the_queue(cfg):
+    """The three arguments are optional: a model that names none of them must get today's
+    behaviour, not an error."""
+    from agentd.db import repo_memory
+
+    await _remember(cfg, {
+        "statement": "Dylan prefers terse answers", "category": "preference",
+    })
+    pending = await repo_memory.pending_candidates()
+    assert len(pending) == 1
+    structured = pending[0]["structured"]
+    assert structured["category"] == "preference"
+    assert "subject" not in structured
+    assert "predicate" not in structured
+    assert "object" not in structured
+
+
+async def test_a_proposal_is_recognised_as_disputing_the_fact_it_contradicts(cfg):
+    """The property this key exists for: same subject and predicate, different object, so
+    retrieval groups them and the losing side rides along as a named challenger line."""
+    from agentd.db import repo_memory
+    from agentd.ids import short_id
+    from agentd.memory.retrieval import pack
+
+    entity_id = await repo_memory.upsert_entity("person", "Dylan")
+    fact_id = await repo_memory.insert_fact(
+        statement="Dylan lives in Brooklyn", category="biographical", confidence=0.9,
+        proposed_by="user", subject_entity_id=entity_id, predicate="lives_in",
+        object_text="Brooklyn",
+    )
+    await _remember(cfg, {
+        "statement": "Dylan lives in the East Village",
+        "category": "biographical", "subject": "Dylan",
+        "predicate": "lives_in", "object": "the East Village",
+    })
+
+    result = await pack("where does Dylan live", cfg=cfg)
+    winner = next(i for i in result.items if i.meta.get("predicate") == "lives_in")
+    challengers = winner.meta.get("conflicts")
+    assert challengers, result.text
+    refs = {winner.ref} | {c["ref"] for c in challengers}
+    assert f"F:{short_id(fact_id)}" in refs
+    assert result.conflicts
+    assert "disputed by" in result.text
+
+
+async def test_the_fast_path_carries_the_key_onto_the_fact_it_writes(cfg):
+    """A correction adjudicated inline must be stored keyed, not just stored: an accepted
+    fact with a null predicate is invisible to the next contradiction."""
+    from agentd.db import repo_memory
+
+    await _remember(
+        cfg,
+        {
+            "statement": "Dylan lives in the East Village",
+            "category": "biographical", "subject": "Dylan",
+            "predicate": "lives_in", "object": "the East Village",
+        },
+        said="where i live is wrong, i live in the east village",
+    )
+    facts = await repo_memory.active_facts()
+    assert len(facts) == 1
+    assert facts[0]["predicate"] == "lives_in"
+    assert facts[0]["object_text"] == "the East Village"
+    assert facts[0]["subject_entity_id"] is not None
