@@ -68,7 +68,7 @@ from typing import Any
 from ..tools import effects
 from .checkpoints import Checkpoint, Checkpointer
 from .ledger import INTENDED, STARTED, EffectLedger
-from .render import brief_args
+from .render import LEADING_ARGS, brief_args
 from .runtime import RunJournal
 from .store import JournalError, JournalStore
 from .writer import JournalWriter
@@ -154,6 +154,11 @@ class Orphan:
     ledger_state: str | None
     arguments: dict[str, Any] | None
     arguments_seq: int | None
+    # The model's id for the call this effect was announced by, when the journal holds the
+    # request. `None` for a caller that never went through the loop (detached, MCP), which
+    # is also a caller whose call sits in nobody's message list. Only unique within a step,
+    # so `(step_id, call_id)` is the join and `call_id` alone is not.
+    call_id: str | None = None
 
     @property
     def disposition(self) -> str:
@@ -172,7 +177,7 @@ class Orphan:
         """
         if self.arguments is None:
             return None
-        return f"{self.tool}({brief_args(self.arguments)})"
+        return f"{self.tool}({brief_args(self.arguments, lead=LEADING_ARGS)})"
 
 
 @dataclass(frozen=True)
@@ -194,11 +199,35 @@ class UncertainGroup:
 
 
 @dataclass(frozen=True)
+class AnnouncedCall:
+    """One effecting call the journal announced, and how it ended - including "it did not".
+
+    Added by session 4c, which needed the *settled* effects as well as the open ones. A tool
+    call whose `tool_finished` died in the buffer leaves the same dangling call in the
+    rebuilt message list as an orphan does, and the three cases are three different things
+    to say: `committed` means it happened and only the result text was lost, `failed` means
+    it resolved without producing its effect, and `uncertain` means an earlier resume
+    already gave up on it. Without this, all three read as "never announced", which is the
+    one sentence that is wrong about every one of them.
+
+    `status` is `None` while the effect is open - that call is also in `orphans`.
+    """
+
+    effect_id: str
+    tool: str
+    effect_class: str
+    step_id: str
+    call_id: str | None
+    status: str | None
+
+
+@dataclass(frozen=True)
 class Reconciliation:
     """What the crash left open in one run, and what may be done about each of them."""
 
     run_id: str
     orphans: tuple[Orphan, ...]
+    announced: tuple[AnnouncedCall, ...] = ()
 
     @property
     def retryable(self) -> tuple[Orphan, ...]:
@@ -480,15 +509,30 @@ def _with_calls(message: RehydratedMessage, calls: tuple[ToolCallRef, ...]) -> R
 
 def _reconcile(run_id: str, events: Sequence[Any], store: JournalStore) -> Reconciliation:
     """Fold the effect events, then ask the ledger the one thing the journal cannot say."""
-    open_effects: dict[str, Any] = {}
+    intents: dict[str, Any] = {}
+    closed: dict[str, str] = {}
     for event in events:
         if event.type == "effect_intended":
-            open_effects[event.payload["effect_id"]] = event
+            intents[event.payload["effect_id"]] = event
         elif event.type == "effect_committed":
             # Any terminal status closes it, `uncertain` included: an effect a previous
-            # resume already gave up on is not orphaned a second time.
-            open_effects.pop(event.payload["effect_id"], None)
+            # resume already gave up on is not orphaned a second time. The status is kept
+            # rather than discarded, because "closed" and "closed how" are different
+            # questions and 4c has to answer the second one.
+            closed[event.payload["effect_id"]] = event.payload["status"]
+    open_effects = {eid: e for eid, e in intents.items() if eid not in closed}
     ledger = EffectLedger.reading(store)
+    announced = tuple(
+        AnnouncedCall(
+            effect_id=eid,
+            tool=event.payload["tool_name"],
+            effect_class=event.payload["effect_class"],
+            step_id=event.payload["step_id"],
+            call_id=_call_id_of(events, event),
+            status=closed.get(eid),
+        )
+        for eid, event in intents.items()
+    )
     orphans = []
     for event in open_effects.values():
         payload = event.payload
@@ -506,9 +550,18 @@ def _reconcile(run_id: str, events: Sequence[Any], store: JournalStore) -> Recon
                 ledger_state=row.state if row is not None else None,
                 arguments=args_event.payload["args"] if args_event is not None else None,
                 arguments_seq=args_event.seq if args_event is not None else None,
+                call_id=args_event.payload["call_id"] if args_event is not None else None,
             )
         )
-    return Reconciliation(run_id=run_id, orphans=tuple(orphans))
+    return Reconciliation(run_id=run_id, orphans=tuple(orphans), announced=announced)
+
+
+def _call_id_of(events: Sequence[Any], intent: Any) -> str | None:
+    """The model's id for the call an `effect_intended` was announced by, if the loop
+    emitted one. Same match as `_requesting_call`, because it is the same question."""
+    payload = intent.payload
+    request = _requesting_call(events, payload["tool_name"], payload["step_id"], intent.seq)
+    return request.payload["call_id"] if request is not None else None
 
 
 def _requesting_call(events: Sequence[Any], tool: str, step_id: str, before_seq: int) -> Any | None:
@@ -642,6 +695,7 @@ __all__ = [
     "RETRY",
     "UNCERTAIN",
     "UNKNOWN",
+    "AnnouncedCall",
     "ArchiveRef",
     "NoSuchRun",
     "Orphan",

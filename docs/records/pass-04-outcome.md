@@ -1,13 +1,16 @@
 # Pass 4 — Checkpoints, Resume, Fork — outcome
 
-Sessions completed: **4a**, **4b**. 4c (uncertain status, a human hard stop) and 4d (fork)
-are untouched, so the pass's exit criteria are **partly** met: a run can be folded back out
-of the journal, a process killed at any of the five boundaries resumes, and an interrupted
-`unsafe_write` is closed as `uncertain` and never re-run. What is missing is the half a user
-sees — `uncertain` is a status in the journal and in a CLI report, not yet an observation the
-orchestrator acts on and phrases (4c) — and fork (4d). Checkpoints are still **off in the
-shipped config**, and after 4b that is a cost decision rather than a blocker: resume folds
-the journal and reads a snapshot only when there is one.
+Sessions completed: **4a**, **4b**, **4c**. 4d (fork) is untouched, so the pass's exit
+criteria are met except for fork: a run can be folded back out of the journal, a process
+killed at any of the five boundaries resumes, an interrupted `unsafe_write` is closed as
+`uncertain` and never re-run, and as of 4c that ambiguity is an observation with an explicit
+path and a user-visible sentence. Checkpoints are still **off in the shipped config**, and
+after 4b that is a cost decision rather than a blocker: resume folds the journal and reads a
+snapshot only when there is one.
+
+The sections below were written by the session that did the work and are not rewritten by
+later ones; where 4c found something 4b's section overstates, it says so in its own
+deviations rather than editing 4b's.
 
 The pass's precondition held: 3c/3d plus the two rulings Dylan settled at the Pass 3/4
 boundary mean `UNAUDITED_TOOLS` is empty, so `pre_effect` fires on tools whose class somebody
@@ -729,3 +732,454 @@ Telegram (2c #2); `open_workers[]` has never been non-empty (4a #1); `duration_m
 one logical call both run — is **narrowed rather than closed**: resume now records that the
 first attempt's outcome is unknown and refuses to repeat it for an `unsafe_write`, but nothing
 suppresses a second attempt made inside a live turn.
+
+---
+
+## Session 4c — `uncertain` as an observation, and the words it says
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/agent/observations.py` | the vocabulary, the paths, the user's sentence, the model's block, the tool messages a resumed list carries | 632 |
+| `src/agentd/journal/resume.py` | `AnnouncedCall` + `Reconciliation.announced`; `Orphan.call_id`; the subject leads with the identifying argument | +61 −7 |
+| `src/agentd/journal/render.py` | `LEADING_ARGS` and `brief_args(..., lead=)` | +18 −2 |
+| `src/agentd/cli/app.py` | `agent journal resume` prints the prompt instead of its own report of the same calls; `--notice` | +24 −16 |
+| `tests/test_uncertain.py` | 18 tests | 435 |
+
+Suite **711 → 729 passing** (4b's record says 710; the collected count at the start of this
+session was 711). `.venv/bin/ruff check src tests scripts` clean. No tool was added, removed
+or re-classified; no journal event type, no migration, no table, no config flag, and nothing
+in this session writes to the journal or the ledger.
+
+### the two rulings 4b handed over
+
+**1. `never_dispatched` stays `uncertain`. It does not become `blocked`.** (4b open
+question 3.) The tempting argument is sound as far as it goes - `dispatched()` commits the
+row to `started` before the handler is awaited, so a row left at `intended` says this call
+was never entered. It is still the wrong status, for one concrete reason that is not a
+durability argument:
+
+> **The ledger row is keyed by idempotency key, and a re-intent resets it to `intended`.**
+> `EffectLedger.intend` does `ON CONFLICT (idempotency_key) DO UPDATE SET state =
+> excluded.state`. So a second attempt at the same logical call - 3b #5, two attempts both
+> run - overwrites a row that had reached `committed`. A crash before the second attempt's
+> dispatch leaves a row reading `intended` for a call whose first attempt already went out.
+
+`blocked` means "the work did not happen", and `paths_for(BLOCKED)` puts `retry` first,
+because re-making a call that did not happen duplicates nothing. Reading `never_dispatched`
+as `blocked` therefore authorises a silent retry of a notification that already fired. The
+evidence is kept and surfaced instead: `Orphan.attempt` is on the line, and when it is
+greater than 1 the statement carries `EARLIER_ATTEMPT` -
+`test_a_second_attempt_that_never_started_still_warns_about_the_first`.
+
+*Rejected alternative, with its reasoning:* map `never_dispatched → blocked` when
+`attempt == 1`, which closes the hole above. Rejected because it makes a user-facing claim
+about the world out of the state of a derived table written by the process that died, and
+because the win is small - a `blocked` fetch and an `uncertain` one read almost the same to
+a person; only the machine treats them differently, and that is the direction where being
+wrong is expensive.
+
+**2. A resumed turn's message list does carry a tool message for an orphaned call.** (4b
+open question 2.) `closing_messages(plan)` returns one `ClosingMessage` per interrupted call
+the list is still waiting on. The journal is unchanged - resume still writes no
+`tool_failed`, because inventing a terminal tool event would put a claim in the record that
+the loop never made. The message list is a reconstruction rather than a record, and the
+alternative is a model handed an assistant message whose tool call nothing answers: the
+provider errors, or the model invents the result. The message says the one true thing
+("interrupted; whether it completed is not known; it has not been re-run"), it is flagged
+`synthetic=True`, and its text begins with `RUNTIME_PREFIX` so nothing downstream can read
+it as something a tool returned - the same rule 4b applied when it refused to hand a
+200-character preview to a model as a message body.
+
+*Rejected alternative:* leave the call dangling and let Pass 5 decide. Rejected because the
+dangling call is not visible as a bug - it is visible as a model that describes a fetch it
+never saw.
+
+### what deviated from the plan, and why
+
+**1. There is a third status, `result_lost`, and a test found it rather than a design
+meeting.** The pass file names two words. The journal holds a third shape: `effect_*` events
+are synchronous and the loop's `tool_*` events are buffered, so a call whose effect
+committed milliseconds before the kill leaves *exactly* the same unanswered tool call as an
+orphan does. It happened; only its result went. Calling that `uncertain` asks the user a
+question with a known answer; calling it `blocked` invites the duplicate this pass exists to
+prevent. `paths_for(RESULT_LOST)` never contains `retry` for an `unsafe_write`.
+
+**2. `blocked` got a producer, which the pass did not ask for.** "Distinct from `blocked`"
+is hard to hold if nothing is ever blocked. A tool call the message list is waiting on with
+**no `effect_intended` at all** is the one shape where "nothing outside was changed by it"
+is evidence rather than hope: the intent is synchronous and precedes the handler, and a
+`read` gets no effect ever and changes nothing outside by definition of its class. That is
+the crash that lands while an approval is still on screen. It is also the only producer: a
+*denied* call never reaches intent and already has a `tool_failed`, so denials are not
+re-reported here.
+
+**3. The binding "show the URL" requirement was not actually met by `brief_args`, and 4b's
+record slightly overstates it.** 4b demonstrated one block naming every URL - with
+single-argument fetches. `brief_args` renders arguments in call order and hard-truncates the
+joined line at `ARG_LINE_CHARS = 120`, so a call with two long arguments ahead of the URL
+drops it off the end, silently, in the one prompt Dylan ruled must contain it. `brief_args`
+gained an optional `lead=`, `LEADING_ARGS` names the arguments that say *which* thing a call
+was about, and both `Orphan.subject` and this module pass it. Default behaviour is
+unchanged, so `agent journal show` and the Telegram renderer render what they rendered
+before. Caught by
+`test_the_url_survives_a_call_whose_other_arguments_are_long`, which needs two long
+arguments to bite - the first version of it passed under the mutation.
+
+**4. Observations are read off the rebuilt *message list*, not off the ledger.** A dangling
+call matters because the list handed back wants one tool message per tool call, so the
+question is about that list and not about the file. That needed two additions to 4b's
+module: `Orphan.call_id` (from the same `tool_requested` match 4b already did) and
+`Reconciliation.announced` - every effect the run announced *and how it ended*, not only the
+open ones. Without the second, a call whose effect committed or failed reads as "never
+announced", which is the one sentence that is wrong about both.
+
+**5. The CLI's own report of the same calls is gone, replaced by `prompt()`.** 4b printed a
+yellow group block and a dim retryable line and noted that 4c owned the wording; keeping
+both would be the two-sources drift it warned about. The counts, the checkpoint line and the
+preview line are still the CLI's.
+
+**6. The prompt is printed with `markup=False`.** The arguments are in that text and a URL
+or a filename may contain a square bracket. Rich would read `[bold red]` in a URL as a style
+tag: at best characters vanish, at worst a fetched value forges a colour the runtime never
+chose. Hand-checked with a URL containing literal `[bold red]`; it renders verbatim.
+
+**7. Nothing here is journaled, and no event type was added.** Which path was taken for an
+uncertain call is not recorded anywhere, because the thing that takes a path is a turn and
+there is no resumed turn until Pass 5. Recording a resolution now would mean a second
+terminal event on an effect 4b already closed.
+
+**8. `notice()` and `closing_messages()` have no runtime producer.** Same shape as 4a's
+`handoff` trigger: defined, tested, reachable by hand (`agent journal resume --notice`),
+produced by nobody until a resumed turn exists.
+
+### what is now true about the code that was not before
+
+- **`uncertain` and `blocked` are different objects, and the difference has teeth.** `retry`
+  is in a `blocked` call's paths and is never in an uncertain `unsafe_write`'s. Both are
+  computed by one total function that raises on a status it has not been taught.
+- **Every interrupted call produces exactly one observation and every observation carries at
+  least one path.** The silent drop and the pathless status are the two failure modes, and
+  both are asserted rather than argued.
+- **A second resume no longer loses the call the first one reported.** An effect a previous
+  resume closed as `uncertain` is not an orphan any more, and its tool call is still
+  unanswered; it is now observed as `uncertain / closed_uncertain`. Before this session that
+  call would have read as "never announced" - i.e. as `blocked`.
+- **The identifying argument survives truncation**, in both the orphan path and the
+  never-announced path.
+- **A resumed message list can be made complete** without writing anything to the journal.
+- **Nothing about agent behaviour changed.** No prompt in `agent/prompts` was touched, no
+  tool was added, and the only reachable surface is two CLI paths.
+
+**Mutation-checked rather than trusted for being green.** Eight mutations, all caught after
+the sixth was fixed:
+
+- `committed` reads as `blocked` → 2 failures.
+- an uncertain `unsafe_write` may retry → 7 failures.
+- a previous resume's closure reads as `blocked` → caught.
+- `verify` offered for every tool → caught by the `reminder_set` test.
+- the orphan subject rendered in call order → caught.
+- **the never-announced subject rendered in call order → nothing failed**, because the test's
+  second call had only one long argument ahead of the URL and the line still fitted in 120
+  characters. Rewritten with two; it now fails under the mutation. The truncation, not the
+  ordering, is what drops the URL.
+- no closing message for a blocked call → caught.
+- `never_dispatched` loses the earlier-attempt warning → caught.
+
+**Live-data check (the house rule: read the real rows).** A copy of
+`~/.local/share/agent/journal.db` - copied without its 185 KB `-wal`, so a partial view, and
+the live file was not opened - was planned and observed read-only. Six runs; the four
+`kill-*` runs session 2c left behind are genuinely SIGKILLed processes, and **`kill-2` holds
+a real dangling call**: `tool_search(query=calendar)`, a `read`, which is observed as
+`blocked` and rendered as one informational line with no question attached. That is the
+Pass 3/4 ruling holding on real data - the runtime's read tools never become something the
+user is asked to decide. `agent journal resume kill-2` was then run end to end against a
+scratch `AGENT_PATHS__DATA_DIR` holding that copy.
+
+### schemas exactly as implemented
+
+```
+Observation
+  status        str ∈ {uncertain, blocked, result_lost}
+  tool          str
+  subject       str | None    "web_fetch(url=…)"; None = the journal holds no arguments
+  evidence      str ∈ {may_have_run, never_dispatched, unknown,      (4b's, for an orphan)
+                       never_announced, committed, effect_failed, closed_uncertain}
+  effect_class  str | None    None = no effect was ever announced, so the run does not say
+  seq           int           where in the journal this observation is about
+  paths         tuple[str, ...]   never empty; strongest first
+  effect_id / call_id / step_id   str | None
+  attempt       int = 1
+  .path         paths[0]          the runtime's recommendation, not its decision
+  .may_retry    RETRY in paths
+  .statement    one clause about how far the call got
+  .name         subject, or "<tool> (arguments not recorded)"
+
+ObservationGroup(tool, status, observations)  .paths  .readback
+
+ClosingMessage(tool_call_id, tool, status, content, step_id, synthetic=True)
+
+# added to journal/resume.py
+AnnouncedCall(effect_id, tool, effect_class, step_id, call_id, status|None)
+Reconciliation.announced: tuple[AnnouncedCall, ...]   status None = still open
+Orphan.call_id: str | None
+```
+
+```python
+STATUSES = ("uncertain", "blocked", "result_lost")
+PATHS    = ("verify", "ask", "proceed_without", "retry")   # retry is resume.RETRY, one word
+
+paths_for(status, *, tool, effect_class) -> tuple[str, ...]
+  blocked                          -> (retry, proceed_without)
+  uncertain, unsafe_write          -> (verify if READBACK else -) + (ask, proceed_without)
+  uncertain, idempotent_write      -> (retry, proceed_without)
+  result_lost, unsafe_write        -> (verify if READBACK else -) + (proceed_without,)
+  result_lost, idempotent_write    -> (retry, proceed_without)
+  anything else                    -> raises ObservationError
+
+SETTLED = {None: (blocked, never_announced), "committed": (result_lost, committed),
+           "failed": (blocked, effect_failed), "uncertain": (uncertain, closed_uncertain)}
+
+READBACK = {"fs_write": …fs_read…, "memory_remember": …memory_search…,
+            "open_loop_add": …open_loops_list…}
+```
+
+`READBACK`'s absences are a finding, not an oversight: **no registered tool lists watchers**,
+so `reminder_set` and `watcher_add` cannot be verified by reading back and their only honest
+path is to ask. `web_fetch` leaves no trace to read (fetching again is a new fetch),
+`notify_user`'s read-back is the user's own eyes, and `shell_exec` and `delegate` do
+arbitrary things.
+
+API and CLI:
+
+```python
+observations(plan) -> tuple[Observation, ...]      # one per interrupted call, journal order
+groups(found) -> tuple[ObservationGroup, ...]      # one per (status, tool)
+prompt(plan) -> str                                # the user's sentence; "" when nothing broke
+notice(plan) -> str                                # the block a resumed orchestrator is given
+closing_messages(plan) -> tuple[ClosingMessage, ...]
+paths_for(status, *, tool, effect_class) -> tuple[str, ...]
+```
+
+```
+agent journal resume <run_id> [--apply] [--reason TEXT] [--notice]
+```
+
+### the proposed user-facing wording — **unreviewed**
+
+Written under the autonomous standing policy (`docs/plans/orchestrator-prompt-auto.md`:
+"user-facing wording (4c): propose it in the outcome record. I review at pass end"), which
+replaces this session's opening instruction to show the wording before finalizing it.
+**Dylan has not seen any of this.** It is in the code and under test; changing it is a string
+edit and a test edit.
+
+The pass file's worked example is an orphaned *email send*. Session 3d established that **no
+send tool exists in this registry** - the Gmail scope is read-only, `gmail send` and
+`calendar create` are not registered - so the wording below is written against the
+`unsafe_write` tools that do exist. A hypothetical email version is at the end, marked as
+such. No send tool was added.
+
+Rendered from a scripted run holding seven interrupted calls (two fetches, an `fs_write`, a
+`goal_upsert`, a `notify_user` whose effect committed, a `reminder_set`, and an `fs_read`
+that never reached intent):
+
+```
+Picking this run back up. Some of it was interrupted, and I have not re-run anything on my
+own - here is what I know and what I need from you.
+
+I was interrupted partway through 2 web_fetch calls and I cannot tell whether they happened:
+
+  - web_fetch(url=https://leases.example.com/renew?token=abc123)
+      started, and never reported back - it may have completed
+  - web_fetch(url=https://example.com/b)
+      recorded, and this attempt was never started
+
+Nothing I can call will tell me whether they happened, so this one is yours: say "leave it"
+and I carry on without them and say so in what I write, or tell me to run them again if you
+know they did not happen.
+
+I was interrupted partway through 1 fs_write call and I cannot tell whether it happened:
+
+  - fs_write(path=/home/dylan/notes/lease.md, content=xxxxxxxxxxxxxxxxxxxxxxxxxxxx…)
+      started, and never reported back - it may have completed
+
+Say "check" and I will read the file back with fs_read and see whether it holds the new
+content; "leave it" and I carry on without it and say so in what I write; or tell me to run
+it again if you know it did not happen.
+
+1 notify_user call went through and I no longer have what it returned - the record that it
+happened survived the restart and the result did not. I am not running it again:
+
+  - notify_user(title=Lease renewal, body=submitted)
+
+I was interrupted partway through 1 reminder_set call and I cannot tell whether it happened:
+
+  - reminder_set(text=chase the landlord, at=18:00)
+      started, and never reported back - it may have completed
+
+Nothing I can call will tell me whether it happened, so this one is yours: say "leave it"
+and I carry on without it and say so in what I write, or tell me to run it again if you know
+it did not happen.
+
+1 fs_read call did not get far enough to change anything: the run ended before the runtime
+recorded an effect for it. Running it again duplicates nothing.
+
+  - fs_read(path=/home/dylan/notes/lease.md)
+
+(goal_upsert(title=renew the lease) was interrupted too. Running it again changes nothing,
+so there is nothing for you to decide.)
+```
+
+The three evidence clauses, in full, and the fourth that is appended:
+
+```
+started, and never reported back - it may have completed
+recorded, and this attempt was never started
+announced, with no record of whether it was started
+interrupted by an earlier restart, and never established either way
+completed - the effect is recorded, and only its result went with the process
+reported a failure, and the report went with the process
+never started: the process exited before the call was announced
+  (+) - an earlier attempt at the same call may still have run
+```
+
+The model-facing block, in full:
+
+```
+Calls interrupted by the restart you are picking this run up from. Read this before you do
+anything else.
+
+`uncertain` is not `blocked`. Blocked means the work did not happen. Uncertain means nobody
+knows whether it happened, and the run cannot find out by itself.
+
+2 uncertain:
+  - web_fetch(url=https://leases.example.com/renew?token=abc123)
+      started, and never reported back - it may have completed
+      you may: ask the user, naming the call and its arguments; proceed without it, and say
+      in your answer that you did
+  - fs_write(path=/home/dylan/notes/lease.md, content=xxxx…)
+      started, and never reported back - it may have completed
+      you may: verify - read the file back with fs_read and see whether it holds the new
+      content; ask the user, naming the call and its arguments; proceed without it, and say
+      in your answer that you did
+
+1 happened, with the result lost rather than the call. Do not run these again; say what they
+did if it matters:
+  - notify_user(title=Lease renewal, body=submitted)
+      you may: proceed without it, and say in your answer that you did
+
+1 blocked - none of these changed anything outside, and running one again duplicates
+nothing:
+  - fs_read(path=/home/dylan/notes/lease.md)
+
+You must not re-run an uncertain call, and you must not pass over one without saying so.
+Take one of the paths listed for each of them. If you proceed without a call, the answer you
+give has to say that you did.
+```
+
+The tool messages a resumed list carries, in full:
+
+```
+[runtime, on resume - not output from the tool] This call was interrupted by the process
+exiting. Whether it completed is not known, and it has not been re-run. Do not re-run it
+yourself.
+
+[runtime, on resume - not output from the tool] This call went through - the runtime holds
+the record that it did - and what it returned was lost when the process exited. Do not run
+it again.
+
+[runtime, on resume - not output from the tool] This call was interrupted by the process
+exiting. The runtime never recorded it as started, so it changed nothing outside and no
+result came back. Making the call again duplicates nothing.
+```
+
+**Variants considered and rejected.**
+
+1. `Confirm this fetch? [y/N]` — the shape Dylan's ruling exists to forbid. No URL, no
+   evidence, and a default. Rejected: a prompt the user cannot act on trains blind
+   confirmation.
+2. `Some calls may not have completed. Retry? [y/N]` — one question for a mixed batch, and
+   it pre-authorises re-running a call that may already have happened. Rejected on both
+   counts.
+3. One block per *call* rather than per tool. Rejected: Dylan's second ruling, and four
+   questions are four chances to confirm out of habit.
+4. Repeating "I have not re-run them and I will not re-run them on my own" under every
+   heading. This was the first version, and it is in this session's history. Rejected after
+   reading it rendered: four identical paragraphs is a wall, and a wall is skipped. The rule
+   is now stated once at the top.
+5. Offering `retry` as a listed option for an uncertain call ("say `redo` and I will run it
+   again"). Rejected: offering to repeat an action that may already have happened is the
+   thing the pass forbids, phrased as a convenience. The user can still ask for it in their
+   own words, and the wording says so - "tell me to run it again if you know it did not
+   happen" - which puts the claim of knowledge on the person who has it.
+6. `status: uncertain (2)` with the calls behind a `--verbose`. Rejected: the arguments are
+   the whole content of the message.
+7. Saying nothing at all about `blocked` and `result_lost` calls, on the grounds that
+   neither needs a decision. Rejected: "I did not do X" and "I did X and lost what it said"
+   are both things the person asking about this run needs; they are stated, not asked.
+
+**The email example, hypothetical.** If a send tool existed and were classed `unsafe_write`,
+the same code would render:
+
+```
+I was interrupted partway through 1 gmail_send call and I cannot tell whether it happened:
+
+  - gmail_send(to=landlord@example.com, subject=Lease renewal)
+      started, and never reported back - it may have completed
+
+Say "check" and I will look in your sent mail; "leave it" and I carry on without it and say
+so in what I write; or tell me to run it again if you know it did not happen.
+```
+
+The "check" clause is the `READBACK` entry such a tool would need; without one it would get
+the "nothing I can call will tell me" wording. No such tool exists and none was added.
+
+### deferred items, and where they went
+
+- **Continuing the run — Pass 5.** `notice()` and `closing_messages()` are the two inputs a
+  resumed turn needs and nothing consumes them yet. Wiring them into an `AgentLoop` needs the
+  handoff path.
+- **Recording which path was taken — whoever continues.** No event, no column. The effect is
+  already terminal from 4b, so this would be a new event type on a later pass, not a second
+  closure.
+- **Verification as an action — not built.** `verify` is a path with a sentence naming the
+  tool that would answer it; nothing calls that tool. The only thing that can call a tool is
+  a turn.
+- **A watcher-listing tool — not this session's.** Its absence is why `reminder_set` and
+  `watcher_add` can only ask. Filed here rather than against Pass 8, which is tool-surface
+  reduction and would be the wrong place to add one.
+- **A sweep that notices a run needs resuming (4b #4).** Still nobody's.
+- **No CLI test.** Unchanged: the repo has no CLI harness, so `--notice` and the new prompt
+  path were exercised by hand against a scratch data dir and a copy of the live journal.
+
+### open questions for later passes
+
+**1. The wording is unreviewed.** Every string above is proposed under the autonomous
+standing policy. It is also the only part of this session that a later pass will want to
+change without changing behaviour, so it is deliberately all in one module.
+
+**2. `result_lost` is a third word in a two-word vocabulary.** The pass file defines
+`blocked` and `uncertain`; this session found a shape that is honestly neither and named it.
+If that name is wrong it should be renamed before Pass 5 gives it a consumer.
+
+**3. A journal read without its `-wal` can turn an uncertain call into a `blocked` one.**
+`blocked` rests on the absence of a synchronous `effect_intended`, and a copy taken without
+the WAL is missing recent events. Every live-data check in this pass reads such a copy. The
+inference is sound about the file it is given; it is only as sound as the file.
+
+**4. `blocked` for a `read` is a claim about effect, not about execution.** An interrupted
+`read` may have run and lost its buffered `tool_finished`. The wording says "did not get far
+enough to change anything", which is true either way, but the status word is stronger than
+the evidence for that one class.
+
+**5. Observations are derived on every read and stored nowhere.** Two resumes of the same run
+produce them twice, and nothing can tell whether a human already answered. Pass 5 is the
+first place that could hold an answer.
+
+**6. Still open, untouched by 4c:** effect events carry no `worker_id` (3b #4), so a group
+could mix a worker's calls with the orchestrator's once Pass 6 makes that reachable (4b #6);
+mid-turn assistant text is not held in full anywhere (4b #1); nothing notices that a run needs
+resuming (4b #4); a run can be resumed repeatedly (4b #5); `open_workers[]` has never been
+non-empty (4a #1); power-loss durability is reasoned rather than measured (2a #2); token
+accounting is still broken upstream.

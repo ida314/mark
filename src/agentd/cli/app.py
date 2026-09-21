@@ -1421,6 +1421,9 @@ def journal_resume(
         False, "--apply", help="Reconcile and announce. Without it, this only reports."
     ),
     reason: str = typer.Option("manual", help="Why the run is being picked up. Journaled."),
+    notice: bool = typer.Option(
+        False, "--notice", help="Also print the block a resumed orchestrator would be given."
+    ),
 ) -> None:
     """Fold a run back out of the journal and say what the crash left open.
 
@@ -1428,9 +1431,12 @@ def journal_resume(
     rows and appends to the run, and the person asking "what happened to that run" has not
     yet agreed to either.
 
-    What is printed here is a report, not the prompt: session 4c owns the wording a user is
-    asked to act on, and phrasing the question in two places is how the two drift apart.
+    The counts and the checkpoint line are a report. The part a person is asked to act on
+    comes from `agent/observations.py`, which is the one place that sentence is written:
+    session 4b left it unphrased precisely so the CLI and the resumed turn could not drift
+    into asking two different questions about the same call.
     """
+    from ..agent import observations as obs
     from ..journal import resume as resume_mod
     from ..journal.writer import JournalWriter
 
@@ -1462,20 +1468,22 @@ def journal_resume(
             f"[dim]{missing} of {len(plan.rehydration.messages)} messages are held as "
             f"previews; the bodies are in the archive[/dim]"
         )
-    for group in plan.reconciliation.groups:
-        console.print(
-            f"[yellow]{len(group.orphans)} interrupted {group.tool} "
-            f"call{'' if len(group.orphans) == 1 else 's'}, never retried automatically:"
-            "[/yellow]"
-        )
-        for orphan in group.orphans:
-            # The arguments, every time there are any: a line the reader cannot act on is
-            # worse than no line, because it teaches them that these lines do not repay
-            # reading. When there are none, it says that rather than showing empty brackets.
-            what = orphan.subject or f"{orphan.tool} (arguments not recorded)"
-            console.print(f"  · {what}  [dim]{orphan.evidence}[/dim]")
-    for orphan in plan.reconciliation.retryable:
-        console.print(f"[dim]  · {orphan.subject or orphan.tool}: safe to re-run[/dim]")
+    question = obs.prompt(plan)
+    if question:
+        # `markup=False` because the arguments are in this text and a fetched URL or a
+        # filename is free to contain a square bracket. Rich would read that as a style
+        # tag: at best the line loses characters, at worst a value forges a colour the
+        # runtime never chose. The URL has to arrive exactly as it was called.
+        console.print()
+        console.print(question, markup=False, highlight=False)
+        console.print()
+    if notice:
+        # The same observations, addressed to the model instead of the person. Reachable by
+        # hand for the same reason `agent journal mark` is: nothing produces a resumed turn
+        # until Pass 5, and a block nobody can read is a block nobody checks.
+        block = obs.notice(plan)
+        console.print(block or "[dim]nothing interrupted; the notice would be empty[/dim]",
+                      markup=not block, highlight=False)
     if applied:
         console.print(f"resumed at seq {plan.from_seq}; {len(plan.reconciliation.orphans)} closed")
     elif plan.needs_resume:

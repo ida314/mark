@@ -26,7 +26,17 @@ ARG_VALUE_CHARS = 60
 ARG_LINE_CHARS = 120
 
 
-def brief_args(args: dict[str, Any]) -> str:
+# The argument names that say *which* thing a call was about, in the order they win. A
+# renderer that hands back a 120-character line has to decide what falls off the end of it,
+# and "the URL" is never the right answer: session 4c found a `fs_write` whose 400-character
+# `content` pushed the path off the line, and the same shape would drop the URL from the one
+# prompt Dylan ruled must contain it (pass-03 outcome, the Pass 3/4 boundary).
+LEADING_ARGS: tuple[str, ...] = (
+    "url", "path", "name", "title", "text", "query", "spec", "to", "subject", "statement",
+)
+
+
+def brief_args(args: dict[str, Any], *, lead: tuple[str, ...] = ()) -> str:
     """A tool call's arguments, short enough to sit on one line of a status line.
 
     `flat` is not cosmetic. The model's arguments are routinely built out of something a
@@ -36,9 +46,14 @@ def brief_args(args: dict[str, Any]) -> str:
 
     `reason` is skipped: the executor requires it on every write, and it is a sentence
     written for the audit row rather than a field worth reading twice on a phone.
+
+    `lead` names arguments to render first (`LEADING_ARGS` is the general answer). The
+    default is call order, so every existing caller renders exactly what it rendered before.
     """
+    ordered = sorted(args, key=lambda k: (lead.index(k) if k in lead else len(lead), 0))
     parts = []
-    for key, value in args.items():
+    for key in ordered:
+        value = args[key]
         if key == "reason":
             continue
         text = flat(str(value), ARG_VALUE_CHARS + 1)
@@ -153,6 +168,7 @@ def render_event(event: Event) -> Line | None:
 __all__ = [
     "ARG_LINE_CHARS",
     "ARG_VALUE_CHARS",
+    "LEADING_ARGS",
     "RENDERED_TYPES",
     "Line",
     "brief_args",

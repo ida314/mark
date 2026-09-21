@@ -20,7 +20,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 3d | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as a5ba017. Last 6 ruled: fs_write/shell_exec/web_fetch unsafe_write, gmail_search/gmail_message/web_search read. UNAUDITED 7 → 1. 5 deviations, no Must not crossed. No live external call was made. **Ran autonomously in place of its supervised hard stop — needs Dylan's review before Pass 4.** |
 | 4a | complete | 2026-09-20 | pass-04-outcome.md | checkpoint record + schema v3 + 5 triggers (3 wired live), behind `[checkpoints] enabled=false`. 682 tests green. 8 deviations, no Must not crossed. ~1.3 ms / 573 B per checkpoint, ~90% of it fsync. |
 | 4b | complete | 2026-09-20 | pass-04-outcome.md | resume.py: fold → rehydrate → reconcile → announce. `agent journal resume` reports by default. 711 tests green. 11 deviations, no Must not crossed. Two decisions handed to 4c. |
-| 4c | pending | — | — | **hard stop — human runs this** (user-facing wording) |
+| 4c | complete | 2026-09-20 | pass-04-outcome.md | **hard stop — human runs this** (user-facing wording). Ran autonomously under the standing policy in place of that stop: the wording is proposed in the record with 7 rejected variants and **still needs Dylan's review at the pass boundary**. 729 tests green. 8 deviations, no Must not crossed. Ruled both of 4b's handed-up decisions. |
 | 4d | pending | — | — | |
 | 5a | pending | — | — | |
 | 5b | pending | — | — | |
@@ -136,3 +136,14 @@ recorded ruling and reconciliation will not surface `time_now`, `fs_list` or
   journal holds 200-char previews and the archive has no mid-turn assistant prose, so a
   function returning previews as message content would be a laundering channel. Tool-call
   arguments are exact; the rest is a spine. Pass 5 owns the gap.
+- **RESOLVED by 4c (4b's two handed-up decisions):** `never_dispatched` stays `uncertain`,
+  not `blocked` — `intend()` resets the shared ledger row to `intended` on a second
+  attempt, so `blocked` (which permits retry) would authorise re-sending a call that
+  already went out. And a resumed message list does carry one synthetic, runtime-labelled
+  tool message per interrupted call, so no `tool_started` is left without a partner.
+- **4c → Dylan, at the pass boundary:** the user-facing wording is proposed and unreviewed,
+  verbatim in `pass-04-outcome.md` with seven rejected variants. It is the one thing in
+  Pass 4 the standing policy deferred rather than decided.
+- **4c → Pass 5:** `notice()` and `closing_messages()` have no runtime consumer yet
+  (reachable only via `agent journal resume --notice`), and which path was taken for an
+  uncertain call is journaled nowhere.
