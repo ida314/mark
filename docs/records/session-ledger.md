@@ -18,7 +18,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 3b | complete | 2026-09-20 | pass-03-outcome.md | committed as 0eda557. effect table (schema v2) + idempotency keys + announce-before-dispatch in the executor. 7 deviations, no Must not crossed. |
 | 3c | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as 100e0ff. 19 of 26 ruled (11 read, 2 idempotent_write, 6 unsafe_write); UNAUDITED 26 → 7. 5 deviations, no Must not crossed. **Ran autonomously under the standing policy in place of its supervised hard stop — the table still needs Dylan's review before Pass 4.** |
 | 3d | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as a5ba017. Last 6 ruled: fs_write/shell_exec/web_fetch unsafe_write, gmail_search/gmail_message/web_search read. UNAUDITED 7 → 1. 5 deviations, no Must not crossed. No live external call was made. **Ran autonomously in place of its supervised hard stop — needs Dylan's review before Pass 4.** |
-| 4a | pending | — | — | |
+| 4a | complete | 2026-09-20 | pass-04-outcome.md | checkpoint record + schema v3 + 5 triggers (3 wired live), behind `[checkpoints] enabled=false`. 682 tests green. 8 deviations, no Must not crossed. ~1.3 ms / 573 B per checkpoint, ~90% of it fsync. |
 | 4b | pending | — | — | |
 | 4c | pending | — | — | **hard stop — human runs this** (user-facing wording) |
 | 4d | pending | — | — | |
@@ -119,3 +119,9 @@ The two owed rulings were put to Dylan at the pass boundary and settled before 4
 dispatched, so the 3a → Pass 4 ordering constraint is satisfied: every tool carries a
 recorded ruling and reconciliation will not surface `time_now`, `fs_list` or
 `memory_search` as uncertain effects. **Pass 4 is clear to start.**
+
+- **4a → 4b, two handoffs:** no live turn has written a checkpoint (the flag is off), so run
+  one with `[checkpoints] enabled = true` and count the columns before building resume on
+  it. And an orphaned effect's *arguments* are not in the ledger — `result_ref` is NULL
+  until a terminal state — so 4c's binding requirement that a `web_fetch` prompt show its
+  URL must read the `tool_requested` event, not the ledger.

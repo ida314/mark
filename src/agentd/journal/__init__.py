@@ -6,10 +6,24 @@ the event vocabulary (`events.py`) and the per-run handle the runtime writes thr
 (`render.py`), and deleted the in-process event bus that used to carry the same facts to the
 CLI and to Telegram.
 
-Nothing reads the journal for *recovery* yet - no fold, no checkpoint, no resume. That is
-Pass 4.
+Session 4a added `checkpoints.py`: a mechanical snapshot of where a run had got to, written
+at five boundaries when `[checkpoints] enabled` is on. Nothing *reads* it for recovery yet -
+there is still no fold and no resume. That is session 4b.
 """
 
+from .checkpoints import (
+    TRIGGERS,
+    Checkpoint,
+    Checkpointer,
+    CheckpointError,
+    EffectsCursor,
+    MessagesRef,
+    MidWorkerCheckpoint,
+    NoOrchestrator,
+    WorkerRef,
+    checkpoint_at,
+    get_checkpointer,
+)
 from .events import (
     CHECKPOINT_TRIGGERS,
     EFFECT_CLASSES,
@@ -57,6 +71,9 @@ from .writer import SYNC_PREFIXES, SYNC_TYPES, JournalWriter, is_synchronous
 
 __all__ = [
     "CHECKPOINT_TRIGGERS",
+    "Checkpoint",
+    "CheckpointError",
+    "Checkpointer",
     "EFFECT_CLASSES",
     "EFFECT_STATES",
     "EFFECT_STATUSES",
@@ -67,6 +84,7 @@ __all__ = [
     "EffectLedger",
     "EffectRow",
     "EffectStateError",
+    "EffectsCursor",
     "Event",
     "EventSchemaError",
     "Field",
@@ -76,6 +94,9 @@ __all__ = [
     "JournalWriter",
     "Line",
     "MIGRATIONS",
+    "MessagesRef",
+    "MidWorkerCheckpoint",
+    "NoOrchestrator",
     "POLL_INTERVAL_S",
     "PendingEvent",
     "PruneResult",
@@ -89,10 +110,14 @@ __all__ = [
     "SYNC_TYPES",
     "SchemaTooNew",
     "SeqConflict",
+    "TRIGGERS",
     "UnknownEventType",
+    "WorkerRef",
     "brief_args",
+    "checkpoint_at",
     "close_writer",
     "default_path",
+    "get_checkpointer",
     "get_ledger",
     "get_writer",
     "is_synchronous",

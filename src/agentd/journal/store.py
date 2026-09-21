@@ -96,13 +96,54 @@ CREATE INDEX IF NOT EXISTS effect_run ON effect (run_id, created_at);
 CREATE INDEX IF NOT EXISTS effect_state ON effect (state);
 """
 
+# Session 4a. The checkpoint snapshot, in the same file as the journal it accelerates and
+# the ledger it reconciles against - one file to back up, one connection, one lock, and no
+# ordering question between two databases describing one run.
+#
+# `checkpoints.py` owns what the columns mean. Two things the storage enforces rather than
+# trusting the writer:
+#
+# - `event_seq > covers_seq`. A checkpoint is announced by a `checkpoint_written` event
+#   which is journaled *after* the position the snapshot accounts for, so the snapshot may
+#   lag the journal and can never claim a position the journal has not reached. The
+#   governing invariant in one CHECK.
+# - The four slots Passes 5-7 fill are columns now, and the two that are lists default to
+#   an empty JSON array rather than to NULL: "no worker results" and "this pass did not
+#   record worker results" are the same statement today and must not become
+#   indistinguishable from a missing value later. The two that are objects - the handoff
+#   and the memory watermark - are nullable, because "there is no handoff behind this
+#   checkpoint" is a real and permanent state, not a placeholder.
+SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS checkpoint (
+  checkpoint_id      text PRIMARY KEY,
+  run_id             text NOT NULL,
+  covers_seq         integer NOT NULL CHECK (covers_seq > 0),
+  event_seq          integer NOT NULL CHECK (event_seq > 0),
+  created_at         text NOT NULL,
+  trigger            text NOT NULL
+                     CHECK (trigger IN ('turn_end','worker_finished','pre_effect',
+                                        'handoff','manual')),
+  orchestrator_id    text NOT NULL,
+  messages_ref       text NOT NULL CHECK (json_valid(messages_ref)),
+  open_workers       text NOT NULL CHECK (json_valid(open_workers)),
+  effects_cursor     text NOT NULL CHECK (json_valid(effects_cursor)),
+  handoff_object     text CHECK (handoff_object IS NULL OR json_valid(handoff_object)),
+  worker_results     text NOT NULL CHECK (json_valid(worker_results)),
+  pending_promotions text NOT NULL CHECK (json_valid(pending_promotions)),
+  memory_watermark   text CHECK (memory_watermark IS NULL OR json_valid(memory_watermark)),
+  CHECK (event_seq > covers_seq)
+);
+
+CREATE INDEX IF NOT EXISTS checkpoint_run ON checkpoint (run_id, event_seq);
+"""
+
 # The upgrade ladder, applied in order from whatever version the file is at. 2a's open
 # question 6 was that `_migrate` could not migrate: it ran one `IF NOT EXISTS` script and
 # bumped `user_version` regardless, so a v2 change to an existing file would have been a
 # silent no-op with the version moved anyway. A step is now a numbered entry here, and the
 # version is only bumped for steps that actually ran. Steps stay additive and are never
 # edited once shipped - the same rule the Postgres migrations follow, for the same reason.
-MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2}
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 
@@ -490,6 +531,10 @@ class JournalStore:
                     # is entirely present or entirely gone; an effect row whose journal is
                     # gone is a claim with nothing behind it.
                     conn.execute("DELETE FROM effect WHERE run_id = ?", (run_id,))
+                    # Same rule for the snapshot: a checkpoint whose journal is gone is an
+                    # acceleration structure over nothing, and it would be the one thing a
+                    # resume trusted.
+                    conn.execute("DELETE FROM checkpoint WHERE run_id = ?", (run_id,))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")

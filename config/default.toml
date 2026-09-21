@@ -125,6 +125,14 @@ buffer_max_age_s = 1.0
 retention = "keep_everything"    # the other mode is "max_age_days"; pruning drops whole runs
 # retention_max_age_days = 90
 
+# Checkpoints: a snapshot of where a run had got to, written at five boundaries
+# (turn_end, worker_finished, pre_effect, handoff, manual) so a killed process can be
+# resumed. Unlike [journal] this one has a switch, because a checkpoint is an acceleration
+# structure over the journal rather than a second source of truth: with it off, resume is
+# slower and no answer changes. Off until the resume path that reads them lands.
+[checkpoints]
+enabled = false
+
 [mcp]
 http_port = 8770
 

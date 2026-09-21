@@ -1364,6 +1364,56 @@ def journal_follow(
         console.print(f"[dim]last event id: {tail.last_id}[/dim]")
 
 
+@journal_app.command("checkpoints")
+def journal_checkpoints(run_id: str) -> None:
+    """The snapshots taken of one run, oldest first."""
+    from ..journal.checkpoints import Checkpointer
+    from ..journal.writer import JournalWriter
+
+    cfg = get_config()
+    writer = JournalWriter.open(cfg)
+    try:
+        rows = Checkpointer(writer, cfg=cfg).entries(run_id)
+    finally:
+        writer.close()
+    if not rows:
+        console.print(f"[yellow]no checkpoints for run {run_id}[/yellow]")
+        if not cfg.checkpoints.enabled:
+            console.print("[dim][checkpoints] enabled is false, so none are written[/dim]")
+        raise typer.Exit(1)
+    table = Table("checkpoint", "trigger", "covers seq", "event seq", "open effects", "at")
+    for cp in rows:
+        table.add_row(
+            cp.checkpoint_id, cp.trigger, str(cp.covers_seq), str(cp.event_seq),
+            str(len(cp.effects_cursor.open_keys)), cp.created_at[:19],
+        )
+    console.print(table)
+
+
+@journal_app.command("mark")
+def journal_mark(run_id: str) -> None:
+    """Write a checkpoint of a run now: the `manual` boundary, asked for by a person."""
+    from ..journal.checkpoints import Checkpointer, CheckpointError, enabled
+    from ..journal.writer import JournalWriter
+
+    cfg = get_config()
+    if not enabled(cfg):
+        console.print("[yellow][checkpoints] enabled is false; nothing was written[/yellow]")
+        raise typer.Exit(1)
+    writer = JournalWriter.open(cfg)
+    try:
+        cp = Checkpointer(writer, cfg=cfg).write(run_id, trigger="manual")
+    except CheckpointError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        writer.close()
+    console.print(
+        f"checkpoint [bold]{cp.checkpoint_id}[/bold] covers run {cp.run_id} "
+        f"through seq {cp.covers_seq}"
+    )
+
+
 def _journal_line(event) -> str:
     """One event as one line. The id first, because it is what a reconnect needs."""
     from ..journal.render import render_event

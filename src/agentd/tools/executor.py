@@ -24,10 +24,12 @@ import jsonschema
 from ..db import repo_ops
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
+from ..journal.checkpoints import checkpoint_at
 from ..journal.ledger import Effect, EffectLedger, get_ledger, ledgered
 from ..obs import otel
 from ..policy.approvals import ApprovalRequest, Approver, SessionGrants
 from ..policy.engine import PolicyContext, PolicyEngine, ToolCallInfo
+from . import effects
 from .base import Tool, ToolContext, ToolResult
 from .idempotency import CanonicalizationError, declared_names
 
@@ -132,6 +134,18 @@ class ToolExecutor:
                 decision_rule = f"{decision.rule_id}+approved"
             decision = type(decision)(outcome="allow", rule_id=decision_rule, reason=decision.reason)
 
+        # The pre_effect boundary: a snapshot of where the run had got to *before* an
+        # unsafe write is even announced, so a resume that finds the effect unresolved has
+        # somewhere to stand. Only `unsafe_write` - an `idempotent_write` converges on
+        # re-execution and a `read` changes nothing outside, and checkpointing either would
+        # put a flush and two commits in front of `time_now`.
+        #
+        # Here rather than a line earlier for the same reason the intent is: everything
+        # above can still refuse the call. A detached call (no run) and a call made inside a
+        # worker both get nothing; `checkpoint_at` owns both rules.
+        if tool.effect_class == effects.UNSAFE_WRITE:
+            checkpoint_at("pre_effect", run_id=ctx.run_id, writer=self._resolve_ledger().writer)
+
         # The intent is recorded here and not one line earlier: everything above this point
         # can still refuse the call, and an approval can sit unanswered for an hour. From
         # here on there is a record on disk saying this was about to happen.
@@ -210,10 +224,8 @@ class ToolExecutor:
         """
         if not ledgered(tool.effect_class):
             return None
-        if self._ledger is None:
-            self._ledger = get_ledger()
         run_id, step_id = _effect_scope(ctx, action_id)
-        return self._ledger.intend(
+        return self._resolve_ledger().intend(
             run_id=run_id,
             step_id=step_id,
             tool=tool.name,
@@ -221,6 +233,18 @@ class ToolExecutor:
             args=args,
             declared=declared_names(tool.parameters),
         )
+
+    def _resolve_ledger(self) -> EffectLedger:
+        """The ledger this executor announces through, opened on first use.
+
+        Shared by the intent record and by the pre_effect checkpoint so that both land in
+        the same journal file as the run that caused them. Two resolutions would be two
+        files the day a loop is handed a writer of its own, which is every test and every
+        sub-agent.
+        """
+        if self._ledger is None:
+            self._ledger = get_ledger()
+        return self._ledger
 
     async def _denied(
         self, action_id, parent_id, ctx, tool, args, decision, started, reason,

@@ -90,7 +90,8 @@ def test_the_types_nothing_writes_yet_are_named_rather_than_left_implicit() -> N
         "tool_progress",
         "handoff_started",
         "handoff_finished",
-        "checkpoint_written",
+        # `checkpoint_written` left this set in session 4a: `journal/checkpoints.py` writes
+        # it at the five boundaries. `run_resumed` is 4b's and `run_forked` is 4d's.
         "run_resumed",
         "run_forked",
     }

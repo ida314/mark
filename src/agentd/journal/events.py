@@ -6,13 +6,13 @@ frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Eleven of the seventeen are emitted today** - nine wired by session 2b, and the two
-`effect_*` types by session 3b's effect ledger. The other six are defined here and written
-by nobody yet - `tool_progress` needs a progress channel the tool surface does not have,
-`handoff_*` is Pass 5, `checkpoint_written` is Pass 4, `run_resumed` is Pass 4 and
-`run_forked` is Pass 5. They are specified now so those passes fill a slot instead of
-migrating a schema, and each has a test that writes one, so none of them is a shape nobody
-ever tried to construct.
+**Twelve of the seventeen are emitted today** - nine wired by session 2b, the two
+`effect_*` types by session 3b's effect ledger, and `checkpoint_written` by session 4a's
+checkpointer. The other five are defined here and written by nobody yet - `tool_progress`
+needs a progress channel the tool surface does not have, `handoff_*` is Pass 5,
+`run_resumed` is session 4b and `run_forked` is session 4d. They are specified now so those
+passes fill a slot instead of migrating a schema, and each has a test that writes one, so
+none of them is a shape nobody ever tried to construct.
 
 Three rules, and the first two are this codebase's characteristic bug stated backwards:
 
@@ -229,7 +229,14 @@ EVENTS: dict[str, dict[str, Field]] = {
         "covers_seq": req(int),
         # Committed episodic/semantic write positions at checkpoint time. An object rather
         # than two ints because Pass 4 owns what a watermark is made of.
-        "memory_watermark": req(dict),
+        #
+        # Required *and* nullable, which session 4a changed from required-and-not-nullable:
+        # the watermark is Pass 7's to fill, and until then every checkpoint has to be able
+        # to say "no watermark was recorded" out loud. An empty object would have read as a
+        # measurement - a run whose memory positions were both zero - which is this
+        # codebase's characteristic bug with the lights on. Same reasoning as
+        # `run_resumed.checkpoint_id`.
+        "memory_watermark": req(dict, nullable=True),
         "messages": opt(int),
         "bytes": opt(int),
         "duration_ms": opt(int),
@@ -308,7 +315,7 @@ EVENTS: dict[str, dict[str, Field]] = {
 
 EVENT_TYPES: frozenset[str] = frozenset(EVENTS)
 
-# The eleven the runtime writes today. Kept as data so a test can assert the gap between
+# The twelve the runtime writes today. Kept as data so a test can assert the gap between
 # the vocabulary and what is actually reachable, instead of that gap living in prose.
 EMITTED_TYPES: frozenset[str] = frozenset(
     {
@@ -325,6 +332,11 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # they are reachable from every caller and not only from a turn.
         "effect_intended",
         "effect_committed",
+        # Session 4a. Written by `journal/checkpoints.py` at the five boundaries, and only
+        # when `[checkpoints] enabled` is on - so this is the first member of this set that
+        # a configuration can switch off. The type is reachable; whether a given run reaches
+        # it is a setting.
+        "checkpoint_written",
     }
 )
 

@@ -96,6 +96,14 @@ def _message_appended(payload: dict[str, Any]) -> Line | None:
     return Line(f"· {payload['preview']}", "dim")
 
 
+def _checkpoint_written(payload: dict[str, Any]) -> Line:
+    # Shown because a checkpoint is the runtime promising it could resume from here, and
+    # somebody running with `[checkpoints] enabled` is running with it on in order to watch
+    # that happen. `covers_seq` and not the event's own position: the number that says how
+    # much of the run the snapshot accounts for.
+    return Line(f"· checkpoint {payload['trigger']} @ seq {payload['covers_seq']}", "dim")
+
+
 def _agent_finished(payload: dict[str, Any]) -> Line | None:
     # A turn that failed is the one case where the journal knows something the prose stream
     # cannot say: `run_turn` yields no answer at all when the model call raised.
@@ -112,12 +120,13 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
     "worker_created": _worker_created,
     "worker_finished": _worker_finished,
     "message_appended": _message_appended,
+    "checkpoint_written": _checkpoint_written,
     "agent_finished": _agent_finished,
 }
 
-# Which types have a human rendering at all. The rest - `agent_started`, `tool_started`, and
-# the Pass 3/4/5 types - are facts a fold wants and a person does not, and are skipped rather
-# than given an invented line.
+# Which types have a human rendering at all. The rest - `agent_started`, `tool_started`, the
+# `effect_*` pair and the types Passes 4b-5 write - are facts a fold wants and a person does
+# not, and are skipped rather than given an invented line.
 RENDERED_TYPES: frozenset[str] = frozenset(_RENDERERS)
 
 

@@ -170,6 +170,26 @@ class JournalConfig(BaseModel):
     retention_max_age_days: int | None = None
 
 
+class CheckpointsConfig(BaseModel):
+    """Checkpoints (Pass 4). A mechanical snapshot of where a run had got to, taken at five
+    boundaries, so that a killed process can be resumed without losing accepted work or
+    repeating side effects.
+
+    There *is* an `enabled` flag, unlike [journal], and the difference is the point. The
+    journal is the source of truth and a switch that turns it off makes everything derived
+    from it silently wrong. A checkpoint is an acceleration structure over that journal: the
+    same state is always recoverable by re-folding, so switching checkpoints off costs speed
+    on resume and changes no answer.
+
+    Off by default while the pass is in flight. Session 4a writes checkpoints and nothing
+    reads them, so with the flag off the only observable difference is the absence of a cost
+    (a flush, one synchronous event and one row per boundary). Turning it on is what 4b's
+    resume path needs, and the record for 4a has the measured overhead per boundary.
+    """
+
+    enabled: bool = False
+
+
 class NtfyConfig(BaseModel):
     """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never
     leave hardware you control."""
@@ -445,6 +465,7 @@ class Config(BaseModel):
     obs: ObsConfig = Field(default_factory=ObsConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     journal: JournalConfig = Field(default_factory=JournalConfig)
+    checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

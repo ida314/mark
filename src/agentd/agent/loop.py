@@ -21,6 +21,7 @@ from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import utcnow, uuid7
 from ..journal import events as jevents
+from ..journal.checkpoints import checkpoint_at
 from ..journal.ledger import EffectLedger
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
@@ -108,6 +109,9 @@ class _TurnRecord:
     rj: RunJournal
     turn_id: str
     started: float
+    # Carried so that the turn_end boundary asks the flag through one door
+    # (`journal.checkpoints.enabled`) rather than reading config at a second place.
+    cfg: Config | None = None
     status: str | None = None
     steps: int = 0
     answer: str = ""
@@ -116,9 +120,12 @@ class _TurnRecord:
     usage_reported: bool = False
 
     @classmethod
-    def start(cls, rj: RunJournal, *, turn_id: str, started: float, payload: dict) -> _TurnRecord:
+    def start(
+        cls, rj: RunJournal, *, turn_id: str, started: float, payload: dict,
+        cfg: Config | None = None,
+    ) -> _TurnRecord:
         rj.emit("agent_started", payload)
-        return cls(rj=rj, turn_id=turn_id, started=started)
+        return cls(rj=rj, turn_id=turn_id, started=started, cfg=cfg)
 
     def finish(
         self, *, status: str, steps: int, answer: str, usage: dict[str, int],
@@ -152,6 +159,17 @@ class _TurnRecord:
                 "usage_reported": self.usage_reported,
                 "error": error,
             },
+        )
+        # The turn_end boundary, after the turn's last event and inside the same unwind, so
+        # that the four ways out of a turn all reach it - including the consumer that walked
+        # away. It covers `agent_finished` because that event is already on disk by now.
+        #
+        # A worker's own turn ends here too and gets no checkpoint: its `worker_created` has
+        # no `worker_finished` yet, so `checkpoint_at` reads the run as mid-worker and
+        # declines. That is the architecture's "workers are the unit of atomicity", derived
+        # rather than re-stated here.
+        checkpoint_at(
+            "turn_end", run_id=self.rj.run_id, writer=self.rj.writer, cfg=self.cfg
         )
         return False
 
@@ -231,6 +249,7 @@ class AgentLoop:
         rj = RunJournal(self.journal_writer(), run_id, worker_id=worker_id)
         rec = _TurnRecord.start(
             rj,
+            cfg=self.cfg,
             turn_id=str(turn_id),
             started=started,
             payload={

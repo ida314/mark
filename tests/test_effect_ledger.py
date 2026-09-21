@@ -365,7 +365,7 @@ def test_an_existing_journal_is_upgraded_rather_than_silently_left_at_v1(tmp_pat
     it - with its events still in it afterwards."""
     path = tmp_path / "journal.db"
     raw = sqlite3.connect(str(path))
-    from agentd.journal.store import SCHEMA_V1
+    from agentd.journal.store import SCHEMA_V1, SCHEMA_VERSION
 
     raw.executescript(SCHEMA_V1)
     raw.execute(
@@ -377,7 +377,10 @@ def test_an_existing_journal_is_upgraded_rather_than_silently_left_at_v1(tmp_pat
 
     with JournalStore(path) as store:
         assert store.count("run-0") == 1
-        assert int(store.query("PRAGMA user_version")[0][0]) == 2
+        # Every step of the ladder, not just this session's: session 4a added v3 (the
+        # checkpoint table), so the assertion is "as far as this build knows how to go"
+        # rather than a number that has to be edited by each pass that adds a step.
+        assert int(store.query("PRAGMA user_version")[0][0]) == SCHEMA_VERSION == 3
         assert store.query(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='effect'"
         )

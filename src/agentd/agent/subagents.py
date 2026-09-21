@@ -19,6 +19,7 @@ from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
 from ..journal import events as jevents
+from ..journal.checkpoints import checkpoint_at
 from ..journal.feed import JournalTail
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
@@ -262,6 +263,10 @@ async def run_subagent(
             },
             worker_id=worker_id,
         )
+        # The worker_finished boundary, after the result is journaled and therefore after
+        # this worker is closed. A nested delegation gets nothing here: the outer worker is
+        # still open, and `checkpoint_at` declines a run with a worker in flight.
+        checkpoint_at("worker_finished", run_id=run_id, writer=rj.writer, cfg=cfg)
         await repo_ops.write_action(
             ActionRecord(
                 id=action_id, parent_id=parent_action_id or parent_turn_id,
