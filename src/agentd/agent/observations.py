@@ -9,7 +9,7 @@ an observation with a *path*, and into sentences a person and a model can act on
 
     blocked      the work did not happen
     uncertain    it is not known whether the work happened
-    result_lost  the work happened and what it returned did not survive
+    unreported   the work happened and what it returned did not survive
 
 The first two are the pass file's. The third is not an invention: `effect_*` events are
 synchronous and the loop's `tool_*` events are buffered, so a call whose effect committed
@@ -25,11 +25,22 @@ an uncertain send `blocked` and it goes out twice; call a blocked one `uncertain
 run stalls on a question with no content.
 
 So `blocked` is produced here only from evidence that is durable **before** the act it
-describes. A call is `blocked` when the journal holds the request and no `effect_intended`:
-`effect_*` events are synchronous (`writer.SYNC_PREFIXES`) and the intent is recorded
-before the handler is awaited, so no announcement means nothing outside was changed by it.
-An effect the journal already closed as `failed` is `blocked` for the same reason: session
-3b ruled that a call that returned a failure did not produce its effect.
+describes, and it has exactly one producer: the journal holds the request and no
+`effect_intended` at all. `effect_*` events are synchronous (`writer.SYNC_PREFIXES`) and the
+intent is recorded before the handler is awaited, so no announcement means nothing outside
+was changed by it.
+
+An effect the journal closed as `failed` used to land here too, on session 3b's reading that
+a call which returned a failure did not produce its effect. Dylan struck that at the Pass
+4/5 boundary, in the same ruling that struck the same inference from 4d's fork disclosure:
+**a failure response does not prove the effect did not land.** A fetch can fail after the
+server acted - that is why `web_fetch` is an `unsafe_write` at all - and the executor calls
+`effect.failed()` both when a handler returns `ok=False` and when it *raises*, which is
+exactly the shape where the side effect went out and the code after it blew up. So a failed
+effect is `uncertain`, and routes by `effect_class` like any other uncertain call: `read`
+and `idempotent_write` keep a retry path, an `unsafe_write` gets `ask`/`proceed_without` and
+never `retry`. What is actually known is in the evidence clause - it reported a failure -
+and that is what the reader acts on.
 
 `blocked` therefore claims exactly that much and no more. A `read` never gets an effect at
 all, so every interrupted `read` lands here - and for a read the claim is still true, since
@@ -101,8 +112,16 @@ BLOCKED = "blocked"
 # and the tool events are not, so this window is wider than the crash that makes an orphan -
 # did happen, and only its result text is gone. Calling that `uncertain` would ask the user
 # a question with a known answer; calling it `blocked` would invite a duplicate.
-RESULT_LOST = "result_lost"
-STATUSES: tuple[str, ...] = (UNCERTAIN, BLOCKED, RESULT_LOST)
+#
+# Named `unreported` by Dylan's ruling at the Pass 4/5 boundary, over 4c's `result_lost`: an
+# adjective about the call's standing, so all three statuses are the same part of speech,
+# and it reuses the journal's own phrase - the `may_have_run` clause already reads "never
+# reported back". The cost he took with it, stated rather than buried: **an uncertain call
+# is unreported too.** The status word is not what separates them; the evidence field is,
+# and it is `committed` for this one alone. Anything that renders this status without its
+# evidence beside it is claiming less than it appears to.
+UNREPORTED = "unreported"
+STATUSES: tuple[str, ...] = (UNCERTAIN, BLOCKED, UNREPORTED)
 
 VERIFY = "verify"
 ASK = "ask"
@@ -114,7 +133,7 @@ PATHS: tuple[str, ...] = (VERIFY, ASK, PROCEED_WITHOUT, RETRY)
 # journal knows about a call the rebuilt message list is still waiting on.
 NEVER_ANNOUNCED = "never_announced"  # no `effect_intended` at all: the only support for `blocked`
 COMMITTED = "committed"  # the effect landed; only the result text went with the process
-EFFECT_FAILED = "effect_failed"  # the call resolved without producing its effect
+EFFECT_FAILED = "effect_failed"  # it reported a failure - which is not proof it did nothing
 CLOSED_UNCERTAIN = "closed_uncertain"  # an earlier resume already gave up on it
 
 # How a call is described to whoever has to decide. Keyed by evidence, and total over it:
@@ -144,9 +163,20 @@ EARLIER_ATTEMPT = " - an earlier attempt at the same call may still have run"
 # `web_fetch` leaves no trace to read back - fetching the page again is a new fetch, not
 # evidence about the old one. `notify_user`'s read-back is the user's own eyes.
 # `shell_exec` and `delegate` do arbitrary things and nothing generic can check them.
+#
+# `memory_remember` was in here until the Pass 4/5 boundary, offering `memory_search`. Dylan
+# struck it because search is ranked and a written fact outside top-K reads as absent, which
+# invites the duplicate. The reason it cannot come back with an exact lookup instead is
+# stronger than that: **`memory_remember` does not write a fact at all.** It calls
+# `insert_candidate` and returns a `candidate_id`; the review gate later promotes, merges or
+# rejects it. `memory_history` is exact and unranked but reads canonical facts, and no
+# registered tool lists candidates - so every available read-back would answer "nothing
+# there" about a call that did exactly what it was supposed to. That is the same false
+# negative one step worse, so this one asks, alongside `reminder_set`.
 READBACK: dict[str, str] = {
     "fs_write": "read the file back with fs_read and see whether it holds the new content",
-    "memory_remember": "look the statement up with memory_search",
+    # An exact list and not a search: `open_loops_list` is `list_open_loops_with_source`,
+    # every row of that status with its id, ordered rather than ranked.
     "open_loop_add": "list the open loops with open_loops_list",
 }
 
@@ -171,7 +201,7 @@ def paths_for(status: str, *, tool: str, effect_class: str | None) -> tuple[str,
             # re-execution converges. It is still uncertain; it just needs no ceremony.
             return (RETRY, PROCEED_WITHOUT)
         return ((VERIFY,) if tool in READBACK else ()) + (ASK, PROCEED_WITHOUT)
-    if status == RESULT_LOST:
+    if status == UNREPORTED:
         # It happened. Nothing here may put it back on the table as a retry for an
         # `unsafe_write`: that is the one call where doing it twice is the whole danger,
         # and this is the case where we know for certain it was done once.
@@ -322,10 +352,15 @@ def observations(plan: R.ResumePlan) -> tuple[Observation, ...]:
 # gets an effect at all, so `None` here is both "the approval was still on screen when the
 # process died" and "this was a read" - which is why `blocked` claims only that nothing
 # outside was changed by it.
+#
+# `None` is the **only** producer of `blocked` in the runtime, by Dylan's ruling at the Pass
+# 4/5 boundary. `failed` is `uncertain`: a call that reported a failure may still have
+# landed, and routing it by `effect_class` through `paths_for` gives it a retry path when
+# re-running converges and no retry path at all when it does not.
 SETTLED: dict[str | None, tuple[str, str]] = {
     None: (BLOCKED, NEVER_ANNOUNCED),
-    "committed": (RESULT_LOST, COMMITTED),
-    "failed": (BLOCKED, EFFECT_FAILED),
+    "committed": (UNREPORTED, COMMITTED),
+    "failed": (UNCERTAIN, EFFECT_FAILED),
     "uncertain": (UNCERTAIN, CLOSED_UNCERTAIN),
 }
 
@@ -404,18 +439,37 @@ def prompt(plan: R.ResumePlan) -> str:
     ]
     for group in groups(found):
         if group.status == UNCERTAIN and RETRY in group.paths:
-            continue  # an idempotent_write: re-running it changes nothing. Mentioned below.
+            # A `read` or an `idempotent_write`, interrupted or failed: re-running it
+            # changes nothing, so it needs no block of its own. Said below, not dropped.
+            continue
         if group.status == UNCERTAIN:
             blocks.append(_uncertain_block(group))
-        elif group.status == RESULT_LOST:
-            blocks.append(_result_lost_block(group))
+        elif group.status == UNREPORTED:
+            blocks.append(_unreported_block(group))
         else:
             blocks.append(_blocked_block(group))
     convergent = [o for o in found if o.status == UNCERTAIN and o.may_retry]
     if convergent:
-        names = ", ".join(o.name for o in convergent)
+        # Two shapes reach this line since the Pass 4/5 ruling: a call that never reported
+        # back, and one that started and reported a failure. "Interrupted" is false about
+        # the second, so the clause is split rather than stretched to cover it. It stays one
+        # short parenthetical - 4c rejected a paragraph per group, because a wall of text is
+        # a wall the reader skips, and that is still true of a line nobody has to act on.
+        broke = [o for o in convergent if o.evidence == EFFECT_FAILED]
+        cut = [o for o in convergent if o.evidence != EFFECT_FAILED]
+        clauses = []
+        if broke:
+            said = ", ".join(o.name for o in broke)
+            clauses.append(
+                f"{said} started and reported a failure"
+                if len(broke) == 1
+                else f"{said} each started and reported a failure"
+            )
+        if cut:
+            said = ", ".join(o.name for o in cut)
+            clauses.append(f"{said} {'was' if len(cut) == 1 else 'were'} interrupted too")
         blocks.append(
-            f"({names} {'was' if len(convergent) == 1 else 'were'} interrupted too. Running "
+            f"({'; '.join(clauses)}. Running "
             f"{'it' if len(convergent) == 1 else 'them'} again changes nothing, so there is "
             f"nothing for you to decide.)"
         )
@@ -460,7 +514,7 @@ def _blocked_block(group: ObservationGroup) -> str:
     return "\n".join([head, "", *lines])
 
 
-def _result_lost_block(group: ObservationGroup) -> str:
+def _unreported_block(group: ObservationGroup) -> str:
     """A statement and not a question: the answer to "did that happen" is yes."""
     count = len(group.observations)
     calls = "call" if count == 1 else "calls"
@@ -494,7 +548,7 @@ def notice(plan: R.ResumePlan) -> str:
         return ""
     unsure = [o for o in found if o.status == UNCERTAIN]
     stopped = [o for o in found if o.status == BLOCKED]
-    done = [o for o in found if o.status == RESULT_LOST]
+    done = [o for o in found if o.status == UNREPORTED]
     parts = [
         "Calls interrupted by the restart you are picking this run up from. Read this "
         "before you do anything else.",
@@ -509,8 +563,11 @@ def notice(plan: R.ResumePlan) -> str:
             for o in unsure
         ]
     if done:
-        parts += ["", f"{len(done)} happened, with the result lost rather than the call. "
-                  "Do not run these again; say what they did if it matters:"]
+        # The status word and the evidence in one line, on purpose: an uncertain call is
+        # unreported too, and what separates the two is the clause after the dash.
+        parts += ["", f"{len(done)} unreported - the call is recorded as having happened "
+                  "and its result did not survive. Do not run these again; say what they "
+                  "did if it matters:"]
         parts += [f"  - {o.name}\n      you may: {_paths_sentence(o)}" for o in done]
     if stopped:
         parts += ["", f"{len(stopped)} blocked - none of these changed anything outside, "
@@ -554,7 +611,7 @@ CLOSING_TEXT: dict[str, str] = {
         "as started, so it changed nothing outside and no result came back. Making the "
         "call again duplicates nothing."
     ),
-    RESULT_LOST: (
+    UNREPORTED: (
         "This call went through - the runtime holds the record that it did - and what it "
         "returned was lost when the process exited. Do not run it again."
     ),
@@ -715,13 +772,13 @@ __all__ = [
     "PATHS",
     "PROCEED_WITHOUT",
     "READBACK",
-    "RESULT_LOST",
     "RETRY",
     "RUNTIME_PREFIX",
     "SETTLED",
     "STATEMENTS",
     "STATUSES",
     "UNCERTAIN",
+    "UNREPORTED",
     "UNSETTLED",
     "VERIFY",
     "ClosingMessage",

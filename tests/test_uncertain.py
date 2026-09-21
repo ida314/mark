@@ -6,9 +6,10 @@ Told nothing at all, the run carries on and quietly reports a success that may n
 happened. Neither looks like an error afterwards, which is why each of these is a test and
 not a paragraph in a design note:
 
-- **`uncertain` and `blocked` are never the same observation.** `blocked` is produced only
-  from evidence recorded *before* the act - no `effect_intended` at all - and only a
-  `blocked` call carries `retry` among its paths.
+- **`uncertain` and `blocked` are never the same observation.** `blocked` has exactly one
+  producer, and it is evidence recorded *before* the act: no `effect_intended` at all. A
+  call that reported a failure is not one of them - a failure response is not proof the
+  effect did not land - and an uncertain `unsafe_write` never carries `retry`.
 - **The question names the call.** An orphaned `web_fetch` shows its URL and several of
   them are asked about once, not once each. Both were ruled binding on this pass by Dylan
   at the Pass 3/4 boundary: a prompt the user cannot act on trains blind confirmation.
@@ -224,7 +225,7 @@ def test_a_second_attempt_that_never_started_still_warns_about_the_first(writer)
     done, item = obs.observations(_plan(writer))
     # The first attempt went through and only its result was lost - the loop's
     # `tool_finished` is buffered and its `effect_committed` is not.
-    assert done.status == obs.RESULT_LOST and not done.may_retry
+    assert done.status == obs.UNREPORTED and not done.may_retry
     assert item.status == obs.UNCERTAIN
     assert item.evidence == R.NEVER_DISPATCHED and item.attempt == 2
     assert obs.EARLIER_ATTEMPT in item.statement
@@ -429,7 +430,181 @@ def test_a_call_whose_effect_landed_is_not_offered_as_something_to_redo(writer) 
 
     plan = _plan(writer)
     (item,) = obs.observations(plan)
-    assert item.status == obs.RESULT_LOST
+    assert item.status == obs.UNREPORTED
     assert obs.RETRY not in item.paths and obs.ASK not in item.paths
     assert "went through" in obs.prompt(plan)
     assert "cannot tell whether" not in obs.prompt(plan)
+
+
+# --- a failure is not proof it did not happen ---------------------------------
+
+
+def test_a_failed_unsafe_write_is_never_described_as_safe_to_run_again(writer) -> None:
+    """The ruling at the Pass 4/5 boundary, and the reason it is not a wording preference:
+    `effect.failed()` is written both when a handler returns `ok=False` and when it raises,
+    and a fetch can fail after the server has already acted. Describing that as "running it
+    again duplicates nothing" does not merely mislead a person, it authorises a model to
+    send the thing twice. Asserted on all three surfaces, because the model reads the one
+    the person never sees."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    effect = _call(rj, EffectLedger(writer), "web_fetch", {"url": "https://example.com/pay"})
+    effect.failed("502 from upstream", result_ref="action:1")
+
+    plan = _plan(writer)
+    (item,) = obs.observations(plan)
+    assert item.status == obs.UNCERTAIN and item.evidence == obs.EFFECT_FAILED
+    assert obs.RETRY not in item.paths
+    rendered = [obs.prompt(plan), obs.notice(plan)]
+    rendered += [m.content for m in obs.closing_messages(plan)]
+    for text in rendered:
+        assert "duplicates nothing" not in text
+    assert "reported a failure" in rendered[0]
+
+
+def test_a_failed_call_that_converges_says_it_started_rather_than_that_it_was_interrupted(
+    writer,
+) -> None:
+    """The other half of the same ruling. A failed `idempotent_write` keeps its retry path
+    and lands in the one-line parenthetical, where "was interrupted" would be a plain
+    untruth about a call that ran and came back with an error. Nothing here may read as
+    "it did not get far enough to change anything" either: that is `blocked`'s sentence and
+    this call is not blocked."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    effect = _call(
+        rj, EffectLedger(writer), "goal_upsert", {"title": "renew the lease"},
+        effect_class="idempotent_write",
+    )
+    effect.failed("the database went away", result_ref="action:1")
+
+    plan = _plan(writer)
+    (item,) = obs.observations(plan)
+    assert item.status == obs.UNCERTAIN and item.may_retry
+    question = obs.prompt(plan)
+    assert "goal_upsert(title=renew the lease) started and reported a failure" in question
+    assert "was interrupted too" not in question
+    assert "did not get far enough to change anything" not in question
+    assert "nothing for you to decide" in question
+    # One line, not a block: a call that needs no decision is never turned into a question,
+    # and it is named once rather than under a heading and again in the parenthetical.
+    assert "cannot tell whether" not in question
+    assert question.count("goal_upsert(title=renew the lease)") == 1
+
+
+def test_the_one_line_for_calls_needing_no_decision_is_true_of_both_kinds_at_once(
+    writer,
+) -> None:
+    """The convergent calls share a single parenthetical on purpose - 4c rejected a
+    paragraph per group because a wall of text is a wall the reader skips. Sharing it means
+    one sentence has to be true of a call that never reported back *and* of one that
+    reported a failure, which it cannot be unless the clause is split."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    ledger = EffectLedger(writer)
+    broke = _call(
+        rj, ledger, "goal_upsert", {"title": "renew the lease"}, call_id="c1",
+        effect_class="idempotent_write",
+    )
+    broke.failed("the database went away", result_ref="action:1")
+    _call(
+        rj, ledger, "goal_upsert", {"title": "chase the deposit"}, call_id="c2",
+        effect_class="idempotent_write",
+    )
+
+    question = obs.prompt(_plan(writer))
+    assert "goal_upsert(title=renew the lease) started and reported a failure" in question
+    assert "goal_upsert(title=chase the deposit) was interrupted too" in question
+    assert question.count("nothing for you to decide") == 1
+
+
+def test_only_the_absence_of_an_announcement_can_make_a_call_blocked(writer) -> None:
+    """`blocked` is the one status that authorises a silent re-run, so its producers are
+    asserted as a set rather than trusted to stay at one. Routing the rest by
+    `effect_class` is what keeps a failed `read` retryable and a failed send not."""
+    assert [k for k, (status, _) in obs.SETTLED.items() if status == obs.BLOCKED] == [None]
+    assert obs.paths_for(obs.UNCERTAIN, tool="web_search", effect_class="read")[0] == obs.RETRY
+    assert obs.RETRY in obs.paths_for(
+        obs.UNCERTAIN, tool="goal_upsert", effect_class="idempotent_write"
+    )
+    assert obs.RETRY not in obs.paths_for(
+        obs.UNCERTAIN, tool="web_fetch", effect_class="unsafe_write"
+    )
+
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    effect = _call(rj, EffectLedger(writer), "notify_user", {"title": "the lease"}, call_id="c1")
+    effect.failed("the transport refused it", result_ref="action:1")
+    _call(rj, None, "fs_write", {"path": "/tmp/x", "content": "hi"}, call_id="c2")
+
+    sent, written = obs.observations(_plan(writer))
+    assert sent.status == obs.UNCERTAIN
+    assert written.status == obs.BLOCKED
+    question = obs.prompt(_plan(writer))
+    assert "1 fs_write call did not get far enough" in question
+    assert "1 notify_user call did not get far enough" not in question
+
+
+# --- the status word says less than the evidence does -------------------------
+
+
+def test_the_model_is_told_what_separates_an_unreported_call_from_an_uncertain_one(
+    writer,
+) -> None:
+    """An uncertain call is unreported too - its result did not come back either. The word
+    is not what separates them; the evidence is, and it is `committed` for exactly one of
+    them. So the heading carries that clause rather than the status word alone, and the
+    user's block goes on saying it in full without ever using the word."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    ledger = EffectLedger(writer)
+    effect = _call(rj, ledger, "notify_user", {"title": "the lease"}, call_id="c1")
+    effect.committed(result_ref="action:1")
+    _call(rj, ledger, "web_fetch", {"url": "https://example.com/a"}, call_id="c2")
+
+    plan = _plan(writer)
+    done, unsure = obs.observations(plan)
+    assert (done.status, done.evidence) == (obs.UNREPORTED, obs.COMMITTED)
+    # The word itself, because `ClosingMessage.status` hands it on with no evidence beside
+    # it: a consumer that only reads the status is reading the one field that is ambiguous.
+    assert done.status == "unreported"
+    closing = {m.tool_call_id: m.status for m in obs.closing_messages(plan)}
+    assert closing == {"c1": "unreported", "c2": "uncertain"}
+    assert unsure.status == obs.UNCERTAIN and unsure.evidence != obs.COMMITTED
+    block = obs.notice(plan)
+    assert (
+        "1 unreported - the call is recorded as having happened and its result did not "
+        "survive. Do not run these again; say what they did if it matters:"
+    ) in block
+    question = obs.prompt(plan)
+    assert "unreported" not in question
+    assert "went through and I no longer have what it returned" in question
+
+
+def test_a_write_no_registered_tool_can_see_is_never_offered_a_read_back(writer) -> None:
+    """`memory_remember` does not write a fact: it queues a candidate that a review gate
+    later promotes, merges or rejects. `memory_search` is ranked and reads facts, so it
+    would report "nothing there" about a call that did exactly what it was asked to - and
+    no registered tool lists candidates, so no exact lookup fixes it either. A read-back
+    that can return a false negative is worse than no read-back, because the answer to
+    "did that happen" is then a no that nobody doubts."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    _call(rj, EffectLedger(writer), "memory_remember", {"statement": "the lease ends in June"})
+
+    plan = _plan(writer)
+    (item,) = obs.observations(plan)
+    assert "memory_remember" not in obs.READBACK
+    assert item.paths == (obs.ASK, obs.PROCEED_WITHOUT)
+    question = obs.prompt(plan)
+    assert "this one is yours" in question
+    assert "memory_search" not in question
+    # `open_loop_add` keeps its read-back: `open_loops_list` is every row of that status
+    # with its id, ordered rather than ranked, so an added loop cannot read as absent.
+    assert obs.READBACK["open_loop_add"] == "list the open loops with open_loops_list"

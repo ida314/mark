@@ -203,10 +203,20 @@ class ToolExecutor:
             )
         )
         if effect is not None:
-            # `ok=False` is a clean failure: the call resolved and did not produce its
-            # effect. It is `failed` rather than `committed`, because the one question this
-            # row exists to answer is "did that happen", and a tool that told us it did not
-            # is an answer, not a result.
+            # `ok=False` is the tool reporting that it did not do the thing. It is
+            # `failed` rather than `committed`, because the one question this row exists to
+            # answer is "did that happen", and a tool that told us it did not is an answer,
+            # not a result.
+            #
+            # It is **not** proof that nothing happened outside, and nothing downstream may
+            # read it that way. Dylan struck that inference at the Pass 4/5 boundary: a call
+            # can fail after the remote side acted, which is the whole reason `web_fetch` is
+            # an `unsafe_write`. The case above is starker still - a handler that *raises*
+            # reaches `effect.failed()` too, which is exactly the shape where the effect went
+            # out and the code after it blew up. So `agent/observations.py` treats a failed
+            # effect as `uncertain`, not `blocked`, and `journal/fork.py` states the error
+            # without drawing a conclusion from it. Collected for Pass 10 in
+            # docs/records/pass-03-outcome.md.
             if result.ok:
                 effect.committed(result_ref=_result_ref(action_id), result=result.content)
             else:

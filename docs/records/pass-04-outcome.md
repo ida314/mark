@@ -1727,3 +1727,154 @@ because of Dylan's own ruling that a prompt the user cannot act on trains blind 
 The wording above is his, verbatim, and is implemented verbatim; whether the failed block
 should name its calls the way the other two do is his to settle. Nothing in Pass 5 depends on
 the answer.
+
+
+---
+
+## Pass 4/5 boundary — the 4c review
+
+Put to Dylan on 2026-09-21 as six items, ordered by what it costs to be wrong. He answered
+with four changes and one confirmation. The first item was a behaviour bug his own 4d ruling
+had already decided against, left standing deliberately so he could see it.
+
+### 1. `blocked` now has exactly one producer
+
+**His ruling, verbatim:**
+
+> blocked gets exactly one producer: no effect_intended. effect_failed stops mapping to
+> blocked. No new status word — route by effect_class:
+> - read / idempotent_write failed → keep a retry path, with a sentence that says the call
+>   started and reported a failure. Not "never recorded as started"; that's false here.
+> - unsafe_write failed → uncertain, same paths and sentences as any uncertain call.
+> Add a test that a failed unsafe_write never produces a message containing "duplicates
+> nothing".
+
+`SETTLED["failed"]` moves from `(BLOCKED, EFFECT_FAILED)` to `(UNCERTAIN, EFFECT_FAILED)`.
+**`paths_for` was not touched and produced his routing exactly**, because it already routes
+on `effect_class`: `read` and `idempotent_write` get `(retry, proceed_without)`, an
+`unsafe_write` gets `(verify?, ask, proceed_without)` with `retry` absent by construction.
+
+The evidence for the ruling turned out to be stronger than the argument that produced it.
+`tools/executor.py` calls `effect.failed()` in **two** places: when a handler returns
+`ok=False`, and when a handler **raises** (line 167). The second is precisely the shape where
+the side effect went out and the code after it blew up. Verified at the boundary rather than
+assumed.
+
+What this removed from the user's screen and the model's message list: a call that reported a
+failure was being described as "did not get far enough to change anything … Running it again
+duplicates nothing", and in a synthetic tool message as "The runtime never recorded it as
+started, so it changed nothing outside … Making the call again duplicates nothing."
+
+`BLOCKED`'s own sentences were **not** reworded, and that was checked rather than skipped:
+its only remaining producer is `never_announced`, and for that producer both sentences are
+true.
+
+**The fallout, which is the part a green suite would have hidden.** `prompt()` sweeps any
+retryable uncertain group into one parenthetical rather than giving it a block. A failed
+`idempotent_write` now lands there, where the verb was "was interrupted" — false for a call
+that started and reported a failure. The clause is split rather than stretched:
+
+```
+(goal_upsert(title=renew the lease) started and reported a failure;
+goal_upsert(title=chase the deposit) was interrupted too. Running them again changes
+nothing, so there is nothing for you to decide.)
+```
+
+One parenthetical, one clause per kind. 4c's rejection of a paragraph per group still holds:
+a wall of text is a wall the reader skips, and this is a line nobody has to act on.
+
+### 2. Confirmed without change: retry stays a trailing clause
+
+> Confirmed: retry stays a trailing clause conditioned on my knowing it didn't happen. No
+> named retry option.
+
+4c's rejected variant 5 stands. The user can still ask for a re-run in their own words, and
+the wording puts the claim of knowledge on the person who has it.
+
+### 3. `memory_remember` loses its read-back
+
+> memory_remember cannot use memory_search as its read-back. Search is ranked; a written
+> fact outside top-K reads as absent and invites a duplicate. Use an exact lookup (by id or
+> exact content). If none exists, move memory_remember to the ask-me path alongside
+> reminder_set. Confirm open_loop_add's read-back is an exact list, not a search.
+
+No exact lookup exists, for a reason stronger than ranking: **`memory_remember` does not
+write a fact at all.** It calls `repo_memory.insert_candidate` and returns a `candidate_id`;
+a review gate later promotes, merges or rejects it. `memory_history(subject)` is exact and
+unranked but reads canonical facts (`facts_for_subject`), and no tool in the 33-name registry
+lists candidates. So every available read-back answers "nothing there" about a call that did
+exactly what it was supposed to — the same false negative one step worse, and the normal
+outcome rather than an edge case. `memory_remember` now routes `(ask, proceed_without)`
+alongside `reminder_set` and `watcher_add`.
+
+`open_loop_add` confirmed and kept: `open_loops_list` is
+`repo_agenda.list_open_loops_with_source(status)`, every row of that status with its id,
+ordered rather than ranked. One weak caveat recorded in a comment: the query is `LIMIT 50`
+ordered `due_at NULLS LAST, created_at`, so past fifty open loops a just-added undated loop
+could fall off the end. Far weaker than ranking, and left as-is.
+
+### 4. `result_lost` → `unreported`
+
+Ruled earlier at the same boundary. Renamed everywhere; it appeared only in
+`agent/observations.py` and the tests. The model-facing heading is his approved text:
+
+```
+1 unreported - the call is recorded as having happened and its result did not survive. Do
+not run these again; say what they did if it matters:
+```
+
+The user-facing block is unchanged, because it never used the status word.
+
+**The cost he accepted, recorded at the definition:** an uncertain call is unreported too.
+The status word is not what separates them — the evidence field is, and it is `committed` for
+this one alone. Audited: `notice()` carries the evidence clause on the same heading line and
+the user prompt never uses the word. The one bare render is `Observation.status` /
+`ClosingMessage.status`, which hand `"unreported"` on with no evidence beside them; there is
+no consumer yet and a test pins it so a future one cannot inherit it silently.
+
+### 5. Two requirements on later passes, recorded rather than built
+
+Both are in `docs/records/session-ledger.md` in full. In brief: a **runtime guard** that
+refuses an `unsafe_write` matching an unresolved uncertain call's tool and `canonical_args`
+in the same run unless the user said to run it again — binding on whichever Pass 5 session
+first consumes `notice()`, because the prompt is currently the only guard, a re-issued call
+mints a new idempotency key, and the model being asked to comply is a local 27B. And:
+messages with `synthetic=True` are **never summarized or promoted as fact** — binding on
+Pass 5 handoff generation and Pass 7 promotion.
+
+### what shipped for the review
+
+| file | what changed |
+|---|---|
+| `src/agentd/agent/observations.py` | `SETTLED["failed"]`, the convergent parenthetical, `READBACK`, the rename, and the reasoning at each |
+| `tests/test_uncertain.py` | 6 tests added |
+| `src/agentd/tools/executor.py` | comment only: the `ok=False` note asserted the struck inference |
+
+Suite **767 → 773**. `.venv/bin/ruff check src tests scripts` clean. No event type, column,
+migration, config flag or tool classification changed, and `notice()`, `prompt()`,
+`closing_messages()` and `disclosure()` still have no runtime consumer.
+
+**Mutation-checked.** Nine mutations, two survivors, both closed. `SETTLED["failed"] →
+BLOCKED` fails 4 tests, so the test he asked for provably bites. Survivor A: changing
+`UNREPORTED`'s *value* changed nothing, because the heading hardcoded the word — closed by
+asserting the status on the wire and on `ClosingMessage`. Survivor B: deleting `prompt()`'s
+skip branch changed nothing — a convergent call then got both a full "I cannot tell whether
+it happened" block *and* the parenthetical. That was untested 4c behaviour and is now
+asserted.
+
+**Live-data check.** A copy of the live journal (without its `-wal`, a partial view; the live
+file was only read). `kill-2`'s dangling `tool_search(query=calendar)` still renders as one
+blocked informational line. The file holds **no `effect_*` events at all**, so there is no
+real `failed` effect anywhere to check this against — the failed path is exercised
+synthetically only, and that is a gap to close the first time a real one appears.
+
+### still open, for Dylan
+
+**A failed `unsafe_write`'s closing message opens with a sentence that is false about why the
+outcome is unknown.** His ruling said "same paths and sentences as any uncertain call", so it
+was implemented that way; `CLOSING_TEXT[UNCERTAIN]` begins "This call was interrupted by the
+process exiting." A call that reported a failure was **not** interrupted — it resolved, and
+what is unknown is whether the effect landed before it did. The operative clauses ("whether
+it completed is not known", "do not re-run it yourself") are correct and are what the model
+acts on. The fix, if he wants it, keys `CLOSING_TEXT` by evidence for `EFFECT_FAILED` only
+and adds no status word.

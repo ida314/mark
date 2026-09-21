@@ -253,3 +253,42 @@ no wording, no status word and no rehydration path.
   will face the same choice. 4a's answer twice was required-and-nullable, which does not help
   when the key is absent entirely.
 - **5b is held** pending the 4c wording review, per the fence recorded above.
+
+## Pass 4/5 boundary — the 4c review, and two requirements that bind later passes
+
+Dylan reviewed 4c's recovery wording on 2026-09-21: four changes and one confirmation. The
+two below are **requirements, not suggestions**, in his own filing language. They are
+recorded here because neither is code anybody has written yet, and both are about a failure
+that only becomes reachable once Pass 5 gives this wording a consumer.
+
+**REQUIREMENT on whichever Pass 5 session first consumes `notice()` — a runtime guard, not
+a prompt.**
+
+> A runtime guard that refuses an `unsafe_write` matching an unresolved uncertain call's
+> tool and `canonical_args` in the same run, unless I've said to run it again.
+
+His reasoning, which is the part to carry: **the prompt is currently the only thing standing
+between an uncertain call and a duplicate.** A re-issued call gets a new idempotency key —
+`hash(run_id, step_id, tool_name, canonical_args)` includes `step_id`, so the same logical
+call made again in a later step does not collide with the row that is already open (3b #5,
+narrowed by 4b and widened again by 4d across a fork). And the model being asked to obey
+"you must not re-run an uncertain call" is a local 27B. A sentence in a prompt is not an
+enforcement mechanism; this is the enforcement mechanism.
+
+Note the interaction with 4b, which is why this belongs to the session that consumes
+`notice()` rather than to the ledger: an `uncertain` effect is *terminal* to the fold, so
+"unresolved" cannot mean "still open in the ledger". The guard needs the set of uncertain
+observations the resumed turn was handed, and it must be released per call once the user
+says to run it again.
+
+**REQUIREMENT on Pass 5 (handoff generation) and Pass 7 (promotion).**
+
+> Messages with `synthetic=True` are never summarized or promoted as fact.
+
+`ClosingMessage.synthetic` exists precisely so this is checkable rather than a matter of
+convention, and the text carries `RUNTIME_PREFIX` as a second, independent signal. The
+failure it guards is the one 4b refused to open when it declined to hand the journal's
+200-character previews to a model as message bodies: **text the runtime wrote about a call,
+folded into a summary or a memory candidate, becomes a claim the user never made and no tool
+ever returned.** Pass 5's handoff generator reads a message list; Pass 7's promotion reads
+one too. Both must exclude these, and both must say in their outcome record how they did it.
