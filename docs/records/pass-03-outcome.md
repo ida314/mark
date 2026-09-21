@@ -832,3 +832,80 @@ first thing an argument-aware design in Pass 8 should take.
 5 — the detached-run fold, the unmeasured fsync cost (now smaller again), the one bit the
 journal cannot reproduce, worker attribution on effect events, and the two-attempts-both-run
 property that Pass 4 exists to stop.
+
+---
+
+## Pass 3/4 boundary — the two owed rulings, settled by Dylan
+
+Sessions 3c and 3d ran autonomously under the standing policy in
+`docs/plans/orchestrator-prompt-auto.md` and left two rulings owed to a human. Both were
+put to Dylan at the pass boundary, before Pass 4 was dispatched, and both are recorded here
+rather than being folded silently into the 3c/3d sections above — the sessions did not make
+these calls and the record should not read as though they did.
+
+**`memory_search` → `read`, as a deliberate exception.** Not a clean fit: `access_count` is
+non-idempotent and does not converge on replay, so the tool does not strictly satisfy
+`read`. Ruled `read` because the drift is bookkeeping rather than state the system's
+correctness depends on, and because escalating the runtime's most-called tool would make
+resume prompt on memory lookups — which trains the user to blind-confirm and destroys the
+value of `uncertain` for the cases that matter.
+
+The ruling was made conditional on one check, which was run before it was committed:
+**does `access_count` feed retrieval ranking or scoring anywhere?** It does not.
+`access_count` and `last_accessed_at` are written at `db/repo_memory.py:286` and read
+nowhere in `src/`. The retrieval score at `memory/retrieval.py:710` is
+`0.60·rrf + 0.15·recency + 0.10·importance + 0.10·confidence + 0.05·prior`, with no access
+term; `recency` reads `valid_from`/`recorded_at`/`created_at` (`_claim_when`), never
+`last_accessed_at`. Had the counter fed ranking, the ruling would have been
+`idempotent_write` with a counter reset on reconcile, because replay-inflated counts would
+bias what memory surfaces later.
+
+`UNAUDITED_TOOLS` is now empty. It is kept as an empty frozenset with its test asserting
+equality, not deleted: emptiness is the invariant, and a new tool added with the
+`UNAUDITED` placeholder must still fail that test.
+
+**`web_fetch` → `unsafe_write` confirmed.** 3d's reversal of 3c's expectation stands. The
+implementation was re-read at the ruling to confirm there was nothing worse in it than the
+argument assumed: `builtin_web.web_fetch` issues `client.get` only, with up to 5 manually
+re-checked redirect hops, no POST anywhere, no `Authorization` header, and a fresh
+`httpx.AsyncClient` per call so no cookie jar or credential is carried across calls. It is
+safe by method and unauthenticated. That does not change the class, because the argument
+for `unsafe_write` was never about the method — it is about argument provenance. Rate
+limits and cost are real but they are not correctness and they do not belong in
+`effect_class`.
+
+### deferred item — one finding, for Pass 10 tuning
+
+Filed here rather than against Pass 8. Pass 8 is tool-surface reduction and this has
+nothing to do with where a tool lives.
+
+> **`effect_class` is a property of the tool; effect risk is a property of the call.**
+> `memory_search` is non-idempotent but harmless. `web_fetch` is safe by method and unsafe
+> by argument provenance. Both were forced into a per-tool class that cannot express the
+> distinction. Candidates for later: a fourth class, a per-call annotation, or
+> classification functions that take `canonical_args`. **Do not decide now** — collect
+> entries until Pass 10 and decide against real traces.
+
+Every tool that breaks this way from here on is appended to that list. Current entries:
+
+| tool | class it was forced into | what the class cannot express |
+|---|---|---|
+| `memory_search` | `read` | Non-idempotent counter drift, judged harmless. |
+| `web_fetch` | `unsafe_write` | Safe by method; unsafe only for some URLs, by provenance. |
+
+This supersedes 3d's open question 4, which proposed Pass 8 as the home for argument-aware
+classification. The three tools it names (`fs_write`, `goal_upsert`, `web_fetch`) are the
+same observation; `fs_write` and `goal_upsert` belong on the list above if a later session
+confirms they break the same way.
+
+### requirements this places on Pass 4, binding rather than suggested
+
+Both come from the same reasoning that produced the `memory_search` ruling: a prompt the
+user cannot act on is worse than no prompt, because it trains blind confirmation.
+
+1. **4b/4c: the reconciliation prompt for an orphaned `web_fetch` must show the URL.**
+   "Confirm this fetch?" with no URL trains the user to hit yes, and a blind-confirmed
+   one-click link is the exact outcome this ruling exists to prevent. This is a
+   requirement on 4c's user-facing wording, not a suggestion.
+2. **4b: if a resume has several orphaned fetches, group them into one prompt** rather
+   than one prompt each. Same reasoning.

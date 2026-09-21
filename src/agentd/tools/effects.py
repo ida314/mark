@@ -51,26 +51,26 @@ MEANING: dict[EffectClass, str] = {
 # would otherwise be indistinguishable in the source.
 #
 # Session 3c ruled on nineteen of these and 3d on the last six, dropping each name from
-# UNAUDITED_TOOLS below as it was ruled on. One name is left, and it is a deferral to a
-# human rather than an omission - see below.
+# UNAUDITED_TOOLS below as it was ruled on. The last name, `memory_search`, was a deferral
+# to a human rather than an omission, and was ruled `read` at the Pass 3/4 boundary. The
+# placeholder stays: it is what a *new* tool declares before anybody has looked at it.
 UNAUDITED: EffectClass = UNSAFE_WRITE
 
 # Which tools are in that state, as data rather than as a paragraph that goes stale. A
 # name in here means: registered, declaring `unsafe_write`, and carrying no recorded
 # ruling. `docs/records/effect-classification.md` says why, for every name.
 #
-# After sessions 3c and 3d the audit is complete except for one tool, and what is left is
-# not "nobody has looked" - it is "somebody looked and would not decide alone".
-# `memory_search` moves a counter (`access_count = access_count + 1` on every fact it
-# returned), so it is not literally `read`; nothing outside this machine changes, so it is
-# not plausibly `unsafe_write` either. It holds the conservative value until a human picks,
-# and the reasoning is at the declaration and in the record.
+# This set is empty, so the audit is done: every registered tool carries a recorded
+# ruling. It stays as a declared, tested slot rather than being deleted, because a *new*
+# tool added with `UNAUDITED` belongs in here and `tests/test_tool_effect_class.py` will
+# insist on it. Emptiness is the invariant, not the absence of the mechanism.
 #
-# When this set is empty the audit is done. A *new* tool added with `UNAUDITED` belongs in
-# here too, and `tests/test_tool_effect_class.py` will insist on it.
-UNAUDITED_TOOLS: frozenset[str] = frozenset({
-    "memory_search",
-})
+# The last entry was `memory_search`, held here through 3c and 3d as "somebody looked and
+# would not decide alone" rather than "nobody has looked". It was ruled `read` at the
+# Pass 3/4 boundary as a deliberate exception - the counter it moves is bookkeeping about
+# accesses, not state correctness depends on. The reasoning is at its declaration in
+# `builtin_memory.py` and in `docs/records/effect-classification.md`.
+UNAUDITED_TOOLS: frozenset[str] = frozenset()
 
 
 class ToolRegistrationError(Exception):

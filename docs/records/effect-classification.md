@@ -13,9 +13,10 @@ unaudited         no ruling recorded; declares unsafe_write until there is one
 ```
 
 Session **3c** (reads and local-state tools) ruled on 19 of the 26 builtins and deferred
-one. Session **3d** (writes and integrations) ruled on the remaining six. Every
-registered tool now carries a ruling except `memory_search`, which 3c referred to a
-human and 3d had no standing to settle.
+one. Session **3d** (writes and integrations) ruled on the remaining six. The one
+deferral, `memory_search`, was settled by Dylan at the **Pass 3/4 boundary** — `read`, as
+a deliberate exception, recorded in the 3c table below. Every registered tool now carries
+a ruling and `UNAUDITED_TOOLS` is empty.
 `tests/test_tool_effect_class.py::test_every_tool_in_the_classification_table_declares_what_the_table_says`
 holds this file and the declarations in the source to each other, so a class changed in
 one place and not the other fails the suite rather than going quietly stale.
@@ -46,11 +47,11 @@ one place and not the other fails the suite rather than going quietly stale.
 | `memory_remember` | unsafe_write | `insert_candidate` has no dedup key, so a replay queues the claim twice; with a correction cue it reaches `review.propose_and_review`, which writes canonical memory. |
 | `delegate` | unsafe_write | Runs a sub-agent that may call anything, including `fs_write` and the shell. Replaying the delegation replays whatever it chose to do. |
 
-## Deferred, with the reasoning that made it uncertain
+## Deferred to a human, and settled at the Pass 3/4 boundary
 
-| tool | class | why it is not ruled on |
+| tool | class | why it was deferred, and how it was ruled |
 |---|---|---|
-| `memory_search` | unaudited | Examined, not settled. `retrieval.pack` ends in `repo_memory.touch_accessed`, which runs `access_count = access_count + 1` on every fact it returned, so re-execution does **not** converge and the tool is not literally `read`. But the state it moves is bookkeeping *about accesses*, and a replay genuinely is another access; nothing outside the machine changes. Calling it `read` is a judgement about what counts as state. Calling it `unsafe_write` — the conservative option, and the one left standing — puts a ledger row, two journal events and four fsyncs on the most-called tool in the runtime, and will make Pass 4 ask the user to confirm a search. **Rejected alternative: `read`.** A human should pick; if the answer is `read`, the counter is the only thing that argues otherwise and it is arguably right either way. |
+| `memory_search` | read | **Ruled by Dylan at the Pass 3/4 boundary, as a deliberate exception rather than a clean fit.** `retrieval.pack` ends in `repo_memory.touch_accessed`, which runs `access_count = access_count + 1` on every fact it returned: that counter is non-idempotent and does not converge on replay, so this does **not** strictly satisfy `read`. It is classified `read` because the drift is bookkeeping rather than state the system's correctness depends on, and because escalating the runtime's most-called tool would make resume prompt on memory lookups — which trains the user to blind-confirm and destroys the value of `uncertain` for the cases that matter. **Checked before the ruling was committed:** `access_count` and `last_accessed_at` are written at `repo_memory.py:286` and read nowhere in `src/`; the retrieval score is `0.60·rrf + 0.15·recency + 0.10·importance + 0.10·confidence + 0.05·prior` (`retrieval.py:710`) with no access term, and `recency` reads `valid_from`/`recorded_at`/`created_at`, never `last_accessed_at`. Had the counter fed ranking the answer would have been `idempotent_write` with a counter reset on reconcile. **Rejected alternative: `unsafe_write`**, the conservative value it held through 3c and 3d. |
 
 Also flagged, though they were ruled on:
 

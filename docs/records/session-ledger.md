@@ -90,16 +90,24 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
   `fs_read` as `read` must delete that assertion, not work around it.
 - **3b → 3c/3d, the cost that makes the audit urgent:** every effecting call now costs four
   synchronous fsyncs, and with all 26 builtins `UNAUDITED` that applies to `time_now`.
-- **3c → human, before Pass 4:** `memory_search` is examined but deliberately unruled.
-  `retrieval.pack` ends in `touch_accessed` (`access_count + 1`), so it is neither
-  literally `read` nor plausibly unsafe. It holds the conservative value until Dylan rules
-  on it. The whole 3c/3d table wants his eyes at the pass boundary regardless — it was
-  produced under the autonomous standing policy, not by the human the plan assumed.
-- **3d → human, before Pass 4 (two rulings, both one word in two places):** `web_fetch` was
-  ruled `unsafe_write`, reversing 3c's expectation of `read` — the model picks the URL,
-  often from untrusted text, so a GET at somebody's confirmation link is a duplicate
-  real-world action. And `memory_search` is still the one name left in `UNAUDITED_TOOLS`,
-  so Pass 4 reconciliation will prompt on the runtime's hottest tool until it is ruled.
+- **RESOLVED by Dylan at the Pass 3/4 boundary (both owed rulings):** `memory_search` is
+  `read`, as a deliberate exception — non-idempotent counter, harmless drift — ruled after
+  confirming `access_count`/`last_accessed_at` feed no ranking or scoring anywhere in
+  `src/`. `web_fetch` stays `unsafe_write`: confirmed `GET`-only, no POST, no auth header,
+  no cookie jar, and the class rests on argument provenance rather than method.
+  `UNAUDITED_TOOLS` is now empty. Full reasoning in `docs/records/pass-03-outcome.md`
+  under "Pass 3/4 boundary".
+- **Pass 3/4 boundary → Pass 10, a standing collection:** `effect_class` is a property of
+  the tool; effect risk is a property of the call. `memory_search` and `web_fetch` are both
+  forced into a per-tool class that cannot express the distinction. Do not decide now —
+  append every tool that breaks this way and decide against real traces at Pass 10. This
+  supersedes 3d's open question 4, which had proposed Pass 8; Pass 8 is tool-surface
+  reduction and this is not about where a tool lives.
+- **Pass 3/4 boundary → 4b and 4c, binding requirements not suggestions:** the
+  reconciliation prompt for an orphaned `web_fetch` must show the URL — "Confirm this
+  fetch?" with no URL trains blind confirmation, which is the exact outcome the
+  `unsafe_write` ruling exists to prevent. And several orphaned fetches on one resume group
+  into a single prompt rather than one each.
 - **3d → whoever adds a send path:** the pass file's `gmail send` and `calendar create` do
   not exist in this registry. Gmail send accepts no client-supplied id; Calendar
   `events.insert` does. Nothing is `idempotent_write` today, so the id check gated nothing.
@@ -107,5 +115,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 ## Pass 3 complete
 
 3a–3d all committed, tests 661 green, ruff clean, no Must not crossed in any session.
-Pass 4 is not clear to start: it depends on the two rulings above, and Pass 4 was already
-barred from shipping before 3c/3d for exactly this reason.
+The two owed rulings were put to Dylan at the pass boundary and settled before 4a was
+dispatched, so the 3a → Pass 4 ordering constraint is satisfied: every tool carries a
+recorded ruling and reconciliation will not surface `time_now`, `fs_list` or
+`memory_search` as uncertain effects. **Pass 4 is clear to start.**

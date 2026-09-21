@@ -204,14 +204,14 @@ def test_fs_write_cannot_be_downgraded_while_append_is_still_a_mode_it_accepts()
         assert builtin_fs.fs_write.effect_class == UNSAFE_WRITE
 
 
-def test_the_only_tool_left_unruled_is_the_one_a_human_was_asked_to_settle():
-    """The audit is finished when this set is empty, and it is one name from empty.
+def test_no_tool_is_left_unruled():
+    """The audit is finished: every registered tool carries a recorded ruling.
 
-    Keeping the remaining work as an equality rather than a subset is deliberate: a tool
-    added later with the `UNAUDITED` placeholder fails here, which is the moment somebody
-    is still in a position to say what its effect class actually is. `memory_search` is
-    not an oversight - sessions 3c and 3d both looked at it and neither would decide it
-    alone; `docs/records/effect-classification.md` carries the argument and the rejected
-    alternative for whoever does.
+    Keeping this as an equality against the empty set rather than deleting the test is
+    deliberate: a tool added later with the `UNAUDITED` placeholder fails here, which is
+    the moment somebody is still in a position to say what its effect class actually is.
+    The last entry was `memory_search`, which sessions 3c and 3d both looked at and
+    neither would decide alone; it was ruled `read` at the Pass 3/4 boundary and
+    `docs/records/effect-classification.md` carries that argument and its exception.
     """
-    assert UNAUDITED_TOOLS == frozenset({"memory_search"})
+    assert UNAUDITED_TOOLS == frozenset()

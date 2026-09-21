@@ -15,7 +15,7 @@ from ..embed import get_embedder
 from ..ids import parse_when, utcnow
 from ..memory.predicates import UNSPECIFIED, Predicate, coerce, vocabulary_for_prompt
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
-from .effects import READ, UNAUDITED, UNSAFE_WRITE
+from .effects import READ, UNSAFE_WRITE
 
 
 @tool(
@@ -38,15 +38,18 @@ from .effects import READ, UNAUDITED, UNSAFE_WRITE
     ),
     tags=("memory", "core"),
     always_on=True,
-    # Still UNAUDITED after 3c looked at it, which is a deferral and not an oversight.
-    # `retrieval.pack` ends in `repo_memory.touch_accessed`: `access_count = access_count
-    # + 1` on every fact it returned. That is a counter, so re-execution does not converge
-    # and the tool is not literally `read` - but the state it moves is retrieval
-    # bookkeeping about accesses, and a replay *is* another access. Calling it `read` is a
-    # judgement about what counts as state; calling it `unsafe_write` puts four fsyncs and
-    # a Pass 4 confirmation prompt on the most-called tool in the runtime. A human picks.
-    # See docs/records/effect-classification.md.
-    effect_class=UNAUDITED,
+    # `read` by human ruling at the Pass 3/4 boundary, and a deliberate exception rather
+    # than a clean fit. `retrieval.pack` ends in `repo_memory.touch_accessed`:
+    # `access_count = access_count + 1` on every fact it returned. That counter is
+    # non-idempotent and does not converge on replay, so this does not strictly satisfy
+    # `read`. It is classified `read` because the drift is bookkeeping rather than state
+    # the system's correctness depends on - verified at the ruling: `access_count` and
+    # `last_accessed_at` are written here and read nowhere, and the retrieval score is
+    # rrf/recency/importance/confidence/prior with no access term - and because escalating
+    # the runtime's most-called tool would make resume prompt on memory lookups, which
+    # trains the user to blind-confirm and destroys the value of `uncertain` for the cases
+    # that matter. See docs/records/effect-classification.md.
+    effect_class=READ,
 )
 async def memory_search(args: dict, ctx: ToolContext) -> ToolResult:
     from ..memory.retrieval import pack
