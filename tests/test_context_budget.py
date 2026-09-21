@@ -228,14 +228,26 @@ async def test_a_long_conversation_crosses_the_threshold_with_room_left_to_act(
 
 async def test_the_model_is_never_asked_to_watch_its_own_context(cfg) -> None:
     """The pass file's first *Must not*: the orchestrator does not decide when to hand off.
-    A crossing changes nothing about what the model is sent."""
+    A crossing changes nothing about what the model is sent.
+
+    "What the model is sent" means the turn's own prompt - the streamed calls. Session 5b
+    added a second kind of call to the same provider: a handoff generation, which is a
+    separate JSON completion under its own role and is *about* the handoff by construction.
+    Counting it here would turn this test into one that can only pass while no handoff is
+    ever generated, which is the opposite of what it is for.
+    """
     session = await Session.create("test")
     await _seed_conversation(session.id)
     provider = FakeProvider(turns=["done"])
 
     await _run(_loop(cfg, provider), session, "and what about this?")
 
-    sent = [m for call in provider.calls for m in call["messages"]]
+    sent = [
+        m
+        for call in provider.calls
+        if "json_schema" not in call
+        for m in call["messages"]
+    ]
     assert sum(1 for m in sent if m["role"] == "system") == 1  # the assembled block, alone
     body = " ".join(m.get("content") or "" for m in sent).lower()
     for word in ("handoff", "hand off", "context limit", "remaining tokens", "threshold"):

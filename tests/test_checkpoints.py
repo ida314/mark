@@ -12,11 +12,12 @@ through:
 - **`event_seq > covers_seq`.** The checkpoint may lag the journal and may never lead it.
   If the snapshot were taken after the announcement, a resume would replay from a position
   the snapshot already accounted for, and the only symptom would be work done twice.
-- **Four fields are inert on purpose.** `handoff_object`, `worker_results`,
-  `pending_promotions` and `memory_watermark` belong to Passes 5, 6 and 7. They are stored
-  and read back as empty lists and nulls, and the difference between those two is load
-  bearing: a list is "there were none", a null is "this pass recorded none". An empty dict
-  in the watermark would read as a measurement of zero.
+- **Three fields are still inert on purpose.** `worker_results`, `pending_promotions` and
+  `memory_watermark` belong to Passes 6 and 7. They are stored and read back as empty lists
+  and nulls, and the difference between those two is load bearing: a list is "there were
+  none", a null is "this pass recorded none". An empty dict in the watermark would read as a
+  measurement of zero. `handoff_object` was the fourth until session 5b filled it; a
+  checkpoint written without one still stores NULL, which is what the tests below assert.
 """
 
 from __future__ import annotations
@@ -175,7 +176,7 @@ def test_the_row_and_the_event_that_announces_it_agree(on, tmp_path) -> None:
 
 
 def test_every_trigger_in_the_vocabulary_can_actually_be_written(on, tmp_path) -> None:
-    """`handoff` has no producer until Pass 5 and `manual` is a person asking. Both are
+    """`manual` is a person asking and `handoff` had no producer until session 5a. Both are
     written here so neither is a slot nobody ever filled."""
     writer = _writer(tmp_path)
     checkpointer = Checkpointer(writer)

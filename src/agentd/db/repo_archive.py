@@ -175,17 +175,45 @@ async def max_event_id(session_id: UUID) -> int:
     return int(row["m"]) if row else 0
 
 
-async def recent_messages(session_id: UUID, limit: int = 200) -> list[dict]:
-    """User and assistant turns, oldest first, for rebuilding the chat history window."""
+async def recent_messages(
+    session_id: UUID, limit: int = 200, *, after_id: int | None = None
+) -> list[dict]:
+    """User and assistant turns, oldest first, for rebuilding the chat history window.
+
+    `after_id` is a handoff watermark (session 5b): everything at or below it has been
+    replaced by a handoff object, so a conversation that has handed off asks for the part
+    the handoff does not already state rather than re-reading what it summarised. `id` is
+    the archive's own identity column and is monotonic, which is what the existing
+    `ORDER BY id DESC` already relies on.
+    """
     rows = await fetch_all(
         """
         SELECT * FROM raw_events
+        WHERE session_id = %s AND kind IN ('user_message', 'assistant_message')
+          AND (%s::bigint IS NULL OR id > %s::bigint)
+        ORDER BY id DESC LIMIT %s
+        """,
+        (session_id, after_id, after_id, limit),
+    )
+    return list(reversed(rows))
+
+
+async def recent_message_sizes(session_id: UUID, limit: int = 200) -> list[tuple[int, int]]:
+    """`(id, characters)` for this session's messages, newest first.
+
+    Sizes rather than bodies: choosing where a handoff's watermark goes (session 5b) needs
+    to know how much each message costs and nothing about what it says, and a 42KB paste is
+    not worth loading to measure.
+    """
+    rows = await fetch_all(
+        """
+        SELECT id, coalesce(length(content), 0) AS chars FROM raw_events
         WHERE session_id = %s AND kind IN ('user_message', 'assistant_message')
         ORDER BY id DESC LIMIT %s
         """,
         (session_id, limit),
     )
-    return list(reversed(rows))
+    return [(int(r["id"]), int(r["chars"])) for r in rows]
 
 
 async def upcoming_events(kind_like: str, hours: int, limit: int = 50) -> list[dict]:

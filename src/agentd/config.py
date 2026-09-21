@@ -212,6 +212,26 @@ class HandoffConfig(BaseModel):
     threshold_tokens: int = 8000
     ceiling_tokens: int | None = None
 
+    # Session 5b. Which reading decides a handoff is generated: `carried` (what survives
+    # into the next turn) rather than the whole assembled prompt. The prompt reading still
+    # marks the `handoff` checkpoint, because it is a true statement about the prompt; it is
+    # not a reason to compress a conversation that is about to shrink on its own.
+    generator_role: str = "handoff"
+    # Conversation messages the successor still sees verbatim. The handoff's watermark is
+    # set below them, so these are the only part of the old context that is carried, and it
+    # is bounded rather than conditional on how good the handoff looked.
+    carry_messages: int = 4
+    # ...and the budget that actually binds. Count alone is not enough: four messages of a
+    # 42,000-character paste is a successor that inherits most of what the handoff was
+    # supposed to replace, which costs a model call and frees nothing. A message too large
+    # for this is not carried - it is in the object, which is what the object is for.
+    carry_tokens: int = 2000
+    # What the generator is shown: per message, and in total, newest first. An 8000-character
+    # tool result is summarisable from its first lines; a generation prompt the size of the
+    # context it is compressing is not.
+    excerpt_chars: int = 1500
+    source_chars: int = 48000
+
 
 class NtfyConfig(BaseModel):
     """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never

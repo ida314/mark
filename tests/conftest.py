@@ -78,6 +78,7 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
         "agentd.memory.consolidate", "agentd.agent.context", "agentd.agent.loop",
         "agentd.tools.registry", "agentd.embed", "agentd.llm.roles", "agentd.cli.app",
         "agentd.journal.runtime", "agentd.journal.checkpoints", "agentd.agent.budget",
+        "agentd.agent.handoff",
     ):
         import importlib
 

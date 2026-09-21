@@ -35,6 +35,7 @@ from ..tools.executor import ToolExecutor
 from ..tools.registry import Registry, get_registry
 from . import budget
 from . import context as ctxmod
+from . import handoff as handoff_mod
 from .stream import Answer, Delta, Notice, TurnStream
 
 FINAL_NUDGE = (
@@ -70,6 +71,12 @@ class Session:
     # model concluded from it is not, so lifting the interlock at the turn boundary would
     # protect the wrong thing.
     private: bool = False
+    # The handoff in force, once this conversation has run out of room to carry itself
+    # (session 5b). While it is set, a turn is assembled from it plus the messages after its
+    # watermark, and the part of the conversation it replaced is not read again. In-process
+    # only: the durable copy is `handoff_object` on the `turn_end` checkpoint, and putting it
+    # back on a resumed session is 5c's.
+    handoff: handoff_mod.Handoff | None = None
 
     @classmethod
     async def create(cls, channel: str = "cli", autonomy: str = "assist") -> Session:
@@ -125,6 +132,9 @@ class _TurnRecord:
     # rather than a 0 that reads as a turn which used no context.
     context: budget.ContextReading | None = None
     context_crossed: bool = False
+    # Filled when this turn generated a handoff, so the `turn_end` boundary stores it. It is
+    # the *next* checkpoint after the crossing, which is where the pass file puts it.
+    handoff_object: dict[str, Any] | None = None
 
     @classmethod
     def start(
@@ -206,7 +216,8 @@ class _TurnRecord:
         # the condition the next crash will be asked about. Swallowing it would make the one
         # checkpoint a resume needed the one nobody knew was missing.
         checkpoint_at(
-            "turn_end", run_id=self.rj.run_id, writer=self.rj.writer, cfg=self.cfg
+            "turn_end", run_id=self.rj.run_id, writer=self.rj.writer, cfg=self.cfg,
+            handoff_object=self.handoff_object,
         )
         return False
 
@@ -355,12 +366,22 @@ class AgentLoop:
             tele.tools_offered(list(exposed), registry_size=len(self.registry.enabled()))
 
             # 3. Build the messages.
+            #
+            # With a handoff in force this is the fresh orchestrator the pass file describes:
+            # the same system instructions and the same retrieved memory, plus the handoff
+            # object, plus only the conversation after the handoff's watermark. The old
+            # context is not copied in beside its own summary - `after_id` is what makes that
+            # structural rather than a rule somebody has to remember.
+            carried_over = session.handoff
             history = await ctxmod.history_messages(
-                session.id, budget_tokens=self.cfg.agent.history_tokens, summary=session.summary
+                session.id, budget_tokens=self.cfg.agent.history_tokens,
+                summary=session.summary,
+                after_id=carried_over.watermark if carried_over else None,
             )
             messages = ctxmod.build_messages(
                 self.cfg, autonomy=autonomy, context_block=context_block,
                 history=history, user_text=user_text,
+                handoff_block=handoff_mod.render(carried_over) if carried_over else "",
             )
             if extra_system:
                 messages.insert(1, {"role": "system", "content": extra_system})
@@ -671,11 +692,120 @@ class AgentLoop:
                 status=status, steps=steps, usage=usage_total, answer=answer,
                 trace_ids=trace_ids,
             )
+            # The handoff decision, taken on what this conversation will carry into the
+            # next turn rather than on how full this prompt got. Session 5a measured the
+            # whole prompt and handed the difference forward: a turn with twelve full-size
+            # tool results fills the window and leaves nothing behind it, and compressing a
+            # conversation for that would take the lossy path where the lossless one fits.
+            # What carries is exactly the archive's own user and assistant rows, which is
+            # what `history_messages` will re-read next time.
+            carried = budget.carried(
+                [
+                    *history,
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": answer},
+                ],
+                cfg=self.cfg,
+            )
+            if carried.crossed:
+                handoff = await self._hand_off(
+                    session=session, rj=rj, run_id=run_id, reading=carried,
+                    messages=[*messages, {"role": "assistant", "content": answer}],
+                    previous=carried_over, refs=refs,
+                )
+                if handoff is not None:
+                    rec.handoff_object = handoff.as_dict()
+                    session.handoff = handoff
             rec.finish(
                 status=status, steps=steps, answer=answer, usage=usage_total,
                 usage_reported=tele.usage_reported,
             )
             yield Answer(turn_id=str(turn_id), text=answer)
+
+    async def _hand_off(
+        self,
+        *,
+        session: Session,
+        rj: RunJournal,
+        run_id: str,
+        reading: budget.ContextReading,
+        messages: list[dict[str, Any]],
+        previous: handoff_mod.Handoff | None,
+        refs: dict[str, Any],
+    ) -> handoff_mod.Handoff | None:
+        """Compress this conversation into a handoff object, or record that it could not be.
+
+        Returns None on failure and never raises into the turn. That is not a swallowed
+        error: `handoff_finished(status="failed")` carries the reason, and the turn the user
+        is in the middle of is not the place to surface a failure of the machinery that was
+        preparing for the *next* one. What it must never do instead is produce an object
+        anyway - the pass file's second *Must not* - so there is no partial handoff here and
+        no fallback to copying the old context.
+        """
+        handoff_id = str(uuid7())
+        rj.emit(
+            "handoff_started",
+            {
+                "handoff_id": handoff_id,
+                "reason": handoff_mod.REASON_THRESHOLD,
+                "messages": len(messages),
+                "context_tokens": reading.used_tokens,
+                "ceiling_tokens": reading.ceiling_tokens,
+            },
+        )
+        started = time.perf_counter()
+        sizes = await repo_archive.recent_message_sizes(session.id)
+        watermark, kept = handoff_mod.carry_window(
+            sizes,
+            keep=self.cfg.handoff.carry_messages,
+            budget_tokens=self.cfg.handoff.carry_tokens,
+        )
+
+        dropped = sizes[kept:]
+
+        def done(status: str, *, chars: int, error: str | None) -> None:
+            rj.emit(
+                "handoff_finished",
+                {
+                    "handoff_id": handoff_id,
+                    "status": status,
+                    "summary_chars": chars,
+                    # What the successor will see, and what only the object now holds. On a
+                    # failure nothing is dropped, because nothing replaced it.
+                    "kept_messages": kept if status == "ok" else len(sizes),
+                    "dropped_messages": len(dropped) if status == "ok" else 0,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "error": error,
+                    # The successor is the next turn of this session, which has no run id
+                    # until it starts. Null is the honest value and not a missing one; 5c
+                    # fills it where a resume really does open a new run.
+                    "successor_run_id": None,
+                },
+            )
+
+        try:
+            handoff, _source, _ms = await handoff_mod.generate(
+                messages,
+                run_id=run_id,
+                session_id=str(session.id),
+                cfg=self.cfg,
+                provider=self.provider,
+                previous=previous,
+                watermark=watermark,
+                reading=reading,
+                dropped=(len(dropped), sum(chars for _id, chars in dropped)),
+                # Derived, never asked of the model. An open worker at a turn boundary is
+                # impossible today - a worker is awaited inside the step that created it -
+                # so this is empty by construction until Pass 6, and a model-written list
+                # here would be the only source of a sub-agent that never existed.
+                active_subagents=(),
+                important_memory_refs=[str(r) for r in refs.get("items", [])],
+            )
+        except handoff_mod.HandoffError as exc:
+            done("failed", chars=0, error=str(exc))
+            return None
+        done("ok", chars=len(handoff_mod.render(handoff)), error=None)
+        return handoff
 
     async def _record_turn(
         self, turn_id, session, origin, autonomy, status, started, usage, refs, trace_ids,

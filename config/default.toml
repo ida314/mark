@@ -36,6 +36,15 @@ top_p = 0.8
 thinking = false
 max_tokens = 256
 
+# Compressing a conversation into a handoff object. Low temperature and no thinking: this
+# call is an extraction from a transcript, and the one thing it must not do is invent a
+# detail the successor will then act on.
+[llm.roles.handoff]
+temperature = 0.2
+top_p = 0.8
+thinking = false
+max_tokens = 2048
+
 [llm.roles.judge]
 temperature = 0.6
 top_p = 0.95
@@ -150,6 +159,17 @@ enabled = false
 threshold_tokens = 8000      # fires with a third of the ceiling still free
 # ceiling_tokens = 24000     # unset means agent.history_tokens; the model window still
                              # wins when it is the smaller of the two
+
+# What a handoff is generated from and what the successor keeps (session 5b). The reading
+# that decides is of what *carries forward* - history plus this turn - not of the whole
+# assembled prompt: a turn with twelve full-size tool results fills the prompt and leaves
+# nothing behind, so compressing the conversation for it would lose something to save
+# nothing.
+generator_role = "handoff"   # [llm.roles.handoff]; falls back to main if unset
+carry_messages = 4           # messages after the watermark the successor still sees verbatim
+carry_tokens = 2000          # ...and the budget that binds first, so the successor starts roomy
+excerpt_chars = 1500         # per source message shown to the generator
+source_chars = 48000         # total shown to the generator, newest first
 
 [mcp]
 http_port = 8770

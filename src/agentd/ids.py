@@ -64,6 +64,16 @@ def parse_when(text: str, *, now: datetime | None = None) -> datetime | None:
     return now + delta if delta else None
 
 
+def estimate_tokens_for_chars(chars: int) -> int:
+    """The estimator itself, over a length rather than a string.
+
+    Session 5b needs to size a 42,000-character paste it has deliberately not loaded, and a
+    second copy of `/ 3.2` somewhere else is two estimators that can drift apart. There is
+    one, and `estimate_tokens` is it applied to a string.
+    """
+    return max(1, int(chars / 3.2))
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap, deterministic token estimate used for budget packing."""
-    return max(1, int(len(text) / 3.2))
+    return estimate_tokens_for_chars(len(text))

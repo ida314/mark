@@ -23,7 +23,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 4c | complete | 2026-09-20 | pass-04-outcome.md | **hard stop — human runs this** (user-facing wording). Ran autonomously under the standing policy in place of that stop: the wording is proposed in the record with 7 rejected variants and **still needs Dylan's review at the pass boundary**. 729 tests green. 8 deviations, no Must not crossed. Ruled both of 4b's handed-up decisions. |
 | 4d | complete | 2026-09-20 | pass-04-outcome.md | fork.py + `agent journal fork`. Parent bit-for-bit untouched; disclosure has three lists, not one. 751 tests green. 10 deviations, no Must not crossed. Pass-level exit criteria met. |
 | 5a | complete | 2026-09-21 | pass-05-outcome.md | `agent/budget.py` + `[handoff]`; ceiling is `agent.history_tokens` 24000, **not** `max_context_tokens` 262144. Threshold 8000 kept. 767 tests green. 6 deviations, no Must not crossed. Gives the `handoff` checkpoint trigger its first producer. |
-| 5b | pending | — | — | |
+| 5b | complete | 2026-09-21 | pass-05-outcome.md | `agent/handoff.py`: object, validator, generator, successor block; stored in `handoff_object` on the `turn_end` checkpoint. 806 tests green. 6 deviations, no Must not crossed. **Exit criterion partly met — 2 of the required 3 suite tasks.** |
 | 5c | pending | — | — | |
 | 6a | pending | — | — | |
 | 6b | pending | — | — | |
@@ -292,3 +292,53 @@ failure it guards is the one 4b refused to open when it declined to hand the jou
 folded into a summary or a memory candidate, becomes a claim the user never made and no tool
 ever returned.** Pass 5's handoff generator reads a message list; Pass 7's promotion reads
 one too. Both must exclude these, and both must say in their outcome record how they did it.
+
+
+## 5b → 5c, and three things for Dylan
+
+**The exit criterion is two-thirds met, and that is stated rather than rounded up.** The pass
+file asks for continuity across the boundary on **at least three** Pass 1 tasks including the
+two near-context-limit ones. 5b did the two near-limit tasks against the real local model —
+B23 crossed at the *real* configured threshold with no forcing at all, the first crossing
+outside the suite, and B22 was forced by lowering the ceiling to 1000. The third task was not
+run. That is an open item on the pass, not on 5c.
+
+**RESOLVED by 5b — 5a's handed-forward question.** There are two readings now, answering two
+questions. `budget.read_messages` sizes the whole assembled prompt and still marks 5a's
+`handoff` checkpoint; `budget.carried` sizes only `user`/`assistant` text — what
+`history_messages` actually replays — and that is the reading that decides a handoff is
+generated. Measured on the live runs: B22's prompt reached 13,484 estimated tokens while what
+it carried was 910. So "prompt full" and "conversation long" are now separate facts and the
+journal distinguishes them.
+
+**Requirement A is enforced and the enforcement is tested rather than demonstrated.**
+`handoff.source()` refuses three classes and counts each into the stored object: the
+`synthetic` flag (not the prefix string), every `system` message — `FINAL_NUDGE` and
+`STUCK_NUDGE` are unflagged runtime text — and any residual `RUNTIME_PREFIX`, which lands in
+`source.unflagged_runtime_text`. Both live runs had nothing synthetic to exclude, so the
+counters were 0 and the guard was never exercised on real material. Worth re-reading the first
+time a real resume feeds a handoff.
+
+**Requirement B falls to 5c**, and the reason is recorded rather than assumed: 5b consumes
+neither `notice()` nor `closing_messages()` — a threshold handoff contains no interrupted call
+— and its only import from `observations.py` is `RUNTIME_PREFIX`. **5c consumes `notice()`, so
+5c builds the guard.**
+
+**THE FINDING OF THE PASS, and it is a quality failure rather than a bug.** After a handoff
+this runtime **does not reliably refuse to answer from material the handoff dropped.** Same
+code, same task, B23 turn 4, three runs, three behaviours: a confident wrong answer with no
+hedge; a correct refusal naming what it no longer had; and a confident wrong answer again.
+Turn 5 — the row the baseline actually grades — passes in both runs. Adding `DROPPED_LINE`
+moved the behaviour and did not fix it. Three directions are named in the record and **none of
+them is carrying more of the conversation forward, which is the pass file's second Must not**;
+the first live run of 5b is what it looks like when the carry window quietly grows. This is
+5c's and Pass 7's, and it is the thing to grade the pass on.
+
+**Found incidentally, pre-existing, and not fixed: every turn's prompt contains the user's
+current message twice.** `run_turn` archives the user message (`loop.py:318`) *before* reading
+the history window back (`:376`), so `history_messages` returns it and `build_messages`
+appends it again (`context.py:111`). Verified independently at the boundary. It has always
+done this, it inflates every context reading 5a and 5b take by the size of the current
+message, and fixing it is a behaviour change to every turn that would move the Pass 1
+baseline. Same shape as the `loop.py:213` budget-exhaustion crash carried since Pass 2:
+recorded, not fixed, and **whoever fixes it must re-measure the threshold afterwards.**

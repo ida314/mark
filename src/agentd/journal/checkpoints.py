@@ -28,7 +28,7 @@ recoverable by re-folding. Three consequences, each enforced rather than asserte
     turn_end         `agent/loop.py`, as the turn record unwinds, after `agent_finished`
     worker_finished  `agent/subagents.py`, after the worker's result is journaled
     pre_effect       `tools/executor.py`, before an `unsafe_write` is even announced
-    handoff          nobody, yet - Pass 5 owns the code path that produces a handoff
+    handoff          `agent/loop.py`, the first step of a turn whose prompt is near full
     manual           `agent journal checkpoint <run>`, a human asking for a marker
 
 ## Workers are the unit of atomicity
@@ -48,11 +48,17 @@ exist (Pass 6) it is the field that already knows.
 
 ## What is deliberately inert
 
-`handoff_object` (Pass 5), `worker_results[]` (Pass 6), `pending_promotions[]` and
-`memory_watermark` (Pass 7) are defined, stored and read back, and this pass writes nothing
-into them. They are slots to fill, not a schema to migrate. The two lists are empty lists
-and the two objects are `None`, and those are different statements on purpose: an empty
-list is "there were none", a null is "this pass did not record one".
+`worker_results[]` (Pass 6), `pending_promotions[]` and `memory_watermark` (Pass 7) are
+defined, stored and read back, and nothing writes into them. They are slots to fill, not a
+schema to migrate. The two lists are empty lists and the object is `None`, and those are
+different statements on purpose: an empty list is "there were none", a null is "this pass
+did not record one".
+
+`handoff_object` stopped being one of them in session 5b: a `turn_end` checkpoint taken on a
+turn that generated a handoff carries it. NULL still means no handoff, and a fold tells that
+apart from a handoff that failed by the `handoff_finished(status="failed")` sitting in the
+journal in front of it - the object is not the record that a handoff was attempted, the
+events are.
 """
 
 from __future__ import annotations
@@ -315,7 +321,13 @@ class Checkpointer:
 
     # --- write ---------------------------------------------------------------
 
-    def write(self, run_id: str, *, trigger: str) -> Checkpoint:
+    def write(
+        self,
+        run_id: str,
+        *,
+        trigger: str,
+        handoff_object: dict[str, Any] | None = None,
+    ) -> Checkpoint:
         """Snapshot `run_id` at this boundary, announce it, and store it.
 
         Raises rather than returning None on anything unexpected: `MidWorkerCheckpoint`
@@ -356,7 +368,10 @@ class Checkpointer:
             "messages_ref": snap.messages_ref.as_dict(),
             "open_workers": [],
             "effects_cursor": snap.effects_cursor.as_dict(),
-            "handoff_object": None,
+            # Session 5b fills this. NULL still means "no handoff", and a fold can tell that
+            # from "a handoff was attempted and failed" because the latter has a
+            # `handoff_finished(status="failed")` in the journal in front of it.
+            "handoff_object": handoff_object,
             "worker_results": [],
             "pending_promotions": [],
             "memory_watermark": None,
@@ -404,6 +419,7 @@ class Checkpointer:
             messages_ref=snap.messages_ref,
             open_workers=(),
             effects_cursor=snap.effects_cursor,
+            handoff_object=handoff_object,
         )
         _record_overhead(trigger, time.perf_counter() - started, size)
         return checkpoint
@@ -607,6 +623,7 @@ def checkpoint_at(
     run_id: str | None,
     writer: JournalWriter | None = None,
     cfg: Config | None = None,
+    handoff_object: dict[str, Any] | None = None,
 ) -> Checkpoint | None:
     """Write the checkpoint for a boundary, or explain by returning None.
 
@@ -622,7 +639,7 @@ def checkpoint_at(
         Checkpointer(writer, cfg=cfg) if writer is not None else get_checkpointer(cfg)
     )
     try:
-        return checkpointer.write(run_id, trigger=trigger)
+        return checkpointer.write(run_id, trigger=trigger, handoff_object=handoff_object)
     except MidWorkerCheckpoint:
         return None
 

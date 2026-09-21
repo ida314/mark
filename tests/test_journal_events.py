@@ -90,11 +90,10 @@ def test_the_types_nothing_writes_yet_are_named_rather_than_left_implicit() -> N
         # `checkpoint_written` left this set in session 4a: `journal/checkpoints.py` writes
         # it at the five boundaries. `run_resumed` left it in 4b: `journal/resume.py` writes
         # one into the run it is picking up. `run_forked` left it in 4d: `journal/fork.py`
-        # writes one as the first event of the run a rewind opens. What is left is a
-        # progress channel the tool surface does not have, and Pass 5.
+        # writes one as the first event of the run a rewind opens. The `handoff_*` pair left
+        # it in 5b, written around one generation. What is left is a progress channel the
+        # tool surface does not have.
         "tool_progress",
-        "handoff_started",
-        "handoff_finished",
     }
 
 

@@ -6,13 +6,14 @@ frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Fourteen of the seventeen are emitted today** - nine wired by session 2b, the two
+**Sixteen of the seventeen are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
-checkpointer, `run_resumed` by session 4b's `journal/resume.py` and `run_forked` by session
-4d's `journal/fork.py`. The other three are defined here and written by nobody yet -
-`tool_progress` needs a progress channel the tool surface does not have, and `handoff_*` is
-Pass 5. They are specified now so those passes fill a slot instead of migrating a schema, and
-each has a test that writes one, so none of them is a shape nobody ever tried to construct.
+checkpointer, `run_resumed` by session 4b's `journal/resume.py`, `run_forked` by session
+4d's `journal/fork.py` and the `handoff_*` pair by session 5b's `agent/handoff.py`. The one
+left is `tool_progress`, which needs a progress channel the tool surface does not have. Each
+was specified before it had a producer so that the pass which needed it filled a slot instead
+of migrating a schema, and each has a test that writes one, so none of them is a shape nobody
+ever tried to construct.
 
 Three rules, and the first two are this codebase's characteristic bug stated backwards:
 
@@ -381,6 +382,13 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # Session 4d. Written by `journal/fork.py` as the first event of the *new* run, and
         # only when a person asks for a rewind. The run it names is not touched.
         "run_forked",
+        # Session 5b. Written by `agent/handoff.py` through the turn loop, as a pair, around
+        # one generation. Both are written even when generation fails - a handoff that was
+        # attempted and did not work is a different state from one nobody tried, and with
+        # `handoff_object` NULL in both cases these two events are the only thing that says
+        # which happened.
+        "handoff_started",
+        "handoff_finished",
     }
 )
 

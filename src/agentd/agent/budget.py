@@ -21,6 +21,15 @@ still free, roughly 10k tokens before `history_messages` starts dropping turns.
 `[handoff] ceiling_tokens` overrides that, and the model window still wins when it is the
 smaller of the two, so a ceiling nobody could actually send is not one this reports against.
 
+**Two readings, two questions (session 5b).** `read_messages` sizes the whole assembled
+prompt: tool results and the model's own `arguments` blobs are in the window while a turn
+runs, so it is the honest answer to "is this prompt near the ceiling". `carried` sizes only
+what survives into the next turn. They differ by exactly the in-turn material, which is
+bounded by `max_steps` x `tool_result_max_chars` and is gone by the next prompt - so a turn
+can cross on the first reading with a two-message conversation behind it. The threshold
+crossing that marks the `handoff` checkpoint is the first reading; the one that decides a
+handoff is generated is the second.
+
 **Every number here is an estimate, and says so.** `ids.estimate_tokens` is len/3.2; it is
 not a token count. A real count would come from the provider's `usage` chunk, and the
 router in front of this model drops it - `usage_reported` has been false on every streamed
@@ -31,6 +40,7 @@ downstream can mistake this for something that was counted.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,6 +133,46 @@ def read_messages(messages: list[dict[str, Any]], *, cfg: Config | None = None) 
     )
 
 
+# The roles whose text carries into the next turn. `context.history_messages` rebuilds a
+# conversation from the archive's `user_message` and `assistant_message` rows and nothing
+# else: a tool result is not replayed, a system block is rebuilt from scratch every turn, and
+# the runtime's own mid-turn notes are never archived at all. So these two roles are exactly
+# what `agent.history_tokens` is spent on, and a reading over them is the only one comparable
+# to that ceiling.
+CARRIED_ROLES = ("user", "assistant")
+
+
+def carried_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The subset of a message list that will still exist on the next turn."""
+    return [
+        m
+        for m in messages
+        if m.get("role") in CARRIED_ROLES and (m.get("content") or "").strip()
+    ]
+
+
+def carried(messages: Sequence[dict[str, Any]], *, cfg: Config | None = None) -> ContextReading:
+    """Size what carries forward, against the ceiling that governs carrying forward.
+
+    Session 5a measured the whole assembled prompt and handed the consequence to 5b: a turn
+    with six full-size tool results crosses on prompt size while its *conversation* is two
+    messages long. Both readings are true and they answer different questions.
+    `read_messages` answers "is this prompt near the ceiling"; this answers "is this
+    conversation too long to carry", which is the question a handoff exists for - in-turn
+    tool output is bounded by `max_steps` and is gone by the next turn, so compressing a
+    conversation because of it would be the lossy path taken where the lossless one fits.
+    """
+    cfg = cfg or get_config()
+    limit, source = ceiling(cfg)
+    return ContextReading(
+        used_tokens=messages_tokens(carried_messages(messages)),
+        ceiling_tokens=limit,
+        threshold_tokens=threshold(cfg),
+        ceiling_source=source,
+        basis=BASIS_ESTIMATE,
+    )
+
+
 def unmeasured(cfg: Config | None = None) -> ContextReading:
     """The reading for a turn that never assembled a prompt.
 
@@ -144,12 +194,15 @@ __all__ = [
     "BASIS_ESTIMATE",
     "BASIS_PROVIDER",
     "BASIS_UNMEASURED",
+    "CARRIED_ROLES",
     "CEILING_SOURCES",
     "CONTEXT_BASES",
     "SOURCE_CONFIGURED",
     "SOURCE_HISTORY",
     "SOURCE_MODEL_WINDOW",
     "ContextReading",
+    "carried",
+    "carried_messages",
     "ceiling",
     "read_messages",
     "threshold",

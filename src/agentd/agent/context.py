@@ -46,10 +46,19 @@ def system_prompt(cfg: Config, autonomy: str, context_block: str = "") -> str:
 
 
 async def history_messages(
-    session_id: UUID, *, budget_tokens: int, summary: str | None = None
+    session_id: UUID,
+    *,
+    budget_tokens: int,
+    summary: str | None = None,
+    after_id: int | None = None,
 ) -> list[dict]:
-    """Recent turns, newest-first until the budget is spent, then re-ordered."""
-    rows = await repo_archive.recent_messages(session_id, limit=200)
+    """Recent turns, newest-first until the budget is spent, then re-ordered.
+
+    `after_id` is a handoff watermark (session 5b). When a conversation has handed off,
+    everything at or below it is already stated in the handoff object the system block
+    carries, so replaying it would be the old context copied in beside its own summary.
+    """
+    rows = await repo_archive.recent_messages(session_id, limit=200, after_id=after_id)
     picked: list[dict] = []
     used = 0
     for row in reversed(rows):
@@ -83,10 +92,21 @@ def build_messages(
     context_block: str,
     history: list[dict],
     user_text: str,
+    handoff_block: str = "",
 ) -> list[dict]:
+    """The prompt for one turn.
+
+    `handoff_block` is how a fresh orchestrator is started after a context handoff: it goes
+    into the same system message rather than a second one, so the shape of the message list
+    is what it always was - system, conversation, the user - and the only thing that changed
+    is that the conversation now begins after the handoff's watermark.
+    """
     cfg = cfg or get_config()
+    system = system_prompt(cfg, autonomy, context_block)
+    if handoff_block.strip():
+        system = f"{system}\n{handoff_block}"
     return [
-        {"role": "system", "content": system_prompt(cfg, autonomy, context_block)},
+        {"role": "system", "content": system},
         *history,
         {"role": "user", "content": user_text},
     ]
