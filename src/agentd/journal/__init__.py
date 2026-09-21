@@ -39,6 +39,7 @@ from .checkpoints import (
 )
 from .events import (
     CHECKPOINT_TRIGGERS,
+    CONTEXT_BASES,
     EFFECT_CLASSES,
     EFFECT_STATUSES,
     EMITTED_TYPES,
@@ -113,6 +114,7 @@ from .writer import SYNC_PREFIXES, SYNC_TYPES, JournalWriter, is_synchronous
 
 __all__ = [
     "CHECKPOINT_TRIGGERS",
+    "CONTEXT_BASES",
     "COMPLETE",
     "AnnouncedCall",
     "CallGroup",

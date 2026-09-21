@@ -135,6 +135,22 @@ retention = "keep_everything"    # the other mode is "max_age_days"; pruning dro
 [checkpoints]
 enabled = false
 
+# Context handoff (Pass 5). The runtime watches how much room the orchestrator has left and
+# says when that is not enough; the orchestrator is never asked to monitor its own context.
+#
+# Remaining room is measured against agent.history_tokens (24000) - the only budget this
+# runtime enforces on what carries forward, since context.history_messages silently drops
+# the oldest turns once it is spent. It is NOT llm.max_context_tokens (262144): the largest
+# prompt this system can assemble is about 56k tokens and the largest ever observed was
+# 6,251, so a threshold measured against the model window could never fire.
+#
+# Every number in this reading is an estimate (len/3.2), never a provider token count - the
+# router in front of this model drops the usage chunk, so no real count exists to use.
+[handoff]
+threshold_tokens = 8000      # fires with a third of the ceiling still free
+# ceiling_tokens = 24000     # unset means agent.history_tokens; the model window still
+                             # wins when it is the smaller of the two
+
 [mcp]
 http_port = 8770
 

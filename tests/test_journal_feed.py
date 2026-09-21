@@ -235,6 +235,9 @@ async def test_following_a_run_stops_at_that_runs_own_ending_not_a_workers(cfg, 
         {
             "turn_id": "t-worker", "status": "completed", "steps": 1, "duration_ms": 1,
             "answer_chars": 0, "usage": {}, "usage_reported": False, "error": None,
+            "context_tokens": 0, "context_ceiling_tokens": 24000,
+            "context_threshold_tokens": 8000, "context_crossed": False,
+            "context_basis": "unmeasured",
         },
     )
     rj.emit(
@@ -242,6 +245,9 @@ async def test_following_a_run_stops_at_that_runs_own_ending_not_a_workers(cfg, 
         {
             "turn_id": "t-main", "status": "completed", "steps": 1, "duration_ms": 1,
             "answer_chars": 0, "usage": {}, "usage_reported": False, "error": None,
+            "context_tokens": 0, "context_ceiling_tokens": 24000,
+            "context_threshold_tokens": 8000, "context_crossed": False,
+            "context_basis": "unmeasured",
         },
     )
     writer.flush()

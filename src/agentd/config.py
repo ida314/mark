@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / "config" / "default.toml"
@@ -190,6 +190,27 @@ class CheckpointsConfig(BaseModel):
     """
 
     enabled: bool = False
+
+
+class HandoffConfig(BaseModel):
+    """Context handoff (Pass 5). When the runtime decides a conversation has run out of
+    room, and what "room" is measured against.
+
+    The runtime owns this reading; the orchestrator is never asked to watch its own
+    context, so nothing here is ever rendered into a prompt.
+
+    `ceiling_tokens` unset means `agent.history_tokens` (24000), which is the only budget
+    this runtime enforces on what carries forward: `context.history_messages` drops the
+    oldest turns once it is spent. It is deliberately *not* `llm.max_context_tokens`
+    (262144) - the largest prompt this system can assemble is about 56k and the largest
+    ever observed was 6,251 estimated tokens, so a threshold measured against the model
+    window could never fire. The model window still wins when it is the smaller of the two.
+    """
+
+    # Remaining tokens at or below which the context counts as exhausted. A third of the
+    # default ceiling, so a handoff is produced with room to spare rather than at the edge.
+    threshold_tokens: int = 8000
+    ceiling_tokens: int | None = None
 
 
 class NtfyConfig(BaseModel):
@@ -468,12 +489,32 @@ class Config(BaseModel):
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     journal: JournalConfig = Field(default_factory=JournalConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
+    handoff: HandoffConfig = Field(default_factory=HandoffConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     ntfy: NtfyConfig = Field(default_factory=NtfyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig)
 
     policy_file: Path = POLICY_FILE
+
+    @model_validator(mode="after")
+    def _handoff_threshold_fits_its_ceiling(self) -> Config:
+        """A threshold at or above the ceiling would be crossed on every turn.
+
+        Refused at load rather than clamped mid-turn: a monitor that fires on the first
+        step of every conversation looks exactly like one that works, which is how a
+        threshold nobody can trust gets shipped.
+        """
+        ceiling = self.handoff.ceiling_tokens
+        if ceiling is None:
+            ceiling = self.agent.history_tokens
+        ceiling = min(ceiling, self.llm.max_context_tokens)
+        if self.handoff.threshold_tokens >= ceiling:
+            raise ValueError(
+                f"[handoff] threshold_tokens ({self.handoff.threshold_tokens}) must be below "
+                f"the context ceiling ({ceiling}); it would otherwise be crossed by every turn"
+            )
+        return self
 
     def ensure_dirs(self) -> None:
         for p in (

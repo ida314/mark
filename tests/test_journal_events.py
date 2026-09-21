@@ -171,6 +171,9 @@ def test_a_bool_is_not_accepted_where_a_count_is_declared(writer: JournalWriter)
             {
                 "turn_id": "t", "status": "completed", "steps": True, "duration_ms": 1,
                 "answer_chars": 0, "usage": {}, "usage_reported": False,
+                "context_tokens": 0, "context_ceiling_tokens": 24000,
+                "context_threshold_tokens": 8000, "context_crossed": False,
+                "context_basis": "unmeasured",
             },
         )
     assert "expected int" in str(exc.value)

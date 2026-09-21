@@ -33,6 +33,7 @@ from ..policy.engine import PolicyEngine, engine_from_config
 from ..tools.base import ToolContext
 from ..tools.executor import ToolExecutor
 from ..tools.registry import Registry, get_registry
+from . import budget
 from . import context as ctxmod
 from .stream import Answer, Delta, Notice, TurnStream
 
@@ -118,6 +119,12 @@ class _TurnRecord:
     error: str | None = None
     usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     usage_reported: bool = False
+    # The fullest this turn's context got, and whether any step of it came within the
+    # handoff threshold of the ceiling. `context` stays None until a prompt is actually
+    # assembled, so a turn that died before its first model call records "unmeasured"
+    # rather than a 0 that reads as a turn which used no context.
+    context: budget.ContextReading | None = None
+    context_crossed: bool = False
 
     @classmethod
     def start(
@@ -134,6 +141,21 @@ class _TurnRecord:
         self.status, self.steps, self.answer = status, steps, answer
         self.usage, self.usage_reported, self.error = dict(usage), usage_reported, error
 
+    def context_seen(self, reading: budget.ContextReading) -> bool:
+        """Take one reading of the prompt about to be sent. True on this turn's first
+        crossing, and only then, so a boundary fires once rather than once per step.
+
+        The peak is kept rather than the latest: what `agent_finished` reports is the
+        closest this turn came to its ceiling, and a turn that crossed and then shrank
+        still crossed.
+        """
+        if self.context is None or reading.used_tokens > self.context.used_tokens:
+            self.context = reading
+        if not reading.crossed:
+            return False
+        first, self.context_crossed = not self.context_crossed, True
+        return first
+
     def __enter__(self) -> _TurnRecord:
         return self
 
@@ -144,6 +166,10 @@ class _TurnRecord:
                 status = "cancelled"
             else:
                 status, error = "failed", f"{exc_type.__name__}: {exc}"
+        # An estimate, never a count: `context_basis` is to `context_tokens` what
+        # `usage_reported` is to `usage`, and the router in front of this model has dropped
+        # the usage chunk on every streamed turn since Pass 1, so there is no count to use.
+        context = self.context or budget.unmeasured(self.cfg)
         # Synchronous by classification (journal.writer.SYNC_TYPES), so this carries the
         # whole turn's buffered tail to disk with it.
         self.rj.emit(
@@ -157,6 +183,11 @@ class _TurnRecord:
                 "answer_preview": jevents.preview(self.answer),
                 "usage": dict(self.usage),
                 "usage_reported": self.usage_reported,
+                "context_tokens": context.used_tokens,
+                "context_ceiling_tokens": context.ceiling_tokens,
+                "context_threshold_tokens": context.threshold_tokens,
+                "context_crossed": self.context_crossed,
+                "context_basis": context.basis,
                 "error": error,
             },
         )
@@ -388,6 +419,19 @@ class AgentLoop:
                 text_parts: list[str] = []
                 calls = []
                 tele.context_sample(messages)
+                # How much room is left, read by the runtime from the prompt it is about to
+                # send. The orchestrator is never asked this and is never told the answer:
+                # nothing here appends a message, and the model sees the same list either
+                # way. On the first crossing of a turn the boundary is marked as a `handoff`
+                # checkpoint - the trigger session 4a accepted and left with no producer -
+                # so the moment the runtime decided the context was nearly spent is in the
+                # journal rather than only in this process. A worker's crossing marks
+                # nothing: `checkpoint_at` reads the run as mid-worker and declines, which is
+                # "workers are the unit of atomicity" derived rather than special-cased here.
+                if rec.context_seen(budget.read_messages(messages, cfg=self.cfg)):
+                    checkpoint_at(
+                        "handoff", run_id=run_id, writer=rj.writer, cfg=self.cfg
+                    )
                 finish_reason: str | None = None
                 llm_started = time.perf_counter()
                 params = params_for(self.role, self.cfg)

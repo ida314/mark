@@ -94,6 +94,14 @@ EFFECT_STATUSES = ("committed", "failed", "uncertain")
 # "cancelled" is the one addition, for a consumer that stopped iterating the turn.
 RUN_STATUSES = ("completed", "abandoned", "failed", "cancelled")
 
+# How a context reading was arrived at (session 5a). "estimate" is `ids.estimate_tokens`
+# over the assembled prompt, which is what every reading says today; "provider" is reserved
+# for the day the router in front of this model stops dropping the usage chunk. "unmeasured"
+# is not a hedge either: a turn that never assembled a prompt has no size, and recording that
+# as a 0 would read as a turn that used no context. `agent/budget.py` imports this tuple
+# rather than repeating it, so the enum and the values written cannot drift apart.
+CONTEXT_BASES = ("estimate", "provider", "unmeasured")
+
 EVENTS: dict[str, dict[str, Field]] = {
     # --- the turn itself -----------------------------------------------------
     "agent_started": {
@@ -124,6 +132,21 @@ EVENTS: dict[str, dict[str, Field]] = {
         # the usage chunk on streamed calls (Pass 1, open question 1). Without this the
         # journal would record an unmeasured turn as a free one.
         "usage_reported": req(bool),
+        # Session 5a. How full the orchestrator's context got, and against what. Required
+        # rather than optional because a turn that did not say is indistinguishable from
+        # one nobody sized, and that is the failure this runtime keeps having.
+        #
+        # `context_tokens` is the largest prompt this turn assembled, **estimated** - it is
+        # never a provider token count, and `context_basis` is the field that says so, in
+        # the same way `usage_reported` does for `usage`. The ceiling is the budget
+        # `agent/budget.py` measures against (agent.history_tokens by default, not the
+        # model window); `context_crossed` is whether any step of this turn came within
+        # `context_threshold_tokens` of it.
+        "context_tokens": req(int),
+        "context_ceiling_tokens": req(int),
+        "context_threshold_tokens": req(int),
+        "context_crossed": req(bool),
+        "context_basis": req(str, enum=CONTEXT_BASES),
         "answer_preview": opt(str),
         "error": opt(str, nullable=True),
     },

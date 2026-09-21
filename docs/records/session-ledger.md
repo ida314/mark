@@ -22,7 +22,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 4b | complete | 2026-09-20 | pass-04-outcome.md | resume.py: fold → rehydrate → reconcile → announce. `agent journal resume` reports by default. 711 tests green. 11 deviations, no Must not crossed. Two decisions handed to 4c. |
 | 4c | complete | 2026-09-20 | pass-04-outcome.md | **hard stop — human runs this** (user-facing wording). Ran autonomously under the standing policy in place of that stop: the wording is proposed in the record with 7 rejected variants and **still needs Dylan's review at the pass boundary**. 729 tests green. 8 deviations, no Must not crossed. Ruled both of 4b's handed-up decisions. |
 | 4d | complete | 2026-09-20 | pass-04-outcome.md | fork.py + `agent journal fork`. Parent bit-for-bit untouched; disclosure has three lists, not one. 751 tests green. 10 deviations, no Must not crossed. Pass-level exit criteria met. |
-| 5a | pending | — | — | |
+| 5a | complete | 2026-09-21 | pass-05-outcome.md | `agent/budget.py` + `[handoff]`; ceiling is `agent.history_tokens` 24000, **not** `max_context_tokens` 262144. Threshold 8000 kept. 767 tests green. 6 deviations, no Must not crossed. Gives the `handoff` checkpoint trigger its first producer. |
 | 5b | pending | — | — | |
 | 5c | pending | — | — | |
 | 6a | pending | — | — | |
@@ -220,3 +220,36 @@ which is 5b and 5c, not 5a. 5a consumes none of it.
 
 **5a is clear to dispatch.** It is runtime-side token accounting and a threshold; it touches
 no wording, no status word and no rehydration path.
+
+
+## 5a → 5b and 5c, and one thing for Dylan
+
+- **The two hazards 5a was handed both held, and both are now settled facts rather than
+  warnings.** Provider token accounting is dead — 12 of 5,087 `actions` rows have non-zero
+  tokens, all from 2026-09-17, and `usage_reported` is false on all 5 live `agent_finished`
+  rows. Everything 5a records is `ids.estimate_tokens` (len/3.2) and is labelled
+  `context_basis = "estimate"`. **No later pass may put these numbers in a table as measured
+  values.** And the ceiling is `agent.history_tokens` (24000): `llm.max_context_tokens`
+  (262144) is used nowhere in `src`, and a crossing against it would need a 254k prompt
+  against a ~56k structural maximum.
+- **5b inherits an unresolved question, not a finished one: `context_crossed` answers "is
+  this prompt near the ceiling", not "is this conversation long".** The numerator is the
+  whole assembled prompt; the denominator is the budget on what carries *forward*. So
+  `max_steps` (12) × `tool_result_max_chars` (8000) ≈ 30k estimated tokens of tool output
+  can cross a 24k ceiling with a two-message conversation. It has never happened here, and
+  it is reachable by construction. 5a recorded the alternative rather than deciding it.
+- **The crossing has never fired outside the suite.** 0 of 33 recorded turns come within
+  17,749 tokens of the threshold; the longest real conversation on this machine is 1,993
+  tokens, 8% of the ceiling. The forced-long test builds its own history. **5b must not read
+  "it fired in a test" as "it fires when it should."**
+- **`estimate_tokens` has never been calibrated against this model's tokenizer.** len/3.2 is
+  a guess. Every number in Pass 5 inherits its error.
+- **For Dylan, a precedent rather than a blocker:** 5a added five *required* fields to the
+  existing `agent_finished` type, so the 5 pre-5a rows in the live journal no longer pass
+  `validate_payload`. Checked rather than assumed: `validate_payload` is called from exactly
+  one place, `journal/runtime.py:123`, on the write path, so nothing re-validates on read and
+  all 9 live runs still fold. The question is whether a later pass may do this again — Pass 6
+  (`worker_results`) and Pass 7 (`memory_watermark`) both fill slots on existing records and
+  will face the same choice. 4a's answer twice was required-and-nullable, which does not help
+  when the key is absent entirely.
+- **5b is held** pending the 4c wording review, per the fence recorded above.

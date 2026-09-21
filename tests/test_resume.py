@@ -63,6 +63,9 @@ def _finished(rj: RunJournal, turn_id: str = "t1", status: str = "completed") ->
             "turn_id": turn_id, "status": status, "steps": 1, "duration_ms": 5,
             "answer_chars": 4, "answer_preview": "done", "usage": {}, "usage_reported": False,
             "error": None,
+            "context_tokens": 0, "context_ceiling_tokens": 24000,
+            "context_threshold_tokens": 8000, "context_crossed": False,
+            "context_basis": "unmeasured",
         },
     )
 
