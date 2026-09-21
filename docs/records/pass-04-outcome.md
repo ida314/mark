@@ -1432,6 +1432,11 @@ square bracket, and rich would read it as a style tag.
 
 ### the disclosure format, verbatim
 
+**Superseded in four places by Dylan's review at the Pass 4/5 boundary — see
+"Pass 4/5 boundary — the wording review" at the end of this record for what the code
+says now. The block below is what was *proposed*, kept because the review is only
+legible next to it.**
+
 Rendered by `agent journal fork demo-fork --at 2` against a scratch data dir holding a real
 run: three `fs_write` calls committed, one `notify_user` committed, one `web_fetch` that
 failed, one `reminder_set` left open. Every line below came out of that journal.
@@ -1595,3 +1600,130 @@ correctness.
 - One review owed to a human: **every user-facing string written in 4c and 4d is unreviewed.**
   Both sessions wrote it under the autonomous standing policy and both said so at the point of
   writing. It is in two functions in one module.
+
+
+---
+
+## Pass 4/5 boundary — the wording review
+
+The one thing Pass 4 owed a human. Put to Dylan on 2026-09-21, before 5a was dispatched.
+
+**4d's disclosure: stands, with four edits, applied.** **4c's wording: still held** — he had
+not read it in full, and nothing in Pass 5 may consume `notice()`, `prompt()` or
+`closing_messages()` until he has.
+
+### the four edits, and what each is about
+
+**1. The opening sentence stops explaining itself.**
+
+```
+was:  Going back to seq 2 of this conversation. The run it came from is untouched - its
+      journal is not rewritten - and nothing it did has been undone.
+now:  Going back to seq 2 of this conversation. The run it came from is kept exactly as it
+      was.
+```
+
+The two clauses it drops were both true and both mechanism. "Its journal is not rewritten"
+answers a question the reader did not ask, and "nothing it did has been undone" is the
+closing sentence's job — saying it twice in one paragraph spends the reader's attention on
+the part that needs it least.
+
+**2. `I:` → `I made:`, in both headings.** "Since that point I made:" and "I may also have
+made:". The list underneath is a list of *calls*, and the old heading grammatically governed
+whatever followed — so the sentence only parsed if you read the call lines as verbs.
+
+**3. A failed call is stated, never interpreted.**
+
+```
+was:  (1 web_fetch call after that point returned a failure, so it changed nothing outside.)
+now:  (1 web_fetch call after that point returned an error.)
+```
+
+His reasoning, which is the load-bearing part: **a failure response does not prove the
+effect did not land — a fetch can fail after the server acted, and that is exactly why
+`web_fetch` is `unsafe_write`.** One rule for every tool, so the renderer has no per-class
+branch. Filed as a Pass 10 collection entry in `docs/records/pass-03-outcome.md`, beside
+`memory_search` and `web_fetch`: it is the same "property of the call, collapsed into a
+property of something coarser" shape, one level down at the ledger instead of at the
+registry.
+
+**4. The empty case attributes its own claim.**
+
+```
+was:  ...so nothing outside this conversation was changed by the part I am rewinding.
+now:  ...so as far as the journal shows, nothing outside this conversation was changed by
+      the part I am rewinding.
+```
+
+This is 4d's own open question 1 answered in the wording rather than deferred: the claim
+rests on the absence of a synchronous `effect_intended`, and every live-data check in Pass 4
+read a journal copied without its `-wal`. The strongest sentence this pass prints now names
+the thing it rests on.
+
+**The closing sentence is unchanged**, at his instruction: "Reverting the conversation. I
+have not undone any of the above, and I cannot: a fork rewinds what was said, not what was
+done."
+
+### what shipped for the review
+
+| file | what changed |
+|---|---|
+| `src/agentd/agent/observations.py` | the four strings in `disclosure()` |
+| `src/agentd/journal/fork.py` | `Disclosure`'s docstring: the `failed` reasoning, corrected and cross-referenced |
+| `tests/test_fork.py` | four assertions retargeted; one added, pinning the new opening sentence, which had none |
+| `docs/records/pass-03-outcome.md` | the Pass 10 collection entry |
+
+Suite **751 passing**, unchanged in count. `.venv/bin/ruff check src tests scripts` clean.
+No behaviour changed: no event, no column, no status, no path, no class. `Disclosure.failed`
+is still a separate list and 4c's `effect_failed → blocked` mapping is untouched — the
+collection entry is a thing to decide at Pass 10, not a ruling to apply now.
+
+### rendered from a real journal after the edits
+
+Not quoted from the diff. A scratch run with two committed `fs_write` calls, one `web_fetch`
+that returned a failure, and one `reminder_set` left open:
+
+```
+Going back to seq 2 of this conversation. The run it came from is kept exactly as it was.
+
+Since that point I made:
+  - 2 fs_write calls, all under /home/dylan/notes/
+      · fs_write(path=/home/dylan/notes/lease.md, content=xxxx…)
+      · fs_write(path=/home/dylan/notes/landlord.md, content=xxxx…)
+
+I may also have made:
+  - 1 reminder_set call
+      · reminder_set(text=chase the landlord, at=18:00)
+          interrupted, and never reported back - whether it happened is not known
+
+(1 web_fetch call after that point returned an error.)
+
+Reverting the conversation. I have not undone any of the above, and I cannot: a fork rewinds
+what was said, not what was done.
+```
+
+And the empty case:
+
+```
+Going back to seq 2 of this conversation. The run it came from is kept exactly as it was.
+
+The journal records no effecting call after that point, so as far as the journal shows,
+nothing outside this conversation was changed by the part I am rewinding.
+```
+
+### the one thing edit 3 surfaced, not yet ruled
+
+**A failed call is now the only call in the disclosure that is not named.** Under the old
+wording that was defensible — the line claimed the call changed nothing outside, so there
+was nothing to act on. Edit 3 withdraws exactly that claim, which leaves a line saying
+something *may* have happened while withholding the argument that would let the reader check:
+
+```
+(1 web_fetch call after that point returned an error.)
+```
+
+Every other block names its calls with `LEADING_ARGS` pulling the URL or path to the front,
+because of Dylan's own ruling that a prompt the user cannot act on trains blind confirmation.
+The wording above is his, verbatim, and is implemented verbatim; whether the failed block
+should name its calls the way the other two do is his to settle. Nothing in Pass 5 depends on
+the answer.

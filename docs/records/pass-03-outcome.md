@@ -898,6 +898,32 @@ classification. The three tools it names (`fs_write`, `goal_upsert`, `web_fetch`
 same observation; `fs_write` and `goal_upsert` belong on the list above if a later session
 confirms they break the same way.
 
+**Appended at the Pass 4/5 boundary by Dylan — the same problem one level down, at the
+ledger rather than at the registry.** 3b ruled that a call which returned a failure did not
+produce its effect, and the whole recovery path inherits it: `Disclosure.failed` and 4c's
+`effect_failed → blocked` mapping both rest on it.
+
+> **A failure response does not prove the effect did not land.** A fetch can fail after the
+> server acted — which is precisely why `web_fetch` is `unsafe_write` in the first place.
+> `status="failed"` is a statement about what came back down the wire, and the ledger reads
+> it as a statement about the world.
+
+This is the same shape as the two entries above: a property of the *call* (did anything
+actually happen out there) collapsed into a property of something coarser (what the
+response said). It goes in the same collection and is decided at Pass 10 against real
+traces, not now.
+
+| where | what it asserts today | what it cannot know |
+|---|---|---|
+| `ledger` / 3b | a `failed` effect produced no effect | whether the failure arrived before or after the remote side acted |
+
+**What changed immediately, and what deliberately did not.** 4d's fork disclosure no longer
+infers anything from a failure — it now reads `(1 web_fetch call after that point returned
+an error.)` instead of `…returned a failure, so it changed nothing outside`. One rule for
+every tool, so there is no per-class branch in the renderer. The ledger's own `failed` state
+and 4c's `effect_failed → blocked` mapping are **unchanged**, because changing them is a
+behaviour change and this is a collection entry, not a ruling.
+
 ### requirements this places on Pass 4, binding rather than suggested
 
 Both come from the same reasoning that produced the `memory_search` ruling: a prompt the

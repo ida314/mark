@@ -227,7 +227,8 @@ def test_the_disclosure_names_every_committed_call_made_after_the_fork_point(wri
         "/home/dylan/notes/a.md", "/home/dylan/notes/b.md",
     ]
     text = obs.disclosure(plan)
-    assert "Since that point I:" in text
+    assert "The run it came from is kept exactly as it was." in text
+    assert "Since that point I made:" in text
     assert "2 fs_write calls, all under /home/dylan/notes/" in text
     assert "/home/dylan/notes/a.md" in text and "/home/dylan/notes/b.md" in text
     assert "I have not undone any of the above" in text
@@ -307,8 +308,8 @@ def test_a_call_that_may_have_happened_is_never_reported_as_one_that_did(writer)
     (call,) = plan.disclosure.unresolved
     assert call.status is None
     text = obs.disclosure(plan)
-    assert "Since that point I:" not in text
-    assert "I may also have:" in text
+    assert "Since that point I made:" not in text
+    assert "I may also have made:" in text
     assert "whether it happened is not known" in text
     assert "Lease renewal" in text
 
@@ -345,8 +346,12 @@ def test_a_call_that_failed_is_not_disclosed_as_work_the_run_did(writer) -> None
     assert plan.disclosure.committed == () and plan.disclosure.unresolved == ()
     assert len(plan.disclosure.failed) == 1
     text = obs.disclosure(plan)
-    assert "returned a failure, so it changed nothing outside" in text
-    assert "Since that point I:" not in text
+    # Dylan, at the Pass 4/5 boundary: state the failure, never infer no effect from it.
+    # A fetch can fail after the server acted, which is why `web_fetch` is `unsafe_write`,
+    # and the rule is one rule for every tool rather than a per-class branch.
+    assert "returned an error" in text
+    assert "changed nothing outside" not in text
+    assert "Since that point I made:" not in text
 
 
 def test_a_fork_past_nothing_says_nothing_happened_rather_than_staying_silent(writer) -> None:
@@ -362,7 +367,7 @@ def test_a_fork_past_nothing_says_nothing_happened_rather_than_staying_silent(wr
     assert plan.disclosure.nothing_recorded
     text = obs.disclosure(plan)
     assert "no effecting call after that point" in text
-    assert "nothing outside this conversation was changed" in text
+    assert "as far as the journal shows, nothing outside this conversation was changed" in text
 
 
 def test_a_call_whose_arguments_were_never_recorded_is_named_as_one(writer) -> None:

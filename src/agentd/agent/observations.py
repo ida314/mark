@@ -629,27 +629,30 @@ def disclosure(plan: F.ForkPlan) -> str:
     d = plan.disclosure
     head = (
         f"Going back to seq {d.forked_from_seq} of this conversation. The run it came from "
-        f"is untouched - its journal is not rewritten - and nothing it did has been undone."
+        f"is kept exactly as it was."
     )
     if d.nothing_recorded:
         return "\n\n".join(
             [
                 head,
-                "The journal records no effecting call after that point, so nothing outside "
-                "this conversation was changed by the part I am rewinding.",
+                "The journal records no effecting call after that point, so as far as the "
+                "journal shows, nothing outside this conversation was changed by the part I "
+                "am rewinding.",
             ]
         )
     blocks = [head]
     if d.committed:
-        blocks.append("\n".join(["Since that point I:", *_did_lines(d.groups)]))
+        blocks.append("\n".join(["Since that point I made:", *_did_lines(d.groups)]))
     if d.unresolved:
-        blocks.append("\n".join(["I may also have:", *_may_have_lines(d.unresolved_groups)]))
+        blocks.append(
+            "\n".join(["I may also have made:", *_may_have_lines(d.unresolved_groups)])
+        )
     if d.failed:
         count = len(d.failed)
         tools = ", ".join(sorted({c.tool for c in d.failed}))
         blocks.append(
-            f"({count} {tools} call{'' if count == 1 else 's'} after that point returned a "
-            f"failure, so {'it' if count == 1 else 'they'} changed nothing outside.)"
+            f"({count} {tools} call{'' if count == 1 else 's'} after that point returned "
+            f"an error.)"
         )
     blocks.append(
         "Reverting the conversation. I have not undone any of the above, and I cannot: a "

@@ -180,8 +180,12 @@ class Disclosure:
     the honest addition - an effect still open, or one an earlier resume closed as
     `uncertain`, may also have changed the world, and leaving it out of a fork disclosure
     would be a confident "here is everything I did" that is missing the email. `failed`
-    effects are counted and not disclosed as things that happened: session 3b ruled that a
-    call which returned a failure did not produce its effect.
+    effects are counted and named, and the wording states the error without inferring
+    anything from it: session 3b's ruling that a failed call produced no effect is a
+    ledger-level convenience, and a failure response does not prove the effect did not land
+    - a fetch can fail after the server acted, which is why `web_fetch` is `unsafe_write`.
+    Ruled by Dylan at the Pass 4/5 boundary, one rule for every tool so there is no
+    per-class branch here. Collected for Pass 10 in `docs/records/pass-03-outcome.md`.
     """
 
     parent_run_id: str

@@ -165,3 +165,58 @@ outcome record with seven rejected variants, and 4d's disclosure is there verbat
 rendered from a real forked run. This is the honesty surface of the whole pass — what the
 runtime says when it does not know whether something happened, and what it says when a
 conversation is rewound past work that was really done.
+
+## Pass 4/5 boundary — put to Dylan 2026-09-20, two settled and one open
+
+**Ruled: mid-turn assistant prose gets archived, so 5c's lossless branch really is
+lossless.** (4b open question 1, which the Pass 4 closing named as the one decision Pass 5
+could not avoid.) Rejected: accepting the loss and annotating it, and treating any run with
+non-empty mid-turn prose as handoff-only. **The cost he accepted is binding on 5c and must
+not be quietly papered over:** archiving fixes nothing for runs already in the journal, so
+every run recorded before this lands still falls through to the lossy path. 5c states which
+branch a given run took and why; it does not present the fallback as the lossless one.
+
+**Ruled: `result_lost` is renamed before anything consumes it.** (4c open question 2.)
+Rejected: keeping the name, and collapsing it back into the two-word vocabulary — 4c's
+argument against the collapse stands (`uncertain` asks a question with a known answer,
+`blocked` invites the duplicate the pass exists to prevent). **The word he chose is
+`unreported`** — an adjective about the call's standing, so all three statuses are the same
+part of speech, and it reuses the journal's own phrase (`may_have_run` already reads "never
+reported back"). The collision that costs: an uncertain call is unreported too. What
+separates them is not in the status word but in the evidence field, which is `committed` for
+this one — so anything that renders the status without the evidence beside it is wrong, and
+5b must check that nothing does. Rejected: `completed` (collides with the effect-ledger word
+for a settled effect and with `STATEMENTS[COMMITTED]`, and reads as "nothing to see here" in
+a list of things that went wrong) and `unwitnessed` (draws the line in the right place, too
+literary for a block a model reads). The rename is `observations.py`, `resume.py` and the
+tests, and it happens in 5b before the first consumer. The model-facing heading changes with
+it — "N happened, with the result lost rather than the call" becomes "N unreported - the call
+is recorded as having happened and its result did not survive" — and the user-facing
+`notify_user` block is unchanged, because it never used the status word.
+
+**Ruled: 4d's disclosure stands, with four edits — applied.** The opening sentence drops
+its two mechanism clauses; both list headings become "I made:"; a failed call is stated and
+never interpreted; the empty case attributes its claim to the journal. The closing sentence
+is unchanged at his instruction. Full reasoning, the rendered output and the four edits
+verbatim are in `pass-04-outcome.md` under "Pass 4/5 boundary — the wording review". 751
+tests green, ruff clean, no behaviour change.
+
+**His reasoning on edit 3 is the part that outlives the edit:** a failure response does not
+prove the effect did not land — a fetch can fail after the server acted, which is why
+`web_fetch` is `unsafe_write`. Appended to the Pass 10 per-call-risk collection in
+`pass-03-outcome.md` beside `memory_search` and `web_fetch`. **3b's ledger rule and 4c's
+`effect_failed → blocked` mapping are deliberately NOT changed** — this is a collection
+entry to decide at Pass 10 against real traces, not a ruling to apply now. A later session
+that "fixes" either of them has misread this.
+
+**Open, and unresolved by edit 3: a failed call is now the only call in a disclosure that is
+not named.** The old line claimed it changed nothing outside, so withholding its arguments
+cost nothing; edit 3 withdraws that claim and the line still withholds them. Put to him;
+nothing in Pass 5 depends on the answer.
+
+**Open: 4c's wording review.** He has not read it in full and explicitly held it. **Nothing
+in Pass 5 may give `notice()`, `prompt()` or `closing_messages()` a consumer until he has** —
+which is 5b and 5c, not 5a. 5a consumes none of it.
+
+**5a is clear to dispatch.** It is runtime-side token accounting and a threshold; it touches
+no wording, no status word and no rehydration path.
