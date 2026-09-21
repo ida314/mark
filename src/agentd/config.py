@@ -181,10 +181,12 @@ class CheckpointsConfig(BaseModel):
     same state is always recoverable by re-folding, so switching checkpoints off costs speed
     on resume and changes no answer.
 
-    Off by default while the pass is in flight. Session 4a writes checkpoints and nothing
-    reads them, so with the flag off the only observable difference is the absence of a cost
-    (a flush, one synchronous event and one row per boundary). Turning it on is what 4b's
-    resume path needs, and the record for 4a has the measured overhead per boundary.
+    Off by default while the pass is in flight, and still off after 4b: `journal/resume.py`
+    rebuilds a run by folding the journal and reads a checkpoint only as an accelerator, so
+    a run recorded with this off resumes exactly the same way and one recorded with it on
+    resumes without re-reading the whole log. With the flag off the only observable
+    difference is the absence of a cost (a flush, one synchronous event and one row per
+    boundary - ~1.3 ms, measured in the 4a record).
     """
 
     enabled: bool = False

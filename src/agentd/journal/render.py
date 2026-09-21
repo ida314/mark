@@ -104,6 +104,17 @@ def _checkpoint_written(payload: dict[str, Any]) -> Line:
     return Line(f"· checkpoint {payload['trigger']} @ seq {payload['covers_seq']}", "dim")
 
 
+def _run_resumed(payload: dict[str, Any]) -> Line:
+    # Shown, unlike the rest of the types the recovery passes write, because a resume is a
+    # change in what the agent is doing that the person watching did not ask for in this
+    # turn. The count of uncertain effects is on the line rather than left to a follow-up
+    # command: "I picked this run back up" without "and two calls may already have happened"
+    # is the half of the sentence that reads as reassurance.
+    uncertain = len(payload["uncertain_effects"])
+    tail = f", {uncertain} effect{'' if uncertain == 1 else 's'} uncertain" if uncertain else ""
+    return Line(f"· resumed from seq {payload['from_seq']}{tail}", "yellow" if uncertain else "dim")
+
+
 def _agent_finished(payload: dict[str, Any]) -> Line | None:
     # A turn that failed is the one case where the journal knows something the prose stream
     # cannot say: `run_turn` yields no answer at all when the model call raised.
@@ -121,12 +132,13 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
     "worker_finished": _worker_finished,
     "message_appended": _message_appended,
     "checkpoint_written": _checkpoint_written,
+    "run_resumed": _run_resumed,
     "agent_finished": _agent_finished,
 }
 
 # Which types have a human rendering at all. The rest - `agent_started`, `tool_started`, the
-# `effect_*` pair and the types Passes 4b-5 write - are facts a fold wants and a person does
-# not, and are skipped rather than given an invented line.
+# `effect_*` pair and the types Passes 4d and 5 write - are facts a fold wants and a person
+# does not, and are skipped rather than given an invented line.
 RENDERED_TYPES: frozenset[str] = frozenset(_RENDERERS)
 
 

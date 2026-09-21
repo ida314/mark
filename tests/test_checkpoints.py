@@ -390,6 +390,47 @@ async def test_a_turn_the_consumer_walked_away_from_is_still_checkpointed(on, tm
     writer.close()
 
 
+async def test_a_failing_turn_keeps_its_own_error_when_the_boundary_cannot_write(
+    on, tmp_path, monkeypatch
+) -> None:
+    """Session 4a left this as a decision owed to 4b (open question 3): the turn_end boundary
+    sits inside `_TurnRecord.__exit__`, so a checkpoint that fails while the turn is already
+    failing replaces the turn's exception.
+
+    Decided in 4b: leave it there, and do not swallow it. Python chains the two - the turn's
+    error survives as `__context__` and is printed under "during handling of the above
+    exception" - so nothing is lost, and the alternative costs more than it buys: a boundary
+    that cannot write is exactly the condition the *next* crash will be asked about, and a
+    resume cannot report a checkpoint nobody knew had failed.
+    """
+
+    class Failing:
+        name = "failing"
+
+        async def stream(self, messages, tools=None, *, params):
+            raise RuntimeError("the model host vanished")
+            yield  # pragma: no cover - makes this an async generator
+
+    def refuse(*args, **kwargs):
+        raise CheckpointError("the journal file is read-only")
+
+    monkeypatch.setattr("agentd.agent.loop.checkpoint_at", refuse)
+    writer = _writer(tmp_path)
+    loop = _loop(on, writer, Failing())
+    session = await Session.create("test")
+    with pytest.raises(CheckpointError) as exc:
+        async for _ in loop.run_turn(session, "go"):
+            pass
+
+    assert isinstance(exc.value.__context__, RuntimeError)
+    assert "the model host vanished" in str(exc.value.__context__)
+    # And the turn is on disk however the boundary went: `agent_finished` is journaled
+    # before the checkpoint is attempted, which is what `covers_seq` would have covered.
+    last = writer.store.read(writer.store.runs()[0].run_id)[-1]
+    assert last.type == "agent_finished" and last.payload["status"] == "failed"
+    writer.close()
+
+
 def test_a_detached_tool_call_gets_no_checkpoint(on, tmp_path) -> None:
     """A queued approval replayed long after its turn ended has no run to snapshot. The
     boundary declines rather than opening a run of its own."""

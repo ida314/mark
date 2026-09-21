@@ -1,10 +1,13 @@
 # Pass 4 — Checkpoints, Resume, Fork — outcome
 
-Sessions completed: **4a**. 4b (resume and reconciliation), 4c (uncertain status, a human
-hard stop) and 4d (fork) are untouched, so the pass's exit criteria are **not** met: nothing
-reads a checkpoint, `orphaned` and `uncertain` are still written by nobody, and there is no
-fold and no resume. What 4a leaves behind is the thing those three sessions stand on — a
-snapshot written at the boundaries, behind a flag that is **off in the shipped config**.
+Sessions completed: **4a**, **4b**. 4c (uncertain status, a human hard stop) and 4d (fork)
+are untouched, so the pass's exit criteria are **partly** met: a run can be folded back out
+of the journal, a process killed at any of the five boundaries resumes, and an interrupted
+`unsafe_write` is closed as `uncertain` and never re-run. What is missing is the half a user
+sees — `uncertain` is a status in the journal and in a CLI report, not yet an observation the
+orchestrator acts on and phrases (4c) — and fork (4d). Checkpoints are still **off in the
+shipped config**, and after 4b that is a cost decision rather than a blocker: resume folds
+the journal and reads a snapshot only when there is one.
 
 The pass's precondition held: 3c/3d plus the two rulings Dylan settled at the Pass 3/4
 boundary mean `UNAUDITED_TOOLS` is empty, so `pre_effect` fires on tools whose class somebody
@@ -361,3 +364,368 @@ call's events land in a run with no `agent_started` (3b #1) — now also the one
 checkpoint refuses; the ledger holds one bit the journal cannot reproduce (3b #3); effect
 events carry no `worker_id` (3b #4); two attempts at one logical call both run (3b #5), which
 is what 4b exists to stop. And from Pass 1, token accounting is still broken upstream.
+
+---
+
+## Session 4b — Resume and reconciliation
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/journal/resume.py` | the fold, the reconciliation, the rehydration, the announcement | 660 |
+| `src/agentd/journal/ledger.py` | `orphan()` + `_store_orphaned()` + `reading()`; the docstring the protocol now has | +91 −14 |
+| `src/agentd/journal/checkpoints.py` | `Checkpointer.reading()`; asking a read-only one to write raises | +18 −2 |
+| `src/agentd/journal/events.py` | `run_resumed` joins `EMITTED_TYPES`; `effect_committed.duration_ms` nullable | +17 −8 |
+| `src/agentd/journal/render.py` | a human line for `run_resumed` | +14 −2 |
+| `src/agentd/journal/__init__.py` | exports (and why two of them are deliberately absent) | +40 −2 |
+| `src/agentd/cli/app.py` | `agent journal resume <run> [--apply] [--reason]` | +70 |
+| `src/agentd/agent/loop.py` | 4a's open question 3, settled in a comment at the boundary | +6 |
+| `src/agentd/config.py`, `config/default.toml` | why the flag is still off now that something reads a checkpoint | +9 −5 |
+| `tests/test_resume.py` | 28 tests | 646 |
+| `tests/test_checkpoints.py` | one test: a failing turn keeps its error when the boundary cannot write | +41 |
+| `tests/test_journal_events.py` | the emitted/unemitted assertion this session moved | +2 −2 |
+
+Suite 682 → 710 passing. `.venv/bin/ruff check src tests scripts` clean. No tool was added,
+removed or re-classified, no prompt changed, and nothing resumes on its own: `resume()` is
+reached only from `agent journal resume`, and only `--apply` writes.
+
+### what deviated from the plan, and why
+
+**1. Orphans are found by folding the journal, not by scanning the ledger.** The pass file
+says "any ledger entry at `started` with no terminal state becomes `orphaned` on resume". A
+scan of the `effect` table would miss the case that matters most: `intend()` journals
+`effect_intended` and *then* writes the row, so a crash in that window leaves an announced
+call — one that may have run — with no row to find. Reconciliation therefore folds
+`effect_intended` / `effect_committed` and consults the row only for the one bit the journal
+cannot reproduce (3b #3). It also covers rows at `intended`, which the pass's sentence does
+not mention and which are equally unresolved.
+
+**2. The disposition is decided by effect class alone; how far the call got is carried
+beside it as `evidence`.** Not in the plan, and it is the difference between two sentences a
+person would react to differently:
+
+```
+never_dispatched  the row is at `intended`; `dispatched()` commits before the handler is
+                  awaited, so the call was never entered
+may_have_run      the row is at `started`
+unknown           there is no row: the announcement reached disk and the insert did not
+```
+
+An `unsafe_write` is `uncertain` in all three cases — never auto-retried, whatever the
+evidence says — but "I recorded it and never got as far as trying" is not the same warning as
+"it may already have gone out", and collapsing them here would make 4c choose one of them for
+both.
+
+**3. `read` is in the disposition map and is unreachable, deliberately.** The map is total
+over `effects.EFFECT_CLASSES` so a fourth class cannot inherit whichever branch was written
+first (`disposition()` raises instead). But `ledgered()` excludes `read`, so a read produces
+no ledger row and no `effect_*` events and cannot become an orphan.
+**Checked rather than argued**: a live turn calling `memory_search` wrote no effect event at
+all. The runtime's most-called tool can never be surfaced to the user as uncertain, which is
+what the Pass 3/4 ruling was for.
+
+**4. "Rehydrate full message list from journal" is delivered as the message *spine*, and no
+`model_messages()` is shipped.** The journal does not hold bodies — `events.preview` is 200
+characters with the whitespace collapsed — and this is the pass's own instruction to rebuild
+from the journal. So `Rehydration` returns the ordered messages with `chars`, `preview`,
+`trust`, `step_id`, exact tool-call arguments, and a pointer to where the bodies are. A
+function that returned previews as `content` would be a laundering channel for text nobody
+said: the turn would read perfectly and remember a version of events that never happened.
+What the durable record *can* and cannot supply is in open question 1.
+
+**5. `resume()` writes nothing for a finished run with nothing open.** The sketch is
+`load / reconcile / rehydrate / continue`, but a process killed at `turn_end` died after
+`agent_finished`: resuming it correctly is doing nothing, and a `run_resumed` after
+`agent_finished` is a record of a resume that resumed nothing. `force=True` exists for a
+caller that wants the event anyway.
+
+**6. An orphan's row goes to `orphaned` and never to `failed`, even when the evidence says
+the call was never entered.** Not a judgement: `CHECK (result_ref IS NOT NULL OR state NOT IN
+('committed','failed'))` means a `failed` row must point at a result row, and an interrupted
+call has none. The storage decided this in 3b; the distinction survives in the journaled
+note.
+
+**7. `effect_committed.duration_ms` became required-*and*-nullable.** An interrupted call was
+never timed, and `0` there reads as a call that returned instantly — a measurement that never
+happened, in the field whose whole job is to hold an unknown. One-word change, the same shape
+as 4a's `memory_watermark`, and `None` is only ever written by `orphan()`.
+
+**8. `plan()` is read-only and had to be given a door to read through.** `Checkpointer` and
+`EffectLedger` were both built around a writer. Both gained a `reading(store)` constructor,
+and asking one of those for a writer raises rather than quietly opening an append path — a
+dry run that opens the write path is not a dry run. The cost is that `plan()` sees what is on
+disk, so a caller inside a live process must flush first; `resume()` does, for the same reason
+`Checkpointer.write` does.
+
+**9. `plan` and `resume` are not re-exported from `agentd.journal`.** Binding a function named
+`resume` on the package shadows the module of the same name, so
+`from agentd.journal import resume` would hand back a function. The types are exported; the
+two functions are imported from `agentd.journal.resume`. Found by writing the first test.
+
+**10. `run_resumed` got a renderer, unlike the other types the recovery passes write.**
+`RENDERED_TYPES` grew by one. A resume is a change in what the agent is doing that the person
+watching did not ask for in this turn, and the count of uncertain effects is on the same line
+— "I picked this run back up" without "and two calls may already have happened" is the half of
+the sentence that reads as reassurance.
+
+**11. 4a's open question 3 is settled rather than inherited.** The `turn_end` boundary stays
+inside `_TurnRecord.__exit__` and still raises during an unwind. Python chains the two, so a
+turn that was already failing keeps its own error as `__context__`; swallowing it would make
+the one checkpoint a resume needed the one nobody knew was missing. Asserted in
+`test_a_failing_turn_keeps_its_own_error_when_the_boundary_cannot_write`.
+
+### what is now true about the code that was not before
+
+- **A killed run can be picked up, and the thing it is picked up from is the journal.** A
+  checkpoint is read when there is one and is never required. Every run in the live journal
+  today was recorded with `[checkpoints] enabled = false`, and all six of them plan correctly
+  (below), which is the property that would have been lost by building resume on the snapshot.
+- **An interrupted `unsafe_write` is closed, named, and not repeated.** `orphaned` has exactly
+  one writer (`EffectLedger.orphan`), reachable only from `resume()`.
+- **The arguments of an interrupted call survive the crash that lost its result.** They come
+  from `tool_requested`, matched by tool *and* step, nearest before the intent — which is
+  exact given that the loop runs a batch's calls one after another. `call_id` looks like the
+  obvious key and is not one: it comes from the model, and in the live turn this session ran,
+  two calls in two different steps both called themselves `fake_0`.
+- **Both requirements Dylan filed at the Pass 3/4 boundary are reachable, and were exercised
+  end to end.** `agent journal resume` on a run holding two interrupted fetches and one
+  interrupted `goal_upsert` printed:
+
+  ```
+  2 interrupted web_fetch calls, never retried automatically:
+    · web_fetch(url=https://example.com/a?token=1)  may_have_run
+    · web_fetch(url=https://example.com/b)  never_dispatched
+    · goal_upsert(title=renew the lease): safe to re-run
+  ```
+
+  One block for the fetches, every URL in it. 4c owns the wording; nothing about it has to be
+  retrofitted to reach the URL or the grouping.
+- **A worker's transcript does not come back.** Rehydration skips every event carrying a
+  `worker_id` and counts them, so "worker transcripts never enter orchestrator context" holds
+  in the one place nobody would have looked for it.
+- **Resuming is repeatable.** `uncertain` is terminal to the fold, so a second resume finds
+  nothing open; `_store_orphaned` is guarded on the open states so a committed row can never
+  be walked back.
+- **A retryable orphan can actually be re-run.** The idempotency key is unchanged, so the
+  second attempt lands on the same row with `attempt = 2`, and the first attempt's `uncertain`
+  closure stays in the journal — nobody ever did learn how it ended.
+
+**Mutation-checked rather than trusted for being green.** Seven mutations; six were caught at
+once, and the seventh is the useful one:
+
+- `unsafe_write` → `retry` in the disposition map → 6 failures.
+- fold the worker's messages into the orchestrator's list → caught.
+- `duration_ms = 0` instead of `None` on an orphan → caught.
+- treat a previous resume's `uncertain` closure as not closing the effect → caught (the same
+  email would be reported at every restart).
+- delete the ledger row before planning (the announced-but-rowless window) → the orphan is
+  still found, because the fold is over the journal.
+- **drop the step from the argument match → nothing failed.** The first version of the
+  argument tests used two steps, where ordering alone is enough. Two tests were rewritten: two
+  calls of one tool *in one step*, and an effect announced in a step holding no request. Both
+  now fail under the mutation, and the second is the one that matters — without the step
+  match, an orphan borrows the URL of a fetch that completed perfectly well, which is a
+  confident answer to the wrong question.
+- take the *first* matching request rather than the nearest → caught by the one-step test.
+
+**Live-data checks (the house rule: read the real rows).**
+
+1. **4a's open question 5, closed.** A real turn was run with `[checkpoints] enabled = true`,
+   through `build_registry()` and the real tool surface (a scripted provider, no network; the
+   scratch Postgres, not the live one). Two checkpoints, `pre_effect` and `turn_end`; **every
+   column populated, the only NULLs `handoff_object` and `memory_watermark`** — the two
+   inert slots. `tool_requested.args` carried the full arguments including `reason`; the
+   `fs_write` effect committed; `memory_search` produced no effect row and no effect event.
+2. **A copy of `~/.local/share/agent/journal.db`** (copied without its `-wal`, so 34 of its
+   events) was planned over read-only: six runs, two `complete`, and the four `kill-*` runs
+   session 2c left behind — genuinely SIGKILLed processes — read as `interrupted`, rehydrated
+   their messages, and reported no orphans, which is correct because those turns called `read`
+   tools only. The live file was not opened.
+
+### resume cost, measured
+
+Same machine and settings as 4a's bench. A 241-event run with 5 interrupted `unsafe_write`
+calls:
+
+| | |
+|---|---|
+| `plan()` — the whole read-only fold | **median 0.68 ms**, max 1.12 ms |
+| `resume(..., apply)` — 5 orphans | **12.7 ms** |
+
+`plan()` is three SQLite reads and a walk; it is cheap and it does not fsync. The apply cost
+is fsyncs and nothing else: one synchronous `run_resumed`, then per orphan one synchronous
+`effect_committed` and one row update — eleven commits at ≈1.15 ms each, which is 4a's number
+for the same hardware. **A resume is cheap in proportion to what it has to admit**, which is
+the right shape: a run with nothing open costs one read.
+
+### schemas exactly as implemented
+
+`run_resumed`, as written (2b's shape, unchanged):
+
+```
+run_resumed  from_seq: int            the last seq that survived; this event is from_seq + 1
+             checkpoint_id: str|null  null = folded from the start, and that is a statement
+             reason: str              the caller's, journaled verbatim
+             replayed_events: int     how many events the fold read
+             uncertain_effects: list  every orphan's effect_id, both dispositions
+```
+
+An orphan's closure, written once per orphan immediately after `run_resumed`:
+
+```
+effect_committed  status: "uncertain"      (the third member of EFFECT_STATUSES, first use)
+                  duration_ms: null        never timed; not 0
+                  result_digest: null
+                  error: one of resume.NOTES, by evidence
+```
+
+```python
+NOTES = {
+  "never_dispatched": "orphaned on resume: recorded, and the call was never started",
+  "may_have_run":     "orphaned on resume: the call was started and never reported back",
+  "unknown":          "orphaned on resume: no ledger row, so whether the call was started is unknown",
+}
+```
+
+The ledger row moves `intended|started → orphaned`. No schema change: `orphaned` has been in
+the `state` CHECK since 3b, and no migration was written this session — the file stays at
+**schema v3**.
+
+The record as Python sees it (`journal/resume.py`):
+
+```
+ResumePlan
+  run_id          str
+  state           str ∈ {interrupted, complete, no_orchestrator}
+  checkpoint      Checkpoint | None        None = there is none, not "not looked for"
+  rehydration     Rehydration
+  reconciliation  Reconciliation
+  .from_seq       int   = rehydration.through_seq
+  .needs_resume   bool  state != complete or there are orphans
+
+Rehydration
+  run_id, from_seq (0), through_seq, replayed_events
+  messages        tuple[RehydratedMessage, ...]   orchestrator only
+  worker_events   int    how many events were left out for being a worker's
+  turn_id, session_id, archive: ArchiveRef|None, steps, status
+  .truncated      the messages whose bodies the journal does not hold in full
+
+RehydratedMessage
+  seq, role, actor, chars, preview, source, step_id, trust, tool_call_id
+  calls           tuple[ToolCallRef(call_id, name, arguments, seq, visible, known), ...]
+  .truncated      chars > len(preview)
+
+Reconciliation
+  run_id, orphans: tuple[Orphan, ...]
+  .retryable / .uncertain / .groups -> tuple[UncertainGroup(tool, effect_class, orphans), ...]
+
+Orphan
+  effect_id, idempotency_key, tool, effect_class, step_id, attempt, intended_seq
+  ledger_state    str | None      None = no row
+  arguments       dict | None     None = no tool_requested; never {}
+  arguments_seq   int | None
+  .disposition    retry | uncertain     by effect class
+  .evidence       never_dispatched | may_have_run | unknown
+  .subject        "tool(arg=…, arg=…)" | None
+
+Resumed
+  plan, applied: bool, event_seq: int|None
+  orphaned_keys: tuple[str, ...]      rows moved
+  rowless_effects: tuple[str, ...]    announced effects that had no row to move
+```
+
+The API:
+
+```python
+resume.plan(run_id, *, store) -> ResumePlan           # read-only; raises NoSuchRun
+resume.resume(run_id, *, writer, reason, force=False) -> Resumed
+resume.disposition(effect_class) -> str               # raises ResumeError, never buckets
+resume.summary(plan) -> str                           # one line; not a prompt
+Checkpointer.reading(store) / EffectLedger.reading(store)
+EffectLedger.orphan(*, run_id, step_id, effect_id, key, attempt, note) -> bool
+```
+
+CLI:
+
+```
+agent journal resume <run_id> [--apply] [--reason TEXT]
+```
+
+Reports by default. `--apply` is what writes, because reconciliation moves ledger rows and
+appends to the run, and the person asking "what happened to that run" has not agreed to
+either. The report is not the prompt: 4c owns the wording a user is asked to act on.
+
+### deferred items, and where they went
+
+- **Continuing the run — 4c and Pass 5.** Nothing here feeds a rehydrated turn back to an
+  `AgentLoop`. That needs the `uncertain` observation the orchestrator can act on (4c) and,
+  for a run too long to replay, the handoff (Pass 5). The message spine and the arguments are
+  the input both will take.
+- **Filling the bodies from the archive — whoever continues.** `Rehydration.archive` is the
+  pointer (`session_id`, `turn_id`); no query was written, and `db/repo_archive.py` is
+  untouched. See open question 1 for what it can and cannot supply.
+- **Automatic resume — not built, deliberately.** No daemon sweep, no resume at startup, no
+  resume from the loop. A run stays interrupted until a person asks. That is the feature flag
+  the pass asked for, made out of who calls it rather than a setting.
+- **Re-execution of retryable orphans — not built, and not an omission.** "May be re-executed"
+  is a permission recorded against the orphan; the only thing that can re-run a tool call is a
+  turn.
+- **Turn-id resolution in `agent journal resume`.** `agent journal show` resolves a turn id to
+  its run; this command does not, so a REPL or Telegram run has to be named by its run id.
+- **No CLI test.** The repo has no CLI test harness (no `CliRunner` anywhere), so the two 4a
+  commands and this one are exercised by hand. Both were, against a scratch journal and a copy
+  of the live one.
+- **Retention refusing to prune a run with unfinished business (2a #7).** Still not built. It
+  now has a reader that could decide — `plan(run).needs_resume` — but pruning policy is not
+  this session's.
+
+### open questions for later passes
+
+**1. Mid-turn assistant text is not held in full anywhere, so an exact message list cannot be
+rebuilt.** The user's message, the tool results and the final answer are in the archive; the
+tool call arguments are exact in the journal; the *system* block is rebuilt every turn. What
+is lost is the assistant's prose on a step that also called tools: the journal has 200
+characters and `actions.output.text` has 500. It is usually empty — the live turn this session
+ran had `chars=0` on both tool-calling steps — but "usually" is not a property. Pass 5 owns
+the decision: archive it, accept the loss and say so in the resumed context, or treat any
+run with a non-empty mid-turn assistant message as handoff-only.
+
+**2. The tool call around an orphaned effect is left open.** Resume closes the *effect*
+(`effect_committed(status="uncertain")`) and does not write a `tool_failed`, because the tool
+events are the loop's and inventing one would put a terminal event in the journal for a call
+the loop never finished. The consequence is real: a fold over tool events still shows a
+`tool_started` with no terminal partner for that call. 4c has to decide whether the resumed
+turn's message list carries a tool message for it, since the model's message list wants one
+per tool call.
+
+**3. `never_dispatched` may not deserve the word "uncertain".** A call the ledger says was
+never entered did not happen, and 4c's vocabulary has a better word for it: `blocked` — "the
+work did not happen". This session kept it `uncertain` because the disposition is class-driven
+and the pass says an `unsafe_write` is never auto-retried, but the evidence is carried
+precisely so 4c can make that call.
+
+**4. Nothing notices that a run needs resuming.** There is no sweep, so an interrupted run
+with an uncertain email sits in the journal until somebody runs the command. The pieces exist
+(`store.runs()` plus `plan(run).needs_resume` over the file is ~0.7 ms per run); who is
+allowed to *act* on that is a policy question, and an automatic resume that prompts on
+startup is exactly the kind of prompt the Pass 3/4 rulings warn about.
+
+**5. A run can be resumed repeatedly and its journal keeps growing.** `run_resumed` is written
+into the run being resumed, so each attempt adds an event. Nothing decides when an interrupted
+run is finally abandoned rather than resumable — the same seam as 4a's open question 2 (a
+checkpoint of a turn is not a checkpoint of a session).
+
+**6. Orphans group by tool, and effect events carry no `worker_id` (3b #4).** So a
+reconciliation cannot say *who* made the call — the orchestrator or a worker it delegated to —
+and an `UncertainGroup` would mix them. Nothing produces that shape today (a worker is awaited
+inside a step, and a mid-worker checkpoint is refused), and Pass 6 is where it becomes
+reachable.
+
+**7. Still open, untouched by 4b:** power-loss durability is reasoned rather than measured
+(2a #2); a degraded turn is invisible to a fold (2c #1); `run_id != turn_id` for the REPL and
+Telegram (2c #2); `open_workers[]` has never been non-empty (4a #1); `duration_ms` in
+`checkpoint_written` measures the build and not the boundary (4a #4). 3b #5 — two attempts at
+one logical call both run — is **narrowed rather than closed**: resume now records that the
+first attempt's outcome is unknown and refuses to repeat it for an `unsafe_write`, but nothing
+suppresses a second attempt made inside a live turn.

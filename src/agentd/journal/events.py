@@ -6,13 +6,13 @@ frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Twelve of the seventeen are emitted today** - nine wired by session 2b, the two
-`effect_*` types by session 3b's effect ledger, and `checkpoint_written` by session 4a's
-checkpointer. The other five are defined here and written by nobody yet - `tool_progress`
-needs a progress channel the tool surface does not have, `handoff_*` is Pass 5,
-`run_resumed` is session 4b and `run_forked` is session 4d. They are specified now so those
-passes fill a slot instead of migrating a schema, and each has a test that writes one, so
-none of them is a shape nobody ever tried to construct.
+**Thirteen of the seventeen are emitted today** - nine wired by session 2b, the two
+`effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
+checkpointer and `run_resumed` by session 4b's `journal/resume.py`. The other four are
+defined here and written by nobody yet - `tool_progress` needs a progress channel the tool
+surface does not have, `handoff_*` is Pass 5, and `run_forked` is session 4d. They are
+specified now so those passes fill a slot instead of migrating a schema, and each has a test
+that writes one, so none of them is a shape nobody ever tried to construct.
 
 Three rules, and the first two are this codebase's characteristic bug stated backwards:
 
@@ -261,7 +261,12 @@ EVENTS: dict[str, dict[str, Field]] = {
         "step_id": req(str),
         "idempotency_key": req(str),
         "status": req(str, enum=EFFECT_STATUSES),
-        "duration_ms": req(int),
+        # Required *and* nullable, which session 4b changed from required-and-not-nullable.
+        # An effect closed as `uncertain` on resume was interrupted, so nobody ever timed
+        # it; writing 0 would record it as a call that returned instantly, which is a
+        # measurement that never happened. Same reasoning as `checkpoint_written`'s
+        # `memory_watermark`, and the only shape a resume may write it in.
+        "duration_ms": req(int, nullable=True),
         "result_digest": opt(str, nullable=True),
         "error": opt(str, nullable=True),
         "attempt": opt(int),
@@ -337,6 +342,10 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # a configuration can switch off. The type is reachable; whether a given run reaches
         # it is a setting.
         "checkpoint_written",
+        # Session 4b. Written by `journal/resume.py`, into the run being resumed. Reachable
+        # only when a person or a supervisor asks for a resume: nothing in the runtime
+        # resumes a run on its own, so a run that was never asked about never sees one.
+        "run_resumed",
     }
 )
 

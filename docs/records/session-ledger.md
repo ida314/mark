@@ -19,7 +19,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 3c | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as 100e0ff. 19 of 26 ruled (11 read, 2 idempotent_write, 6 unsafe_write); UNAUDITED 26 → 7. 5 deviations, no Must not crossed. **Ran autonomously under the standing policy in place of its supervised hard stop — the table still needs Dylan's review before Pass 4.** |
 | 3d | complete | 2026-09-20 | pass-03-outcome.md + effect-classification.md | committed as a5ba017. Last 6 ruled: fs_write/shell_exec/web_fetch unsafe_write, gmail_search/gmail_message/web_search read. UNAUDITED 7 → 1. 5 deviations, no Must not crossed. No live external call was made. **Ran autonomously in place of its supervised hard stop — needs Dylan's review before Pass 4.** |
 | 4a | complete | 2026-09-20 | pass-04-outcome.md | checkpoint record + schema v3 + 5 triggers (3 wired live), behind `[checkpoints] enabled=false`. 682 tests green. 8 deviations, no Must not crossed. ~1.3 ms / 573 B per checkpoint, ~90% of it fsync. |
-| 4b | pending | — | — | |
+| 4b | complete | 2026-09-20 | pass-04-outcome.md | resume.py: fold → rehydrate → reconcile → announce. `agent journal resume` reports by default. 711 tests green. 11 deviations, no Must not crossed. Two decisions handed to 4c. |
 | 4c | pending | — | — | **hard stop — human runs this** (user-facing wording) |
 | 4d | pending | — | — | |
 | 5a | pending | — | — | |
@@ -125,3 +125,14 @@ recorded ruling and reconciliation will not surface `time_now`, `fs_list` or
   it. And an orphaned effect's *arguments* are not in the ledger — `result_ref` is NULL
   until a terminal state — so 4c's binding requirement that a `web_fetch` prompt show its
   URL must read the `tool_requested` event, not the ledger.
+- **4b → 4c, two decisions 4b would not make alone:** whether `never_dispatched` is phrased
+  as `blocked` rather than `uncertain` (the pass file defines blocked as "the work did not
+  happen", and 4b's evidence string can say that — but the ledger row is written *after*
+  the event, which is the crash window that made orphans a fold rather than a scan); and
+  whether a resumed turn's message list carries a tool message for the orphaned call.
+  Resume closes the effect but deliberately writes no `tool_failed`, so a fold still shows
+  a `tool_started` with no partner.
+- **4b → Pass 5, the gap it refused to paper over:** there is no `model_messages()`. The
+  journal holds 200-char previews and the archive has no mid-turn assistant prose, so a
+  function returning previews as message content would be a laundering channel. Tool-call
+  arguments are exact; the rest is a spine. Pass 5 owns the gap.

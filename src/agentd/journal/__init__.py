@@ -7,8 +7,16 @@ the event vocabulary (`events.py`) and the per-run handle the runtime writes thr
 CLI and to Telegram.
 
 Session 4a added `checkpoints.py`: a mechanical snapshot of where a run had got to, written
-at five boundaries when `[checkpoints] enabled` is on. Nothing *reads* it for recovery yet -
-there is still no fold and no resume. That is session 4b.
+at five boundaries when `[checkpoints] enabled` is on. Session 4b added `resume.py`, which
+is the fold: it rebuilds a run's message list from the journal, reconciles the effects a
+crash left open by effect class, and announces itself with `run_resumed`. It reads a
+checkpoint when there is one and does not need one, so a run recorded before the flag was
+ever switched on resumes the same way.
+
+`resume.plan()` and `resume.resume()` are deliberately *not* re-exported here: binding a
+function called `resume` on this package would shadow the module of the same name, and
+`from agentd.journal import resume` would then hand back a function to anyone who wanted the
+module. Import them from `agentd.journal.resume` directly.
 """
 
 from .checkpoints import (
@@ -51,6 +59,22 @@ from .ledger import (
     ledgered,
 )
 from .render import RENDERED_TYPES, Line, brief_args, render_event
+from .resume import (
+    COMPLETE,
+    DISPOSITIONS,
+    INTERRUPTED,
+    NO_ORCHESTRATOR,
+    RETRY,
+    UNCERTAIN,
+    NoSuchRun,
+    Orphan,
+    Reconciliation,
+    Rehydration,
+    Resumed,
+    ResumeError,
+    ResumePlan,
+    UncertainGroup,
+)
 from .runtime import RunJournal, close_writer, get_writer
 from .store import (
     MIGRATIONS,
@@ -71,9 +95,11 @@ from .writer import SYNC_PREFIXES, SYNC_TYPES, JournalWriter, is_synchronous
 
 __all__ = [
     "CHECKPOINT_TRIGGERS",
+    "COMPLETE",
     "Checkpoint",
     "CheckpointError",
     "Checkpointer",
+    "DISPOSITIONS",
     "EFFECT_CLASSES",
     "EFFECT_STATES",
     "EFFECT_STATUSES",
@@ -88,6 +114,7 @@ __all__ = [
     "Event",
     "EventSchemaError",
     "Field",
+    "INTERRUPTED",
     "JournalError",
     "JournalStore",
     "JournalTail",
@@ -96,12 +123,21 @@ __all__ = [
     "MIGRATIONS",
     "MessagesRef",
     "MidWorkerCheckpoint",
+    "NO_ORCHESTRATOR",
     "NoOrchestrator",
+    "NoSuchRun",
+    "Orphan",
     "POLL_INTERVAL_S",
     "PendingEvent",
     "PruneResult",
     "RENDERED_TYPES",
+    "RETRY",
     "RUN_STATUSES",
+    "Reconciliation",
+    "Rehydration",
+    "ResumeError",
+    "ResumePlan",
+    "Resumed",
     "Retention",
     "RunInfo",
     "RunJournal",
@@ -111,6 +147,8 @@ __all__ = [
     "SchemaTooNew",
     "SeqConflict",
     "TRIGGERS",
+    "UNCERTAIN",
+    "UncertainGroup",
     "UnknownEventType",
     "WorkerRef",
     "brief_args",

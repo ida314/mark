@@ -129,7 +129,9 @@ retention = "keep_everything"    # the other mode is "max_age_days"; pruning dro
 # (turn_end, worker_finished, pre_effect, handoff, manual) so a killed process can be
 # resumed. Unlike [journal] this one has a switch, because a checkpoint is an acceleration
 # structure over the journal rather than a second source of truth: with it off, resume is
-# slower and no answer changes. Off until the resume path that reads them lands.
+# slower and no answer changes. Still off now that session 4b has landed resume, because
+# resume folds the journal and needs no snapshot - it reads one when there is one. Turn it
+# on to make a resume cheap; it costs a flush and two commits per boundary (~1.3 ms).
 [checkpoints]
 enabled = false
 

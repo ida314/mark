@@ -168,6 +168,12 @@ class _TurnRecord:
         # no `worker_finished` yet, so `checkpoint_at` reads the run as mid-worker and
         # declines. That is the architecture's "workers are the unit of atomicity", derived
         # rather than re-stated here.
+        #
+        # It can raise during an unwind, and session 4b decided deliberately to leave it
+        # that way (4a's open question 3): Python chains the two, so a turn that was already
+        # failing keeps its own error as `__context__`, and a boundary that cannot write is
+        # the condition the next crash will be asked about. Swallowing it would make the one
+        # checkpoint a resume needed the one nobody knew was missing.
         checkpoint_at(
             "turn_end", run_id=self.rj.run_id, writer=self.rj.writer, cfg=self.cfg
         )

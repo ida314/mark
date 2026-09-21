@@ -1,9 +1,9 @@
 """The effect ledger: one row per effecting call, and what state that call reached.
 
 The question this table answers, and the only one, is the question a crash leaves behind:
-*did that already happen?* Nothing reads it yet - reconciliation and resume are Pass 4 -
-so this session's whole job is to make sure the row exists, and exists **before** the side
-effect it describes.
+*did that already happen?* Session 3b's job was to make sure the row exists, and exists
+**before** the side effect it describes; session 4b's `journal/resume.py` is the reader, and
+the only writer of `orphaned`.
 
 ## The protocol
 
@@ -12,12 +12,15 @@ intended    row written and journaled before dispatch
 started     the handler is about to be awaited
 committed   the call returned and its result is recorded   (result_ref)
 failed      the call returned a failure, or raised
-orphaned    written by nobody here: Pass 4 sets it on resume for a row left at `started`
+orphaned    set by `orphan()` on resume, for a row a crash left open  (session 4b)
 ```
 
 A process killed between `started` and a terminal state leaves the row at `started`, which
-is exactly the evidence Pass 4 needs: an `unsafe_write` in that state may have happened and
-is never retried automatically.
+is exactly the evidence session 4b's resume reads: an `unsafe_write` in that state may have
+happened and is never retried automatically. `intended` is the same shape one step earlier -
+`dispatched()` commits before the handler is awaited, so a row still at `intended` says the
+call was never entered - and both are closed as `orphaned`, because `failed` requires a
+`result_ref` an interrupted call does not have.
 
 ## Where the row sits relative to the journal
 
@@ -27,9 +30,10 @@ the two leaves an `effect_intended` with no row - recoverable, because re-foldin
 journal rebuilds it - rather than a row claiming an effect the journal never announced.
 
 The one field a re-fold cannot rebuild is the `intended` / `started` distinction, because
-the Pass 2 vocabulary has two effect event types and not three (see the outcome record). A
-Pass 4 reconciliation that finds the ledger missing must therefore treat every intended
-effect as uncertain, which is the conservative direction.
+the Pass 2 vocabulary has two effect event types and not three (see the outcome record).
+Reconciliation therefore reads that one bit from this table and records it as *evidence*,
+and treats a missing row as `unknown` - the conservative direction - rather than as proof
+that nothing ran.
 
 ## What it does not do
 
@@ -57,8 +61,8 @@ INTENDED = "intended"
 STARTED = "started"
 COMMITTED = "committed"
 FAILED = "failed"
-# Never written here. Pass 4 sets it on a row a crash left at `started`; it is in the
-# vocabulary now so that pass fills a slot rather than migrating a CHECK constraint.
+# Written by `orphan()`, and only on resume (session 4b). No live caller reaches it: a
+# process that is still running is the one that will say how its own call ended.
 ORPHANED = "orphaned"
 
 EFFECT_STATES: tuple[str, ...] = (INTENDED, STARTED, COMMITTED, FAILED, ORPHANED)
@@ -201,8 +205,18 @@ class EffectLedger:
     different transaction scope than the event it follows.
     """
 
-    def __init__(self, writer: JournalWriter | Callable[[], JournalWriter]) -> None:
+    def __init__(self, writer: JournalWriter | JournalStore | Callable[[], JournalWriter]) -> None:
         self._writer = writer
+
+    @classmethod
+    def reading(cls, store: JournalStore) -> EffectLedger:
+        """A ledger over a store, for the read side only.
+
+        Session 4b's reconciliation asks this table one question - was the handler ever
+        entered - while working out a plan it has not been told to carry out yet. Opening
+        the append path in order to read a column is how a dry run stops being dry.
+        """
+        return cls(store)
 
     @property
     def writer(self) -> JournalWriter:
@@ -218,11 +232,16 @@ class EffectLedger:
         repointed data directory ends up with a run's events in two files.
         """
         writer = self._writer
+        if isinstance(writer, JournalStore):
+            raise EffectStateError(
+                "this ledger was opened over a store for reading and cannot write"
+            )
         return writer if isinstance(writer, JournalWriter) else writer()
 
     @property
     def store(self) -> JournalStore:
-        return self.writer.store
+        source = self._writer
+        return source if isinstance(source, JournalStore) else self.writer.store
 
     # --- the protocol --------------------------------------------------------
 
@@ -291,6 +310,48 @@ class EffectLedger:
             attempt=attempt,
         )
 
+    def orphan(
+        self,
+        *,
+        run_id: str,
+        step_id: str,
+        effect_id: str,
+        key: str,
+        attempt: int,
+        note: str,
+    ) -> bool:
+        """Close an effect nobody will ever hear back about. Session 4b, on resume.
+
+        Journals `effect_committed(status="uncertain")` and then moves the row to
+        `orphaned`, in that order like every other transition here. Returns whether there
+        was a row to move: there is not when the process died between the announcement and
+        the insert, and that case is reported rather than smoothed over, because "the
+        journal says this was about to happen and the ledger never heard of it" is the one
+        shape that says the crash landed in that window.
+
+        Not a method on `Effect`: the handle that would have made this transition died with
+        the process that held it, and `ALLOWED` is about what a live caller may do next.
+
+        `orphaned` and not `failed`, even for a call the ledger says was never dispatched:
+        `failed` carries a `result_ref` by storage CHECK, and an orphan has no result row to
+        point at. The distinction survives in `note`, which is journaled.
+        """
+        self._journal_committed(
+            run_id=run_id,
+            step_id=step_id,
+            effect_id=effect_id,
+            key=key,
+            status="uncertain",
+            # Not 0. A call that was interrupted has no duration, and a zero here would read
+            # as a measurement - a call that returned instantly - which is this codebase's
+            # characteristic bug in the field that exists to record an unknown.
+            duration_ms=None,
+            result_digest=None,
+            error=note,
+            attempt=attempt,
+        )
+        return self._store_orphaned(key)
+
     # --- reads ---------------------------------------------------------------
 
     def get(self, key: str) -> EffectRow | None:
@@ -320,6 +381,22 @@ class EffectLedger:
             ).rowcount
         if not changed:
             raise EffectStateError(f"effect {key[:12]} is not in {INTENDED}")
+
+    def _store_orphaned(self, key: str) -> bool:
+        """Move an open row to `orphaned`. False when there was no open row to move.
+
+        Guarded on the state rather than on the key alone, so a second resume of the same
+        run cannot walk a `committed` row back to `orphaned` - the ledger's whole value is
+        that a terminal answer stays terminal.
+        """
+        now = utcnow().isoformat()
+        with self.store.transaction() as conn:
+            changed = conn.execute(
+                "UPDATE effect SET state = ?, updated_at = ? "
+                "WHERE idempotency_key = ? AND state IN (?, ?)",
+                (ORPHANED, now, key, INTENDED, STARTED),
+            ).rowcount
+        return bool(changed)
 
     def _store_finished(self, key: str, state: str, result_ref: str) -> None:
         now = utcnow().isoformat()
@@ -370,7 +447,7 @@ class EffectLedger:
         effect_id: str,
         key: str,
         status: str,
-        duration_ms: int,
+        duration_ms: int | None,
         result_digest: str | None,
         error: str | None,
         attempt: int,

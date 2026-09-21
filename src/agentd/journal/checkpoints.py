@@ -281,21 +281,37 @@ class Checkpointer:
 
     def __init__(
         self,
-        writer: JournalWriter | Callable[[], JournalWriter],
+        writer: JournalWriter | JournalStore | Callable[[], JournalWriter],
         *,
         cfg: Config | None = None,
     ) -> None:
         self._writer = writer
         self._cfg = cfg
 
+    @classmethod
+    def reading(cls, store: JournalStore, *, cfg: Config | None = None) -> Checkpointer:
+        """A checkpointer over a store, for the read side only.
+
+        Session 4b's `resume.plan()` is read-only and has to stay that way - it is what a
+        `--dry-run` runs and what the CLI prints before anybody has agreed to anything - so
+        it must not open an append path as a side effect of looking. Asking for the writer
+        on one of these raises rather than quietly opening one.
+        """
+        return cls(store, cfg=cfg)
+
     @property
     def writer(self) -> JournalWriter:
         writer = self._writer
+        if isinstance(writer, JournalStore):
+            raise CheckpointError(
+                "this checkpointer was opened over a store for reading and cannot write"
+            )
         return writer if isinstance(writer, JournalWriter) else writer()
 
     @property
     def store(self) -> JournalStore:
-        return self.writer.store
+        source = self._writer
+        return source if isinstance(source, JournalStore) else self.writer.store
 
     # --- write ---------------------------------------------------------------
 

@@ -91,8 +91,8 @@ def test_the_types_nothing_writes_yet_are_named_rather_than_left_implicit() -> N
         "handoff_started",
         "handoff_finished",
         # `checkpoint_written` left this set in session 4a: `journal/checkpoints.py` writes
-        # it at the five boundaries. `run_resumed` is 4b's and `run_forked` is 4d's.
-        "run_resumed",
+        # it at the five boundaries. `run_resumed` left it in 4b: `journal/resume.py` writes
+        # one into the run it is picking up. `run_forked` is 4d's.
         "run_forked",
     }
 

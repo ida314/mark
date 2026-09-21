@@ -1414,6 +1414,76 @@ def journal_mark(run_id: str) -> None:
     )
 
 
+@journal_app.command("resume")
+def journal_resume(
+    run_id: str,
+    apply: bool = typer.Option(
+        False, "--apply", help="Reconcile and announce. Without it, this only reports."
+    ),
+    reason: str = typer.Option("manual", help="Why the run is being picked up. Journaled."),
+) -> None:
+    """Fold a run back out of the journal and say what the crash left open.
+
+    Reports by default and writes only with `--apply`, because reconciliation moves ledger
+    rows and appends to the run, and the person asking "what happened to that run" has not
+    yet agreed to either.
+
+    What is printed here is a report, not the prompt: session 4c owns the wording a user is
+    asked to act on, and phrasing the question in two places is how the two drift apart.
+    """
+    from ..journal import resume as resume_mod
+    from ..journal.writer import JournalWriter
+
+    cfg = get_config()
+    writer = JournalWriter.open(cfg)
+    try:
+        if apply:
+            done = resume_mod.resume(run_id, writer=writer, reason=reason)
+            plan, applied = done.plan, done.applied
+        else:
+            writer.flush()
+            plan, applied = resume_mod.plan(run_id, store=writer.store), False
+    except resume_mod.ResumeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        writer.close()
+
+    console.print(resume_mod.summary(plan))
+    checkpoint = plan.checkpoint
+    console.print(
+        f"[dim]checkpoint: {checkpoint.trigger} @ seq {checkpoint.covers_seq}[/dim]"
+        if checkpoint
+        else "[dim]no checkpoint behind this run; folded from the first event[/dim]"
+    )
+    missing = len(plan.rehydration.truncated)
+    if missing:
+        console.print(
+            f"[dim]{missing} of {len(plan.rehydration.messages)} messages are held as "
+            f"previews; the bodies are in the archive[/dim]"
+        )
+    for group in plan.reconciliation.groups:
+        console.print(
+            f"[yellow]{len(group.orphans)} interrupted {group.tool} "
+            f"call{'' if len(group.orphans) == 1 else 's'}, never retried automatically:"
+            "[/yellow]"
+        )
+        for orphan in group.orphans:
+            # The arguments, every time there are any: a line the reader cannot act on is
+            # worse than no line, because it teaches them that these lines do not repay
+            # reading. When there are none, it says that rather than showing empty brackets.
+            what = orphan.subject or f"{orphan.tool} (arguments not recorded)"
+            console.print(f"  · {what}  [dim]{orphan.evidence}[/dim]")
+    for orphan in plan.reconciliation.retryable:
+        console.print(f"[dim]  · {orphan.subject or orphan.tool}: safe to re-run[/dim]")
+    if applied:
+        console.print(f"resumed at seq {plan.from_seq}; {len(plan.reconciliation.orphans)} closed")
+    elif plan.needs_resume:
+        console.print("[dim]nothing written; pass --apply to reconcile and announce[/dim]")
+    else:
+        console.print("[dim]nothing to resume[/dim]")
+
+
 def _journal_line(event) -> str:
     """One event as one line. The id first, because it is what a reconnect needs."""
     from ..journal.render import render_event
