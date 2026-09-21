@@ -6,13 +6,13 @@ frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Thirteen of the seventeen are emitted today** - nine wired by session 2b, the two
+**Fourteen of the seventeen are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
-checkpointer and `run_resumed` by session 4b's `journal/resume.py`. The other four are
-defined here and written by nobody yet - `tool_progress` needs a progress channel the tool
-surface does not have, `handoff_*` is Pass 5, and `run_forked` is session 4d. They are
-specified now so those passes fill a slot instead of migrating a schema, and each has a test
-that writes one, so none of them is a shape nobody ever tried to construct.
+checkpointer, `run_resumed` by session 4b's `journal/resume.py` and `run_forked` by session
+4d's `journal/fork.py`. The other three are defined here and written by nobody yet -
+`tool_progress` needs a progress channel the tool surface does not have, and `handoff_*` is
+Pass 5. They are specified now so those passes fill a slot instead of migrating a schema, and
+each has a test that writes one, so none of them is a shape nobody ever tried to construct.
 
 Three rules, and the first two are this codebase's characteristic bug stated backwards:
 
@@ -288,10 +288,19 @@ EVENTS: dict[str, dict[str, Field]] = {
     # Emitted as the *first* event of the new run, naming the run it came from. The parent
     # run gets no event: a fork is not something that happens to the run being forked from,
     # and writing one there would mean a completed run's journal keeps growing.
+    #
+    # Session 4d renamed 2b's `fork_point_seq` to `forked_from_seq`, which is what the pass
+    # file and the architecture call the same number everywhere else. Nothing had ever
+    # emitted this type, so it is a one-line vocabulary edit and not a migration; the point
+    # is that the run-level field and the payload key are one name rather than two names for
+    # one integer, which is the trap session 4a wrote down under `covers_seq`.
     "run_forked": {
         "parent_run_id": req(str),
-        "fork_point_seq": req(int),
+        "forked_from_seq": req(int),
         "reason": req(str),
+        # Both are written as an explicit null by 4d rather than omitted: "no checkpoint
+        # stood behind this fork" and "this fork did not come out of a handoff" are
+        # statements, and an absent key would be indistinguishable from a caller that forgot.
         "checkpoint_id": opt(str, nullable=True),
         "handoff_id": opt(str, nullable=True),
     },
@@ -320,7 +329,7 @@ EVENTS: dict[str, dict[str, Field]] = {
 
 EVENT_TYPES: frozenset[str] = frozenset(EVENTS)
 
-# The twelve the runtime writes today. Kept as data so a test can assert the gap between
+# The fourteen the runtime writes today. Kept as data so a test can assert the gap between
 # the vocabulary and what is actually reachable, instead of that gap living in prose.
 EMITTED_TYPES: frozenset[str] = frozenset(
     {
@@ -346,6 +355,9 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # only when a person or a supervisor asks for a resume: nothing in the runtime
         # resumes a run on its own, so a run that was never asked about never sees one.
         "run_resumed",
+        # Session 4d. Written by `journal/fork.py` as the first event of the *new* run, and
+        # only when a person asks for a rewind. The run it names is not touched.
+        "run_forked",
     }
 )
 

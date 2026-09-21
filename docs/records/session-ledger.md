@@ -21,7 +21,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 4a | complete | 2026-09-20 | pass-04-outcome.md | checkpoint record + schema v3 + 5 triggers (3 wired live), behind `[checkpoints] enabled=false`. 682 tests green. 8 deviations, no Must not crossed. ~1.3 ms / 573 B per checkpoint, ~90% of it fsync. |
 | 4b | complete | 2026-09-20 | pass-04-outcome.md | resume.py: fold → rehydrate → reconcile → announce. `agent journal resume` reports by default. 711 tests green. 11 deviations, no Must not crossed. Two decisions handed to 4c. |
 | 4c | complete | 2026-09-20 | pass-04-outcome.md | **hard stop — human runs this** (user-facing wording). Ran autonomously under the standing policy in place of that stop: the wording is proposed in the record with 7 rejected variants and **still needs Dylan's review at the pass boundary**. 729 tests green. 8 deviations, no Must not crossed. Ruled both of 4b's handed-up decisions. |
-| 4d | pending | — | — | |
+| 4d | complete | 2026-09-20 | pass-04-outcome.md | fork.py + `agent journal fork`. Parent bit-for-bit untouched; disclosure has three lists, not one. 751 tests green. 10 deviations, no Must not crossed. Pass-level exit criteria met. |
 | 5a | pending | — | — | |
 | 5b | pending | — | — | |
 | 5c | pending | — | — | |
@@ -147,3 +147,21 @@ recorded ruling and reconciliation will not surface `time_now`, `fs_list` or
 - **4c → Pass 5:** `notice()` and `closing_messages()` have no runtime consumer yet
   (reachable only via `agent journal resume --notice`), and which path was taken for an
   uncertain call is journaled nowhere.
+
+## Pass 4 complete
+
+4a–4d all committed, tests 751 green, ruff clean, no Must not crossed in any session. The
+pass-level exit criteria are met and the evidence is in `pass-04-outcome.md` under
+"Pass 4 — closing": kill and resume at all five boundary types, an orphaned `unsafe_write`
+surfacing as `uncertain` and never silently retried, and a fork that works with an honest
+disclosure. Checked against reality rather than only the suite — nine mutations all caught,
+a copy of the live journal plans a fork on all six of its runs, and a scratch run with six
+real ledgered effects was forked twice end to end through the CLI.
+
+**Owed to Dylan before Pass 5 — one thing, and it is the thing the standing policy
+deferred rather than decided:** every user-facing string in 4c and 4d is proposed and
+unreviewed. All of it is in `src/agentd/agent/observations.py`; 4c's wording is in the
+outcome record with seven rejected variants, and 4d's disclosure is there verbatim as
+rendered from a real forked run. This is the honesty surface of the whole pass — what the
+runtime says when it does not know whether something happened, and what it says when a
+conversation is rewound past work that was really done.

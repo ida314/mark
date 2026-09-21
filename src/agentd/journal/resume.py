@@ -211,6 +211,13 @@ class AnnouncedCall:
     one sentence that is wrong about every one of them.
 
     `status` is `None` while the effect is open - that call is also in `orphans`.
+
+    Session 4d added the two positions and the arguments. A fork has to say what the run did
+    *after* the point a user is rewinding to, which is a question about where each effect
+    sits in the journal, and it has to name each call the way every other recovery surface
+    names one - with the argument that says which thing it was about. `settled_seq` is
+    `None` for an open effect, which is the same statement `status` makes and is kept beside
+    it rather than derived from it, because "closed" and "closed here" are two facts.
     """
 
     effect_id: str
@@ -219,6 +226,22 @@ class AnnouncedCall:
     step_id: str
     call_id: str | None
     status: str | None
+    intended_seq: int = 0
+    settled_seq: int | None = None
+    arguments: dict[str, Any] | None = None
+
+    @property
+    def subject(self) -> str | None:
+        """The call on one line. `None` when the journal holds no arguments for it - the
+        same rule as `Orphan.subject`, and for the same reason: a caller that cannot say
+        which call it means has to say so rather than print empty brackets."""
+        if self.arguments is None:
+            return None
+        return f"{self.tool}({brief_args(self.arguments, lead=LEADING_ARGS)})"
+
+    @property
+    def name(self) -> str:
+        return self.subject or f"{self.tool} (arguments not recorded)"
 
 
 @dataclass(frozen=True)
@@ -390,7 +413,7 @@ class Resumed:
 # --- reading -----------------------------------------------------------------
 
 
-def plan(run_id: str, *, store: JournalStore) -> ResumePlan:
+def plan(run_id: str, *, store: JournalStore, through_seq: int | None = None) -> ResumePlan:
     """Work out how this run would be resumed. Writes nothing, reads everything.
 
     Reads the journal *off disk*, which is the right thing for the case this exists for -
@@ -398,10 +421,24 @@ def plan(run_id: str, *, store: JournalStore) -> ResumePlan:
     caller that has just written events of its own through a buffering writer. `resume()`
     flushes before it plans for exactly that reason; a caller planning from inside a live
     process should do the same.
+
+    `through_seq` folds only as far as a position, which is what session 4d's fork needs:
+    the state a user is rewinding *to* is this same fold stopped early, and a second
+    rehydration path built beside this one would be free to disagree with it about what a
+    message list contains. `None` - the default, and what every resume passes - means the
+    whole run, and is not the same as passing its last seq: a run whose events all sit below
+    a position still folds to the same state, but only `None` says "wherever it got to".
     """
     events = store.read(run_id)
     if not events:
         raise NoSuchRun(f"run {run_id} has no events; there is nothing to resume")
+    if through_seq is not None:
+        events = [e for e in events if e.seq <= through_seq]
+        if not events:
+            raise NoSuchRun(
+                f"run {run_id} has no events at or before seq {through_seq}; "
+                "there is nothing to fold"
+            )
     rehydration = _rehydrate(run_id, events)
     reconciliation = _reconcile(run_id, events, store)
     if rehydration.turn_id is None:
@@ -410,10 +447,15 @@ def plan(run_id: str, *, store: JournalStore) -> ResumePlan:
         state = COMPLETE
     else:
         state = INTERRUPTED
+    checkpointer = Checkpointer.reading(store)
     return ResumePlan(
         run_id=run_id,
         state=state,
-        checkpoint=Checkpointer.reading(store).latest(run_id),
+        checkpoint=(
+            checkpointer.latest(run_id)
+            if through_seq is None
+            else checkpointer.at(run_id, through_seq)
+        ),
         rehydration=rehydration,
         reconciliation=reconciliation,
     )
@@ -522,17 +564,7 @@ def _reconcile(run_id: str, events: Sequence[Any], store: JournalStore) -> Recon
             closed[event.payload["effect_id"]] = event.payload["status"]
     open_effects = {eid: e for eid, e in intents.items() if eid not in closed}
     ledger = EffectLedger.reading(store)
-    announced = tuple(
-        AnnouncedCall(
-            effect_id=eid,
-            tool=event.payload["tool_name"],
-            effect_class=event.payload["effect_class"],
-            step_id=event.payload["step_id"],
-            call_id=_call_id_of(events, event),
-            status=closed.get(eid),
-        )
-        for eid, event in intents.items()
-    )
+    announced = announced_calls(events)
     orphans = []
     for event in open_effects.values():
         payload = event.payload
@@ -556,12 +588,40 @@ def _reconcile(run_id: str, events: Sequence[Any], store: JournalStore) -> Recon
     return Reconciliation(run_id=run_id, orphans=tuple(orphans), announced=announced)
 
 
-def _call_id_of(events: Sequence[Any], intent: Any) -> str | None:
-    """The model's id for the call an `effect_intended` was announced by, if the loop
-    emitted one. Same match as `_requesting_call`, because it is the same question."""
-    payload = intent.payload
-    request = _requesting_call(events, payload["tool_name"], payload["step_id"], intent.seq)
-    return request.payload["call_id"] if request is not None else None
+def announced_calls(events: Sequence[Any]) -> tuple[AnnouncedCall, ...]:
+    """Every effecting call this slice of journal announced, and how each one ended.
+
+    A pure fold over `effect_intended` / `effect_committed` - no ledger, no store - because
+    the two callers want it at different positions: reconciliation asks about the whole run,
+    and a fork asks what happened after the point somebody is rewinding to. Intent order,
+    which is journal order.
+    """
+    intents: dict[str, Any] = {}
+    closed: dict[str, tuple[str, int]] = {}
+    for event in events:
+        if event.type == "effect_intended":
+            intents[event.payload["effect_id"]] = event
+        elif event.type == "effect_committed":
+            closed[event.payload["effect_id"]] = (event.payload["status"], event.seq)
+    calls = []
+    for eid, event in intents.items():
+        payload = event.payload
+        request = _requesting_call(events, payload["tool_name"], payload["step_id"], event.seq)
+        settled = closed.get(eid)
+        calls.append(
+            AnnouncedCall(
+                effect_id=eid,
+                tool=payload["tool_name"],
+                effect_class=payload["effect_class"],
+                step_id=payload["step_id"],
+                call_id=request.payload["call_id"] if request is not None else None,
+                status=settled[0] if settled is not None else None,
+                intended_seq=event.seq,
+                settled_seq=settled[1] if settled is not None else None,
+                arguments=request.payload["args"] if request is not None else None,
+            )
+        )
+    return tuple(calls)
 
 
 def _requesting_call(events: Sequence[Any], tool: str, step_id: str, before_seq: int) -> Any | None:
@@ -707,6 +767,7 @@ __all__ = [
     "Resumed",
     "ToolCallRef",
     "UncertainGroup",
+    "announced_calls",
     "disposition",
     "plan",
     "resume",

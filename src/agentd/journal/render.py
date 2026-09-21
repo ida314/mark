@@ -8,9 +8,9 @@ apart on what they show of somebody's words.
 **An event type this module does not know about renders as nothing, never as an error.**
 `memory/retrieval.py` has the cautionary version of this: a `kind` missing from a dict
 literal raises `KeyError` inside a `try/except` that degrades to a notice, so the whole
-panel disappears silently. Here the lookup has no default branch to get wrong - the eight
-event types no pass writes yet simply have no renderer, and `RENDERED_TYPES` says which do
-so that the gap is data rather than a comment that goes stale.
+panel disappears silently. Here the lookup has no default branch to get wrong - the six
+event types with nothing in them for a person simply have no renderer, and `RENDERED_TYPES`
+says which do so that the gap is data rather than a comment that goes stale.
 """
 
 from __future__ import annotations
@@ -130,6 +130,19 @@ def _run_resumed(payload: dict[str, Any]) -> Line:
     return Line(f"· resumed from seq {payload['from_seq']}{tail}", "yellow" if uncertain else "dim")
 
 
+def _run_forked(payload: dict[str, Any]) -> Line:
+    # Shown because it is the *first* event of the run it opens: without a line here, a
+    # forked run reads as a conversation that began out of nothing, and where it came from
+    # is the one thing a person scrolling back needs. The disclosure - what the parent did
+    # after this point, which the fork did not undo - is not on this line: it is the
+    # paragraph `agent/observations.disclosure()` prints at the moment of the fork, and a
+    # one-line version of it would be a summary of a summary.
+    return Line(
+        f"· forked from run {payload['parent_run_id']} at seq {payload['forked_from_seq']}",
+        "dim",
+    )
+
+
 def _agent_finished(payload: dict[str, Any]) -> Line | None:
     # A turn that failed is the one case where the journal knows something the prose stream
     # cannot say: `run_turn` yields no answer at all when the model call raised.
@@ -148,12 +161,13 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
     "message_appended": _message_appended,
     "checkpoint_written": _checkpoint_written,
     "run_resumed": _run_resumed,
+    "run_forked": _run_forked,
     "agent_finished": _agent_finished,
 }
 
 # Which types have a human rendering at all. The rest - `agent_started`, `tool_started`, the
-# `effect_*` pair and the types Passes 4d and 5 write - are facts a fold wants and a person
-# does not, and are skipped rather than given an invented line.
+# `effect_*` pair and the two types Pass 5 writes - are facts a fold wants and a person does
+# not, and are skipped rather than given an invented line.
 RENDERED_TYPES: frozenset[str] = frozenset(_RENDERERS)
 
 

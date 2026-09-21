@@ -1492,6 +1492,81 @@ def journal_resume(
         console.print("[dim]nothing to resume[/dim]")
 
 
+@journal_app.command("fork")
+def journal_fork(
+    run_id: str,
+    at: int = typer.Option(..., "--at", help="The seq to rewind to. Nothing after it is lost."),
+    apply: bool = typer.Option(
+        False, "--apply", help="Open the new run. Without it, this only reports."
+    ),
+    reason: str = typer.Option("manual", help="Why the run is being forked. Journaled."),
+    as_run: str = typer.Option(
+        "", "--as", help="The new run's id. Minted when not given; must not already exist."
+    ),
+) -> None:
+    """Rewind a conversation to a position, into a new run, undoing nothing.
+
+    The run being forked is not touched: no event is written into it, no ledger row moves,
+    nothing is deleted. What it did after that point stands, and the disclosure says what
+    that was - automatic reversal, file rollback included, is this pass's *Must not*, and a
+    fork that quietly restored a conversation the disk disagrees with is the dishonest
+    version of this command.
+
+    Reports by default and writes only with `--apply`, for the same reason
+    `agent journal resume` does: opening a run is a thing the person asking "what would this
+    lose" has not agreed to.
+    """
+    from ..agent import observations as obs
+    from ..journal import fork as fork_mod
+    from ..journal import resume as resume_mod
+    from ..journal.writer import JournalWriter
+
+    cfg = get_config()
+    writer = JournalWriter.open(cfg)
+    child: str | None = None
+    try:
+        if apply:
+            done = fork_mod.fork(
+                run_id, at_seq=at, writer=writer, reason=reason,
+                new_run_id=as_run or None,
+            )
+            plan, child = done.plan, done.run_id
+        else:
+            writer.flush()
+            plan = fork_mod.plan_fork(run_id, at_seq=at, store=writer.store)
+    except (fork_mod.ForkError, resume_mod.ResumeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        writer.close()
+
+    console.print(fork_mod.summary(plan))
+    checkpoint = plan.checkpoint
+    console.print(
+        f"[dim]checkpoint: {checkpoint.trigger} @ seq {checkpoint.covers_seq}[/dim]"
+        if checkpoint
+        else "[dim]no checkpoint at or before the fork point; folded from the first event[/dim]"
+    )
+    if plan.open_at_fork:
+        # Interrupted at the fork point itself, so they belong to the parent's reconciliation
+        # and not to the child. Named here rather than folded into the disclosure: the
+        # disclosure is about what the rewound part did, and these are calls the rewind is
+        # not even past.
+        console.print(
+            f"[yellow]{len(plan.open_at_fork)} call(s) were still open at seq {at}; "
+            f"`agent journal resume {run_id}` is what reconciles those[/yellow]"
+        )
+    # `markup=False` for session 4c's reason: the arguments are in this text, and a path or
+    # a URL containing a square bracket would otherwise be read by rich as a style tag.
+    console.print()
+    console.print(obs.disclosure(plan), markup=False, highlight=False)
+    console.print()
+    if child:
+        console.print(f"forked into run [bold]{child}[/bold] at seq {plan.forked_from_seq}")
+    else:
+        console.print("[dim]nothing written; pass --apply to open the new run[/dim]")
+
+
 def _journal_line(event) -> str:
     """One event as one line. The id first, because it is what a reconnect needs."""
     from ..journal.render import render_event

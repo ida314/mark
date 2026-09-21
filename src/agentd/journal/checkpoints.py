@@ -444,7 +444,7 @@ class Checkpointer:
                 through_seq=covers_seq,
                 message_events=_count_types(store, run_id, covers_seq, MESSAGE_EVENTS),
             ),
-            open_workers=_open_workers(store, run_id, covers_seq),
+            open_workers=open_workers_at(store, run_id, covers_seq),
             effects_cursor=_effects_cursor(store, run_id, covers_seq),
         )
         snap.build_ms = int((time.perf_counter() - started) * 1000)
@@ -463,6 +463,22 @@ class Checkpointer:
         rows = self.store.query(
             "SELECT * FROM checkpoint WHERE run_id = ? ORDER BY event_seq DESC LIMIT 1",
             (run_id,),
+        )
+        return Checkpoint.from_row(rows[0]) if rows else None
+
+    def at(self, run_id: str, through_seq: int) -> Checkpoint | None:
+        """The furthest-along snapshot that does not overrun a position.
+
+        Session 4d forks a run at a seq the user chose, and a snapshot whose `covers_seq` is
+        past that seq accounts for events the fork is deliberately leaving behind. Filtered
+        on `covers_seq` rather than on `event_seq` for exactly that reason: the announcement
+        always sits after the position it covers, so filtering on the wrong one of the two
+        would pick up a checkpoint that knows more than the fork point does.
+        """
+        rows = self.store.query(
+            "SELECT * FROM checkpoint WHERE run_id = ? AND covers_seq <= ? "
+            "ORDER BY covers_seq DESC, event_seq DESC LIMIT 1",
+            (run_id, through_seq),
         )
         return Checkpoint.from_row(rows[0]) if rows else None
 
@@ -517,8 +533,13 @@ def _count_types(
     return int(rows[0]["n"])
 
 
-def _open_workers(store: JournalStore, run_id: str, covers_seq: int) -> tuple[WorkerRef, ...]:
-    """Workers created and not yet finished at this position, in creation order."""
+def open_workers_at(store: JournalStore, run_id: str, covers_seq: int) -> tuple[WorkerRef, ...]:
+    """Workers created and not yet finished at this position, in creation order.
+
+    Public because "a worker is in flight here" is a fact about a journal position and not
+    about checkpointing: session 4d's fork asks the same question of the point a user wants
+    to rewind to, and a second implementation of it would be free to disagree with this one.
+    """
     rows = store.query(
         """
         SELECT type, payload FROM journal
@@ -640,4 +661,5 @@ __all__ = [
     "checkpoint_at",
     "enabled",
     "get_checkpointer",
+    "open_workers_at",
 ]

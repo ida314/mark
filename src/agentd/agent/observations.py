@@ -72,6 +72,14 @@ and all three are built from the same observations. The requirements they have t
 settled by Dylan at the Pass 3/4 boundary (pass-03 outcome): an orphaned `web_fetch` names
 its URL, and several orphaned fetches are one question and not one each. A prompt the user
 cannot act on trains blind confirmation, which is worse than no prompt at all.
+
+Session 4d added `disclosure()` for the same reason and to the same rule. A fork rewinds the
+conversation and undoes nothing, so the sentence that says what the rewound part actually
+did is the whole feature - and it belongs beside the other recovery wording rather than in
+the CLI, where it would be one of two places this runtime describes a tool call to a person.
+Everything it says is derived from the journal: the counts are counts of announced effects,
+the paths are the paths the calls recorded, and a call whose arguments the journal does not
+hold is named as one rather than summarised into something plausible.
 """
 
 from __future__ import annotations
@@ -79,6 +87,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ..journal import fork as F
 from ..journal import resume as R
 from ..journal.render import LEADING_ARGS, brief_args
 from ..tools import effects
@@ -599,6 +608,98 @@ def closing_messages(plan: R.ResumePlan) -> tuple[ClosingMessage, ...]:
     return tuple(out)
 
 
+# --- what a fork has to admit ------------------------------------------------
+
+
+def disclosure(plan: F.ForkPlan) -> str:
+    """What the user is told when a conversation is rewound past work that was done.
+
+    The architecture's wording, and its ruling: "Reverting the conversation. I have not
+    undone any of the above." Automatic reversal is this pass's *Must not* - file rollback
+    included - so this sentence is not an apology for a missing feature, it is the feature:
+    the conversation goes back, the world does not, and the user is told which is which
+    before they act on either.
+
+    Every line is derived. A group's count is the number of effects the journal announced
+    and recorded as committed, and its location is the directory those calls actually named;
+    where the journal holds no arguments the line says so. Effects that never settled are in
+    their own block, because "I did this" and "this may have happened" are not the same
+    sentence and a fork that merges them is telling the user something nobody knows.
+    """
+    d = plan.disclosure
+    head = (
+        f"Going back to seq {d.forked_from_seq} of this conversation. The run it came from "
+        f"is untouched - its journal is not rewritten - and nothing it did has been undone."
+    )
+    if d.nothing_recorded:
+        return "\n\n".join(
+            [
+                head,
+                "The journal records no effecting call after that point, so nothing outside "
+                "this conversation was changed by the part I am rewinding.",
+            ]
+        )
+    blocks = [head]
+    if d.committed:
+        blocks.append("\n".join(["Since that point I:", *_did_lines(d.groups)]))
+    if d.unresolved:
+        blocks.append("\n".join(["I may also have:", *_may_have_lines(d.unresolved_groups)]))
+    if d.failed:
+        count = len(d.failed)
+        tools = ", ".join(sorted({c.tool for c in d.failed}))
+        blocks.append(
+            f"({count} {tools} call{'' if count == 1 else 's'} after that point returned a "
+            f"failure, so {'it' if count == 1 else 'they'} changed nothing outside.)"
+        )
+    blocks.append(
+        "Reverting the conversation. I have not undone any of the above, and I cannot: a "
+        "fork rewinds what was said, not what was done."
+    )
+    return "\n\n".join(blocks)
+
+
+def _did_lines(groups: Sequence[F.CallGroup]) -> list[str]:
+    lines: list[str] = []
+    for group in groups:
+        count = len(group.calls)
+        where = f", all under {group.location}" if group.location else ""
+        lines.append(f"  - {count} {group.tool} call{'' if count == 1 else 's'}{where}")
+        lines.extend(f"      · {c.name}" for c in group.calls)
+    return lines
+
+
+# What is not known about an effect that never settled, by the only two shapes there are.
+# Kept as data next to the other statements rather than inline, because these are the
+# sentences that decide whether somebody re-runs a send.
+UNSETTLED: dict[str | None, str] = {
+    None: "interrupted, and never reported back - whether it happened is not known",
+    UNCERTAIN: "interrupted, and an earlier resume gave up on it - whether it happened is "
+    "not known",
+}
+
+
+def _may_have_lines(groups: Sequence[F.CallGroup]) -> list[str]:
+    lines: list[str] = []
+    for group in groups:
+        count = len(group.calls)
+        where = f", all under {group.location}" if group.location else ""
+        lines.append(f"  - {count} {group.tool} call{'' if count == 1 else 's'}{where}")
+        for call in group.calls:
+            # Raises on a status this module has not been taught, for the same reason
+            # `_settled_as` does: a new effect status quietly described as "interrupted" is
+            # a claim nobody checked.
+            try:
+                note = UNSETTLED[call.status]
+            except KeyError:
+                raise ObservationError(
+                    f"effect status {call.status!r} is not an unsettled one; "
+                    "a fork disclosure has no sentence for it"
+                ) from None
+            lines.append(f"      · {call.name}")
+            lines.append(f"          {note}")
+    return lines
+
+
 __all__ = [
     "ASK",
     "BLOCKED",
@@ -618,12 +719,14 @@ __all__ = [
     "STATEMENTS",
     "STATUSES",
     "UNCERTAIN",
+    "UNSETTLED",
     "VERIFY",
     "ClosingMessage",
     "Observation",
     "ObservationError",
     "ObservationGroup",
     "closing_messages",
+    "disclosure",
     "groups",
     "notice",
     "observations",

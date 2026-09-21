@@ -87,13 +87,14 @@ def test_the_types_nothing_writes_yet_are_named_rather_than_left_implicit() -> N
     """Which types are reachable today is data, so the gap cannot drift into prose only."""
     assert jevents.EMITTED_TYPES < jevents.EVENT_TYPES
     assert jevents.EVENT_TYPES - jevents.EMITTED_TYPES == {
+        # `checkpoint_written` left this set in session 4a: `journal/checkpoints.py` writes
+        # it at the five boundaries. `run_resumed` left it in 4b: `journal/resume.py` writes
+        # one into the run it is picking up. `run_forked` left it in 4d: `journal/fork.py`
+        # writes one as the first event of the run a rewind opens. What is left is a
+        # progress channel the tool surface does not have, and Pass 5.
         "tool_progress",
         "handoff_started",
         "handoff_finished",
-        # `checkpoint_written` left this set in session 4a: `journal/checkpoints.py` writes
-        # it at the five boundaries. `run_resumed` left it in 4b: `journal/resume.py` writes
-        # one into the run it is picking up. `run_forked` is 4d's.
-        "run_forked",
     }
 
 
@@ -235,7 +236,7 @@ def test_the_types_later_passes_write_already_have_a_shape_that_validates(
     )
     RunJournal(writer, "run-2").emit(
         "run_forked",
-        {"parent_run_id": "run-1", "fork_point_seq": 7, "reason": "handoff"},
+        {"parent_run_id": "run-1", "forked_from_seq": 7, "reason": "handoff"},
     )
     writer.flush()
     assert _types(writer.store, "run-1") == [

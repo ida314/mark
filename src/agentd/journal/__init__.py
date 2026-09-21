@@ -13,10 +13,15 @@ crash left open by effect class, and announces itself with `run_resumed`. It rea
 checkpoint when there is one and does not need one, so a run recorded before the flag was
 ever switched on resumes the same way.
 
-`resume.plan()` and `resume.resume()` are deliberately *not* re-exported here: binding a
-function called `resume` on this package would shadow the module of the same name, and
-`from agentd.journal import resume` would then hand back a function to anyone who wanted the
-module. Import them from `agentd.journal.resume` directly.
+Session 4d added `fork.py`: a new run whose first event names the run and the position it
+came from, with the parent left exactly as it was. It undoes nothing - automatic side-effect
+reversal is the pass's *Must not* - and says what the rewound part of the run actually did.
+
+`resume.plan()`, `resume.resume()` and `fork.fork()` are deliberately *not* re-exported
+here: binding a function called `resume` or `fork` on this package would shadow the module
+of the same name, and `from agentd.journal import fork` would then hand back a function to
+anyone who wanted the module. Import them from `agentd.journal.resume` and
+`agentd.journal.fork` directly.
 """
 
 from .checkpoints import (
@@ -49,6 +54,17 @@ from .events import (
     validate_payload,
 )
 from .feed import POLL_INTERVAL_S, JournalTail, turn_ended
+from .fork import (
+    CallGroup,
+    DisclosedCall,
+    Disclosure,
+    Forked,
+    ForkError,
+    ForkPlan,
+    MidWorkerFork,
+    NoSuchForkPoint,
+    RunExists,
+)
 from .ledger import (
     EFFECT_STATES,
     Effect,
@@ -66,6 +82,7 @@ from .resume import (
     NO_ORCHESTRATOR,
     RETRY,
     UNCERTAIN,
+    AnnouncedCall,
     NoSuchRun,
     Orphan,
     Reconciliation,
@@ -74,6 +91,7 @@ from .resume import (
     ResumeError,
     ResumePlan,
     UncertainGroup,
+    announced_calls,
 )
 from .runtime import RunJournal, close_writer, get_writer
 from .store import (
@@ -96,10 +114,14 @@ from .writer import SYNC_PREFIXES, SYNC_TYPES, JournalWriter, is_synchronous
 __all__ = [
     "CHECKPOINT_TRIGGERS",
     "COMPLETE",
+    "AnnouncedCall",
+    "CallGroup",
     "Checkpoint",
     "CheckpointError",
     "Checkpointer",
     "DISPOSITIONS",
+    "DisclosedCall",
+    "Disclosure",
     "EFFECT_CLASSES",
     "EFFECT_STATES",
     "EFFECT_STATUSES",
@@ -114,6 +136,9 @@ __all__ = [
     "Event",
     "EventSchemaError",
     "Field",
+    "ForkError",
+    "ForkPlan",
+    "Forked",
     "INTERRUPTED",
     "JournalError",
     "JournalStore",
@@ -123,8 +148,10 @@ __all__ = [
     "MIGRATIONS",
     "MessagesRef",
     "MidWorkerCheckpoint",
+    "MidWorkerFork",
     "NO_ORCHESTRATOR",
     "NoOrchestrator",
+    "NoSuchForkPoint",
     "NoSuchRun",
     "Orphan",
     "POLL_INTERVAL_S",
@@ -139,6 +166,7 @@ __all__ = [
     "ResumePlan",
     "Resumed",
     "Retention",
+    "RunExists",
     "RunInfo",
     "RunJournal",
     "SCHEMA_VERSION",
@@ -151,6 +179,7 @@ __all__ = [
     "UncertainGroup",
     "UnknownEventType",
     "WorkerRef",
+    "announced_calls",
     "brief_args",
     "checkpoint_at",
     "close_writer",

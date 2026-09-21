@@ -1,12 +1,17 @@
 # Pass 4 — Checkpoints, Resume, Fork — outcome
 
-Sessions completed: **4a**, **4b**, **4c**. 4d (fork) is untouched, so the pass's exit
-criteria are met except for fork: a run can be folded back out of the journal, a process
-killed at any of the five boundaries resumes, an interrupted `unsafe_write` is closed as
-`uncertain` and never re-run, and as of 4c that ambiguity is an observation with an explicit
-path and a user-visible sentence. Checkpoints are still **off in the shipped config**, and
-after 4b that is a cost decision rather than a blocker: resume folds the journal and reads a
-snapshot only when there is one.
+Sessions completed: **4a**, **4b**, **4c**, **4d**. The pass's exit criteria are met: a run
+can be folded back out of the journal, a process killed at any of the five boundaries
+resumes, an interrupted `unsafe_write` is closed as `uncertain` and never re-run, as of 4c
+that ambiguity is an observation with an explicit path and a user-visible sentence, and as of
+4d a run can be rewound into a new run that discloses what the rewound part actually did and
+undoes none of it. Checkpoints are still **off in the shipped config**, and after 4b that is a
+cost decision rather than a blocker: resume and fork both fold the journal and read a snapshot
+only when there is one.
+
+(This paragraph is the only part of the record a later session rewrote: 4d updated it because
+it said "4d is untouched", which stopped being true. The session sections below are
+untouched.)
 
 The sections below were written by the session that did the work and are not rewritten by
 later ones; where 4c found something 4b's section overstates, it says so in its own
@@ -1183,3 +1188,410 @@ mid-turn assistant text is not held in full anywhere (4b #1); nothing notices th
 resuming (4b #4); a run can be resumed repeatedly (4b #5); `open_workers[]` has never been
 non-empty (4a #1); power-loss durability is reasoned rather than measured (2a #2); token
 accounting is still broken upstream.
+
+---
+
+## Session 4d — Fork, and the disclosure that makes it honest
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/journal/fork.py` | the fork point, the new run, the disclosure as facts | 416 |
+| `src/agentd/agent/observations.py` | `disclosure()` — the words, beside 4c's other recovery wording | +103 |
+| `src/agentd/journal/resume.py` | `plan(..., through_seq=)`; `announced_calls()`; `AnnouncedCall` grew three fields | +99 −25 |
+| `src/agentd/journal/checkpoints.py` | `Checkpointer.at()`; `_open_workers` → public `open_workers_at` | +28 −6 |
+| `src/agentd/journal/events.py` | `run_forked` joins `EMITTED_TYPES`; `fork_point_seq` → `forked_from_seq` | +28 −9 |
+| `src/agentd/journal/render.py` | a human line for `run_forked` | +24 −6 |
+| `src/agentd/journal/__init__.py` | exports, and why `fork()` is deliberately not one | +37 −5 |
+| `src/agentd/cli/app.py` | `agent journal fork <run> --at N [--apply] [--reason] [--as]` | +75 |
+| `tests/test_fork.py` | 22 tests | 538 |
+| `tests/test_journal_events.py` | the emitted/unemitted assertion this session moved, and one payload key | +11 −8 |
+
+Suite **729 → 751 passing**. `.venv/bin/ruff check src tests scripts` clean. No tool was added,
+removed or re-classified; no migration, no new table, no config flag, no prompt change. The
+journal file stays at **schema v3**: a fork's whole durable footprint is one event.
+
+### what deviated from the plan, and why
+
+**1. `fork_point_seq` was renamed to `forked_from_seq`, in the event.** 2b declared the
+payload key as `fork_point_seq`; the pass file, the architecture's fork record and its
+`fork_lineage` all call the same number `forked_from_seq`. Nothing had ever emitted the type,
+so this is a one-line vocabulary edit and one test line rather than a migration, and it buys
+the property 4a wrote down under `covers_seq`: one name for one integer. The alternative —
+a record field named one thing next to a payload key named the other — is the invitation to
+read one as the other that 4a refused.
+
+**2. The disclosure is not only the `committed` list.** The pass file says "list every
+`committed` effect after `seq`". An effect that never settled, or that an earlier resume
+closed as `uncertain`, may also have changed the world; a fork disclosure that silently
+dropped it would be a confident "here is everything I did" missing the one call the user
+would most want to know about. So `Disclosure` has three lists — `committed`, `unresolved`,
+`failed` — and the wording keeps them in three blocks. "I did this" and "this may have
+happened" stay different sentences, which is the whole point of 4c's vocabulary.
+`failed` is stated and not counted as work: 3b ruled that a call which returned a failure did
+not produce its effect.
+
+**3. "After `seq`" means intended after it *or* settled after it.** The call a rewind is most
+likely to be about is the one that was in flight when the user rewound past it: announced
+before the fork point, committed after it. Filtering on the intent alone would leave it out
+of the disclosure entirely while it sat in the journal, committed.
+(`test_a_call_in_flight_at_the_fork_point_that_landed_afterwards_is_disclosed`.)
+
+**4. The pass file's worked example is illustrative and is not what this renders.** "sent 1
+email / created 1 calendar event" names two tools that do not exist in this registry — 3d
+established the Gmail scope is read-only and no send or calendar-create tool is registered,
+and none was added. The disclosure renders whatever `committed` effects are actually there.
+"modified 3 files in src/auth/" is the shape that *is* implemented, and only when it is
+derived: the count is a count of announced effects, and the directory is
+`commonpath` of the paths those calls really recorded. Where the calls share nothing but `/`,
+or where any of them has no recorded path, **no location is claimed at all** — a line reading
+"3 files in /" has told the reader nothing while sounding like it has.
+
+**5. The rehydration is 4b's, reached by a new parameter rather than a second path.**
+`resume.plan()` took `through_seq`. A fork-only fold would have been free to disagree with a
+resume about what a run said, in the two places nobody would compare. The consequence is that
+a fork inherits 4b's ruling in full: the message *spine*, with previews and exact tool-call
+arguments, and no `model_messages()`. `test_a_fork_hands_back_previews_and_never_calls_them_
+the_conversation` asserts the absence.
+
+**6. A fork point inside an open worker is refused.** Not in the plan. Rehydrating a run with
+a worker in flight hands the new run a delegation nothing can finish, and "workers are
+re-delegated, not resumed" is the rule 4a already derived — so `checkpoints._open_workers`
+became public `open_workers_at` and is asked the same question at the fork point, rather than
+a second implementation being free to disagree. Same shape as the *Must not* on mid-worker
+checkpoints, and the same single source.
+
+**7. A fork point the run never reached is refused, not clamped.** `seq 0`, `seq 99` and an
+unknown run all raise. Clamping to the last seq would rewind to somewhere the user did not
+ask for and then disclose a stretch of history that does not exist.
+
+**8. The wording lives in `agent/observations.py`, not in `journal/fork.py`.** 4c made that
+module the one place this runtime phrases a recovery sentence for a person, and the CLI
+prints it rather than composing its own — which is what 4b's record asked for and what 4c
+enforced by deleting the CLI's own version. `fork.py` holds the facts (`Disclosure`,
+`CallGroup.location`, `DisclosedCall.subject`); `observations.disclosure(plan)` is the
+paragraph.
+
+**9. `run_forked` got a renderer, unlike Pass 5's types.** It is the *first* event of the run
+it opens: without a line, a forked run reads in `agent journal show` as a conversation that
+began out of nothing, and where it came from is exactly what a person scrolling back needs.
+The disclosure is not on that line — it is the paragraph printed at the moment of the fork,
+and a one-line version would be a summary of a summary.
+
+**10. Nothing continues the forked run**, in the same sense 4b built no continuation: `fork()`
+writes one event and hands back the rehydrated state. A forked run therefore has no
+`agent_started` until something continues it, so `resume.plan()` reports it as
+`no_orchestrator` — the same shape as 3b's detached runs. Pass 5 owns the continuation.
+
+### what is now true about the code that was not before
+
+- **A run can be rewound, and the run it was rewound from is bit-for-bit what it was.**
+  Asserted event by event and row by row
+  (`test_forking_a_run_leaves_the_run_it_forked_from_exactly_as_it_was`): no event appended to
+  the parent, no ledger row moved, no checkpoint taken, nothing deleted. The lineage lives in
+  the child, because the child is the only run that needs it.
+- **Nothing is undone, and the runtime says so in words.** No file is restored, no compensating
+  call is made, and the closing sentence is the architecture's: "Reverting the conversation. I
+  have not undone any of the above." The *Must not* was not approached, let alone crossed.
+- **The disclosure's counts and paths come out of the journal.** The count is the number of
+  `effect_intended` events with a `committed` closure after the fork point; the paths are the
+  `path` arguments from the matching `tool_requested`; the shared directory is `commonpath` of
+  those paths or nothing. A call the journal holds no arguments for is named
+  `fs_write (arguments not recorded)` rather than given empty brackets.
+- **The identifying argument survives the 120-character line**, in this renderer too:
+  `DisclosedCall.subject` passes `LEADING_ARGS`, and
+  `test_the_path_survives_a_call_whose_other_arguments_are_long` needs two long arguments ahead
+  of the path to bite — which is the version of 4c's test that actually fails under the
+  mutation.
+- **A worker's effects are disclosed as the run's own.** Effect events carry no `worker_id`
+  (3b #4) and a worker's events are in its caller's run, so work delegated inside the rewound
+  stretch is in the disclosure. Who inside the run did it is not a distinction a disclosure is
+  allowed to drop work behind.
+- **A forked run does not inherit the parent's effect ledger, and that is the honest
+  behaviour.** The idempotency key is `hash(run_id, step_id, tool_name, canonical_args)`, so a
+  call the child repeats has a key the parent's row cannot answer for and will really happen
+  again. Inheriting it would be the "cross-run result caching" the *Must not* forbids, and it
+  is also why the disclosure has to be accurate before anybody decides to repeat a call.
+- **An effect status this code has not been taught raises** rather than being described as
+  "interrupted". Same rule as 4c's `SETTLED`.
+
+**Mutation-checked rather than trusted for being green.** Nine mutations, all caught:
+
+- disclosure filters on the intent only (drops the in-flight-then-committed call) → caught.
+- `unresolved` folded into `committed` → 2 failures.
+- `CallGroup.location` returns `/` as a shared directory → caught.
+- the subject rendered in call order rather than `LEADING_ARGS` → caught.
+- `Checkpointer.at` filters on `event_seq` instead of `covers_seq` → caught (the test forks at
+  a snapshot's `covers_seq`, which is the only position where the two differ).
+- a mid-worker fork allowed → caught.
+- an unknown unsettled status gets a generic "interrupted" sentence → caught.
+- `through_seq` ignored, so a fork rehydrates the whole run → caught.
+- `fork()` also writes `run_forked` into the parent → caught by the untouched-parent test.
+
+**Live-data checks (the house rule: read the real rows).**
+
+1. A copy of `~/.local/share/agent/journal.db` — copied without its 185 KB `-wal`, so a partial
+   view, and the live file was not opened — was planned read-only at the midpoint of each of
+   its six runs. All six plan a fork; none holds an effecting call after its fork point, so all
+   six render the empty disclosure, which is correct (those turns called `read` tools only, as
+   4b found).
+2. **The columns were counted, not assumed.** A scratch run holding six real ledgered effects
+   (3 `fs_write` committed, 1 `notify_user` committed, 1 `web_fetch` failed, 1 `reminder_set`
+   left open) was forked end to end through `agent journal fork --apply`, twice. The child's
+   `run_forked` row came back with **`handoff_id` the only NULL** when a checkpoint stood at or
+   before the fork point, and `checkpoint_id` + `handoff_id` NULL when none did — the two slots
+   that are declared nullable and nothing else. The parent kept all its events and all six
+   ledger rows in their original states (`committed` 4, `failed` 1, `started` 1), and every
+   `effect.run_id` was still the parent's.
+
+### schemas exactly as implemented
+
+`run_forked`, as written (2b's shape, with the one rename above):
+
+```
+run_forked   parent_run_id: str
+             forked_from_seq: int      the position the new run starts from
+             reason: str               the caller's, journaled verbatim
+             checkpoint_id: str|null   null = no snapshot stood at or before the fork point
+             handoff_id: str|null      always null in 4d; Pass 5's slot
+```
+
+Emitted **as the first event of the new run**, synchronously, and nowhere else. The parent run
+gets nothing. No table, no column, no migration.
+
+The records as Python sees them (`journal/fork.py`):
+
+```
+ForkPlan
+  parent_run_id    str
+  forked_from_seq  int
+  parent_last_seq  int
+  state            resume.ResumePlan     the parent folded through the fork point
+  disclosure       Disclosure
+  .rehydration     4b's message spine, as of the fork point
+  .checkpoint      Checkpoint | None     the latest with covers_seq <= fork point
+  .open_at_fork    tuple[resume.Orphan]  open *at* the point; the parent's to reconcile
+
+Disclosure
+  parent_run_id, forked_from_seq
+  committed / unresolved / failed   tuple[DisclosedCall, ...]
+  .nothing_recorded  bool            no effecting call after the point at all
+  .groups / .unresolved_groups       tuple[CallGroup, ...]   one per tool, intent order
+
+DisclosedCall
+  effect_id, tool, effect_class, step_id
+  intended_seq   int
+  settled_seq    int | None      None = still open
+  status         str | None      committed | failed | uncertain | None
+  arguments      dict | None     None = no tool_requested; never {}
+  .subject       "fs_write(path=…)" | None
+  .name          subject, or "<tool> (arguments not recorded)"
+  .location      the absolute `path` argument, or None
+
+CallGroup(tool, calls)   .location = commonpath of the calls' directories, or None
+
+Forked(plan, run_id, event_seq)   .parent_run_id  .forked_from_seq
+```
+
+```python
+# added to journal/resume.py
+plan(run_id, *, store, through_seq: int | None = None) -> ResumePlan
+announced_calls(events) -> tuple[AnnouncedCall, ...]     # a pure fold, no ledger, no store
+AnnouncedCall.intended_seq: int; .settled_seq: int | None; .arguments: dict | None
+AnnouncedCall.subject / .name
+# added to journal/checkpoints.py
+Checkpointer.at(run_id, through_seq) -> Checkpoint | None    # filtered on covers_seq
+open_workers_at(store, run_id, seq) -> tuple[WorkerRef, ...]
+```
+
+The API:
+
+```python
+fork.plan_fork(run_id, *, at_seq, store) -> ForkPlan       # read-only
+fork.fork(run_id, *, at_seq, writer, reason, new_run_id=None) -> Forked
+fork.disclose(run_id, events, at_seq) -> Disclosure
+fork.by_tool(calls) -> tuple[CallGroup, ...]
+fork.summary(plan) -> str                                  # one line; not the disclosure
+observations.disclosure(plan: ForkPlan) -> str             # the paragraph
+```
+
+Raises, never degrades: `NoSuchRun` (no such parent), `NoSuchForkPoint` (a position the run
+never reached), `MidWorkerFork`, `RunExists` (the new run already holds events), `ForkError`
+(forking a run into itself, or an announcement that did not reach disk).
+
+CLI:
+
+```
+agent journal fork <run_id> --at <seq> [--apply] [--reason TEXT] [--as <run_id>]
+```
+
+Reports by default; `--apply` opens the new run. `--as` names it, otherwise it is a uuid7.
+The disclosure is printed with `markup=False` for 4c's reason: a path or a URL may contain a
+square bracket, and rich would read it as a style tag.
+
+### the disclosure format, verbatim
+
+Rendered by `agent journal fork demo-fork --at 2` against a scratch data dir holding a real
+run: three `fs_write` calls committed, one `notify_user` committed, one `web_fetch` that
+failed, one `reminder_set` left open. Every line below came out of that journal.
+
+```
+Going back to seq 2 of this conversation. The run it came from is untouched - its journal is
+not rewritten - and nothing it did has been undone.
+
+Since that point I:
+  - 3 fs_write calls, all under /home/dylan/notes/
+      · fs_write(path=/home/dylan/notes/lease.md, content=xxxxxxxxxxxxxxxxxxxxxxxxxxxx…)
+      · fs_write(path=/home/dylan/notes/landlord.md, content=xxxxxxxxxxxxxxxxxxxxxxxxxx…)
+      · fs_write(path=/home/dylan/notes/inventory.md, content=xxxxxxxxxxxxxxxxxxxxxxxxx…)
+  - 1 notify_user call
+      · notify_user(title=Lease notes, body=three files written)
+
+I may also have:
+  - 1 reminder_set call
+      · reminder_set(text=chase the landlord, at=18:00)
+          interrupted, and never reported back - whether it happened is not known
+
+(1 web_fetch call after that point returned a failure, so it changed nothing outside.)
+
+Reverting the conversation. I have not undone any of the above, and I cannot: a fork rewinds
+what was said, not what was done.
+```
+
+(The `content=xxxx…` runs are the real 60-character argument previews, shortened here to fit
+the page; everything else is character for character what was printed.)
+
+With nothing after the fork point — which is every run in the live journal today:
+
+```
+Going back to seq 2 of this conversation. The run it came from is untouched - its journal is
+not rewritten - and nothing it did has been undone.
+
+The journal records no effecting call after that point, so nothing outside this conversation
+was changed by the part I am rewinding.
+```
+
+The two unsettled clauses, in full:
+
+```
+interrupted, and never reported back - whether it happened is not known
+interrupted, and an earlier resume gave up on it - whether it happened is not known
+```
+
+**The pass file's example is illustrative, not rendered.** For the record, it reads:
+
+```
+Since that point I:
+  - modified 3 files in src/auth/
+  - sent 1 email
+  - created 1 calendar event
+
+Reverting the conversation. I have not undone any of the above.
+```
+
+The first line is the shape this code produces when the paths support it. The second and third
+name tools that are not in this registry and were not added; if a send tool existed and were
+classed `unsafe_write`, its committed calls would render as `1 gmail_send call` with the call
+named underneath, from the same code path.
+
+**Unreviewed, like 4c's.** Written under the same standing policy
+(`docs/plans/orchestrator-prompt-auto.md`). Dylan has not seen it. Changing it is a string
+edit and a test edit, and it is all in one module.
+
+### deferred items, and where they went
+
+- **Continuing a forked run — Pass 5.** `fork()` hands back the rehydrated state and writes
+  one event; nothing feeds that back to an `AgentLoop`. A forked run has no `agent_started`
+  until something does, so it reads as `no_orchestrator` to `resume.plan()` in the meantime.
+- **A model-facing fork block — nobody's yet.** 4c has `notice()` for a resumed orchestrator;
+  a forked run has no orchestrator to address, and inventing the block before there is a
+  consumer would be a second place to keep this wording correct.
+- **Undo — explicitly not built, and the *Must not*.** No file rollback, no compensating
+  calls, no `has_undo` plumbing. The architecture's own note stands: content-addressed
+  pre-images for the `coder` role are a plausible later addition; reversal of mail and
+  calendar effects is not achievable in general and is not promised.
+- **Forking a *session* rather than a run.** A run is one turn today (4a #2), so this rewinds
+  a turn. The conversation around it is in the Postgres archive and no fork touches it.
+- **Retention.** Pruning still does not know that a run has children; a pruned parent leaves a
+  `run_forked` pointing at nothing. Same fence as 2a #7, which is still not built.
+- **No CLI test.** Unchanged: the repo has no CLI harness, so `agent journal fork` was
+  exercised by hand, twice, against a scratch data dir and read-only against a copy of the
+  live journal.
+
+### open questions for later passes
+
+**1. A fork's disclosure is as good as the file it reads.** `nothing_recorded` rests on the
+absence of `effect_intended`, which is synchronous — but a journal copied without its `-wal`
+is missing recent events, and every live-data check in this pass reads such a copy (4c #3, the
+same caveat in a new place). The claim "nothing outside this conversation changed" is the
+strongest sentence this pass prints; it is worth re-reading the day anything reads a journal it
+did not write.
+
+**2. Nothing links a parent to its children.** `run_forked` names the parent, so lineage walks
+one way only: to find a run's forks you scan. Fine at six runs; a `fork_lineage` view is the
+architecture's own answer (§ observability) and nobody owns it yet.
+
+**3. `location` only understands `path`.** A `shell_exec` that wrote three files, or a tool
+whose target is named something else, discloses as three calls with no shared location. That is
+the safe failure — no claim rather than a wrong one — but it means the "3 files in src/auth/"
+line is reachable for `fs_write` and nothing else today.
+
+**4. A fork of a fork is untested in anger.** It works mechanically — the child is a run like
+any other — but the disclosure of the second fork covers only the *second* parent's journal, so
+work done in the grandparent after the first fork point is not re-disclosed. That is arguably
+right (it was disclosed once) and nobody has decided.
+
+**5. Two attempts at one logical call, across a fork.** 3b #5, narrowed by 4b and widened again
+here: the child mints new idempotency keys, so a call the parent already made can be made again
+by the fork without the ledger noticing. This is deliberate (the *Must not* forbids cross-run
+caching) and the disclosure is the only thing standing between the user and a duplicate.
+
+**6. Still open, untouched by 4d:** power-loss durability is reasoned rather than measured
+(2a #2); a degraded turn is invisible to a fold (2c #1); `run_id != turn_id` for the REPL and
+Telegram (2c #2); `open_workers[]` has never been non-empty (4a #1) — and a fork now refuses
+the one position where it would be; mid-turn assistant text is not held in full anywhere
+(4b #1); nothing notices that a run needs resuming (4b #4); observations are derived on every
+read and stored nowhere (4c #5); token accounting is still broken upstream.
+
+---
+
+## Pass 4 — closing
+
+**The exit criteria are met.**
+
+- *Kill the process at each boundary type and resume successfully.* 4b: all five boundaries,
+  with the kill simulated the way the storage layer says a kill looks (a lost suffix, never a
+  hole), plus the four real SIGKILLed `kill-*` runs in the live journal, planned read-only.
+- *An orphaned `unsafe_write` surfaces as `uncertain` and is never silently retried.* 4b closes
+  it in the journal and moves the row to `orphaned`; 4c gives it a status, a path and a
+  sentence, and `retry` is absent from an uncertain `unsafe_write`'s paths by construction, not
+  by convention.
+- *Fork works and discloses honestly.* 4d, above: the parent is untouched, the disclosure is
+  derived from the journal, and the separation between "I did this" and "this may have
+  happened" survives all the way into the printed paragraph.
+
+**What the pass did not do, deliberately:** no automatic reversal of anything, no mid-worker
+checkpoints, no cross-run result caching, and `worker_results[]`, `handoff_object` and
+`memory_watermark` are still empty slots. No tool was added, removed or re-classified in any of
+the four sessions, and no prompt in `agent/prompts` was touched.
+
+**Checkpoints remain off in the shipped config.** Nothing in the pass requires them: resume and
+fork both fold the journal and read a snapshot only when one exists. Turning them on costs
+≈1.3 ms and 573 bytes per boundary (4a) and is a decision about interactive latency, not about
+correctness.
+
+**What Pass 5 inherits.**
+
+- Three surfaces with no producer: the `handoff` checkpoint trigger (4a), `notice()` and
+  `closing_messages()` (4c), and now a forked run with no continuation (4d). Pass 5 is the
+  session that gives all three a caller, and the message spine plus the exact tool-call
+  arguments are the input each of them takes.
+- One decision it cannot avoid: **mid-turn assistant text is not held in full anywhere**
+  (4b #1). Archive it, accept the loss and say so in the resumed context, or treat any run with
+  a non-empty mid-turn assistant message as handoff-only.
+- One naming call: `result_lost` is a third word in a two-word vocabulary (4c #2). If it is
+  wrong it should be renamed before it gets a consumer.
+- One review owed to a human: **every user-facing string written in 4c and 4d is unreviewed.**
+  Both sessions wrote it under the autonomous standing policy and both said so at the point of
+  writing. It is in two functions in one module.
