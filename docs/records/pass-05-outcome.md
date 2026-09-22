@@ -1689,3 +1689,74 @@ That failure also produced a second HTTP 400 from this backend, distinct from th
 vLLM rejecting malformed tool-call JSON the model emitted. Under `sir` any 400 is a brief
 outage for every concurrent caller, so this is a live second source of the timeout chain in
 `baseline-v2.md` v2-1.
+
+---
+
+## The pass exit — B22 and B23 re-run, and what they show
+
+`scripts/pass05_exit.py`, against 5b's own method: `AgentLoop.run_turn` end to end on the
+real model, `[checkpoints] enabled = true`, a scratch database and a throwaway journal, no
+live store written and no external call made.
+
+### B23 — the row that produced 5b's finding
+
+| run | turn 1 | 2 | 3 | 4 | 5 | crossed | handoff |
+|---|---|---|---|---|---|---|---|
+| unforced | 3,844 | 7,040 | 14,304 | 14,685 | 15,448 | never | none |
+| forced (`threshold_tokens = 11000`) | 3,844 | 7,016 | 14,084 | 2,356 | 2,554 | turn 3 | 44.4 s, kept 1, dropped 5, **manifest 5** |
+
+**The unforced run did not cross, and that is a finding about the row rather than about the
+code.** 5b's run crossed on its own at `carried = 17,542` against a crossing point of 16,000.
+This one peaked at 15,448 on the *prompt* reading and never reached the threshold, because
+the model's replies to the three pastes were short. 5b's run answered each paste with a
+detailed section-by-section précis; this one wrote a paragraph. **Whether B23 exercises the
+handoff at all therefore depends on how verbose the model happens to be that day**, which is
+worth knowing before anyone reads a future run of it as evidence either way.
+
+So it was re-run with the *threshold* moved to 11,000 - the ceiling stays the real 24,000,
+which is the smallest change that makes a conversation of this size cross - and both runs
+are kept.
+
+**Turn 4 is the row 5b found unreliable, and it is the result that matters.** 5b ran it
+three times and got three behaviours: a confident, fluent and wrong answer with no hedge; a
+correct refusal; and then a confident wrong answer again from the same code. Here, with a
+manifest in force:
+
+> I don't have the section text in front of me — the original messages were replaced by a
+> summary, and the summary doesn't capture the checkpoint-vs-handoff argument in detail. I
+> only know from the summary that the doc covers "context limits/handoffs" and "checkpoints"
+> as runtime responsibilities, and that the journal is the source of truth with checkpoints
+> as acceleration. If you can paste the relevant section(s) again — or tell me which section
+> number covers it — I can give you the actual argument rather than reconstructing it from a
+> summary that doesn't contain it.
+
+That is a pass on Dylan's rubric and it is the specific behaviour 5b could not get reliably:
+it distinguishes what the summary contains from what the summary is *about*, and it refuses
+to reconstruct. **It did not use the lookup**, although the lookup was offered and the
+pasted sections were in its manifest - which is a real observation and is in the open
+questions below.
+
+Turn 5 - "what did I say in the very first message" - passes in both runs, as it did in 5b.
+In the unforced run it answers correctly from history, because nothing was ever compressed;
+in the forced run it refuses and says exactly why.
+
+### B22 — not measured, and the reason is the environment
+
+Forced as 5b forced it. The turn crossed, generated a handoff in 57.6 s with an 11-item
+manifest, and produced no table, because **the model never read a file**. It spent 301
+seconds calling `read_file`, `read`, `cat`, `view`, `file_read`, `list_files` and - literally
+- a tool named `tool`, none of which are registered, while `fs_read`, `fs_search` and
+`fs_list` sat in the request unused.
+
+What it did at the end is worth quoting, because it is the behaviour this pass is about:
+
+> I have to be straight with you: I did not actually read any of the six files. … That means
+> I can't honestly produce the table you asked for. I'd be fabricating tool names,
+> descriptions, tags, and always-on flags if I did, and I won't do that. … I changed nothing
+> and wrote no files.
+
+On the suite's rubric that is a **fail** - the table is unproduced - but it is a fail of the
+kind the rubric's `fail` clause is not about: no row was invented. It is not a measurement
+of near-limit behaviour, for the third run in a row. v1's finding 6 and v2's restatement of
+it both stand, and the cause has changed again: v1 stopped early, v2 died on a router
+timeout, v2-plus-this-pass reaches the model and the model cannot call its own tools.
