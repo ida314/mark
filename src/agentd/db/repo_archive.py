@@ -216,6 +216,76 @@ async def recent_message_sizes(session_id: UUID, limit: int = 200) -> list[tuple
     return [(int(r["id"]), int(r["chars"])) for r in rows]
 
 
+# The kinds a handoff's manifest can list, and the lookup can resolve. Three rather than
+# two: `tool_result` is not replayed into any later prompt and never was, so a successor
+# has no more access to it than to a message the handoff replaced. Leaving it out would
+# make the manifest a list of what the *handoff* dropped rather than of what the successor
+# does not have, and those differ by exactly the material a turn spent its whole step
+# budget gathering.
+MANIFEST_KINDS: tuple[str, ...] = ("user_message", "assistant_message", "tool_result")
+
+
+async def manifest_rows(
+    session_id: UUID,
+    *,
+    upto_id: int,
+    watermark: int | None,
+    excerpt_chars: int,
+    limit: int,
+) -> list[dict]:
+    """What this session holds that a successor will not see, newest first.
+
+    Two different lines, because the two kinds of item are dropped for two different
+    reasons. A `tool_result` is never replayed into a later prompt at all, so everything at
+    or below `upto_id` is gone from the successor's view. A conversation message is dropped
+    only if it fell below the handoff's `watermark`; the ones above it are carried verbatim
+    and listing them would be a manifest that offers to fetch what the reader already has.
+    `watermark = NULL` means nothing was dropped from the conversation, and the SQL says so
+    by matching no message rows rather than by matching all of them.
+
+    Excerpts are taken in SQL, so a 42,000-character paste is described without being read
+    into this process - the same reason `recent_message_sizes` returns sizes.
+    """
+    rows = await fetch_all(
+        """
+        SELECT id, kind, actor, trust,
+               coalesce(length(content), 0) AS chars,
+               left(coalesce(content, ''), %s) AS excerpt,
+               (payload->>'private' = 'true') AS private
+        FROM raw_events
+        WHERE session_id = %s
+          AND id <= %s
+          AND (
+                (kind = 'tool_result')
+             OR (kind IN ('user_message', 'assistant_message')
+                 AND %s::bigint IS NOT NULL AND id <= %s::bigint)
+          )
+        ORDER BY id DESC LIMIT %s
+        """,
+        (excerpt_chars, session_id, upto_id, watermark, watermark, limit),
+    )
+    return list(rows)
+
+
+async def archived_item(session_id: UUID, event_id: int) -> dict | None:
+    """One archived row of this session, by its own id, or None.
+
+    Scoped to the session in the query rather than checked afterwards. The caller is a tool
+    the model can call with any integer it likes, and a lookup that fetched the row first
+    and compared session ids second would be one forgotten branch away from reading another
+    conversation's mail.
+    """
+    return await fetch_one(
+        """
+        SELECT id, kind, actor, trust, content, occurred_at,
+               (payload->>'private' = 'true') AS private
+        FROM raw_events
+        WHERE session_id = %s AND id = %s AND kind = ANY(%s)
+        """,
+        (session_id, event_id, list(MANIFEST_KINDS)),
+    )
+
+
 async def upcoming_events(kind_like: str, hours: int, limit: int = 50) -> list[dict]:
     """Connector-archived events starting in the next `hours`, most recent version of each.
 

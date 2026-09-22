@@ -1492,6 +1492,110 @@ def journal_resume(
         console.print("[dim]nothing to resume[/dim]")
 
 
+@journal_app.command("continue")
+def journal_continue(
+    run_id: str,
+    message: str = typer.Argument(..., help="What to say to the orchestrator that picks it up."),
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually take the turn. Without it, this only reports the plan."
+    ),
+    allow_rerun: list[str] = typer.Option(
+        [],
+        "--allow-rerun",
+        help=(
+            "Name a tool whose interrupted calls in this run may be run again. This is you "
+            "saying the duplicate is acceptable; the runtime refuses otherwise."
+        ),
+    ),
+    autonomy: str = typer.Option("assist", help="observe | assist | act"),
+) -> None:
+    """Pick a dead run up and take the next turn of it.
+
+    The continuation path session 4b named and did not build. It decides between the two
+    ways a run can come back - replaying the conversation when it is recent and still fits,
+    compressing it into a handoff when it is not - and reports which it took and why before
+    it does anything.
+
+    `--allow-rerun` is Dylan's requirement B from the other side. A crash can leave an
+    `unsafe_write` announced and never answered, which means it *may* have gone out; the
+    executor refuses an identical call in that run rather than trusting a 27B to obey a
+    sentence in its prompt. Naming the tool here is the only way past, and it is a person
+    typing it, which is what "unless the user has said to run it again" means.
+    """
+    from ..agent import rehydrate
+    from ..agent.loop import AgentLoop, Session
+    from ..agent.stream import Answer, Delta
+    from ..journal import resume as resume_mod
+    from ..journal.writer import JournalWriter
+    from ..policy.approvals import QueueApprover, RerunGrants
+
+    cfg = get_config()
+
+    async def go() -> None:
+        writer = JournalWriter.open(cfg)
+        try:
+            if apply:
+                resume_mod.resume(run_id, writer=writer, reason="continue")
+            else:
+                writer.flush()
+            plan = await rehydrate.restart(run_id, store=writer.store, cfg=cfg)
+        finally:
+            writer.close()
+
+        console.print(resume_mod.summary(plan.plan))
+        age = "unknown" if plan.age_s is None else f"{plan.age_s / 3600:.1f}h"
+        console.print(
+            f"[bold]{plan.path}[/bold]"
+            + (f" ({plan.reason})" if plan.reason else "")
+            + f" - last activity {age} ago, conversation "
+            f"{plan.source.get('conversation_tokens', '?')} of {plan.budget_tokens} "
+            "estimated tokens"
+        )
+        if plan.handoff is not None:
+            console.print(
+                f"[dim]handoff: {plan.handoff_source}, "
+                f"{len(plan.handoff.dropped_manifest)} manifest items"
+                + (f", generated in {plan.generated_ms} ms" if plan.generated_ms else "")
+                + "[/dim]"
+            )
+        elif not plan.lossless:
+            console.print("[yellow]no handoff and no replay: see the record below[/yellow]")
+            console.print(plan.source, markup=False, highlight=False)
+        if plan.closing:
+            console.print(
+                f"[dim]{len(plan.closing)} interrupted call(s) will be closed out to the "
+                "model as unresolved[/dim]"
+            )
+        if not apply:
+            console.print("[dim]nothing written; pass --apply to take the turn[/dim]")
+            return
+        if plan.session_id is None:
+            console.print("[red]this run has no session, so there is no turn to take[/red]")
+            raise typer.Exit(1)
+
+        grants = RerunGrants()
+        for tool in allow_rerun:
+            grants.allow_tool(run_id=run_id, tool=tool)
+
+        session = await Session.resume(plan.session_id, autonomy=autonomy, cfg=cfg)
+        # The handoff this continuation decided on, not whatever the session last stored.
+        # On the lossless path that is None, and None is the instruction: replay.
+        session.handoff = plan.handoff
+        # The same approver `agent ask` uses, and for the same reason: this is one turn
+        # from a command line, not a REPL, so there is no prompt loop to ask into. A write
+        # that needs approval is queued and the model is told so, which it can act on.
+        loop = AgentLoop(cfg=cfg, approver=QueueApprover(origin="interactive"))
+        loop.executor.rerun_grants = grants
+        console.print()
+        async for event in loop.run_turn(session, message, origin="resume", run_id=run_id):
+            if isinstance(event, Delta) and not event.thinking:
+                console.print(event.text, end="", markup=False, highlight=False)
+            elif isinstance(event, Answer):
+                console.print()
+
+    run(go())
+
+
 @journal_app.command("fork")
 def journal_fork(
     run_id: str,

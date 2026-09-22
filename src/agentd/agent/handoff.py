@@ -77,14 +77,36 @@ from .observations import RUNTIME_MARKERS
 # built under. Session 5a's open question 2 is the reason this exists at all: five
 # `agent_finished` rows stopped validating when that session added required fields, and the
 # lesson taken from it was that a record with no version is a record nobody can migrate.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Every version this module knows how to read, and what reading an older one costs.
+#
+# Session 5a's open question 2 asked what a later pass does when it must add a required
+# field to an existing record, and session 5b left the rule in place and untested: version 1
+# refused anything that was not version 1. Version 2 adds `dropped_manifest`, which a
+# version 1 object cannot have, and refusing to read one would throw away a perfectly good
+# handoff over a field that did not exist when it was written.
+#
+# So an older object is read and *upgraded*, and the upgrade states its own loss rather
+# than hiding it: `dropped_manifest` becomes empty and `source["manifest"]` says why. A
+# successor started from it is told there is no manifest, which is true and is different
+# from being told nothing was dropped. Anything newer than this module still raises - a
+# field this build has never heard of cannot be read as absent.
+READABLE_SCHEMAS: tuple[int, ...] = (1, 2)
 
 # Why a handoff was generated. `context_threshold` is the runtime's own decision;
-# `forced` is a caller that asked for one regardless, which is the only way to get one
-# today on a conversation that has not crossed.
+# `forced` is a caller that asked for one regardless; `cold_resume` is session 5c's - a run
+# picked up after the process holding it died, with no stored object to start from, so one
+# is built from the journal and the archive instead of from a live message list.
 REASON_THRESHOLD = "context_threshold"
 REASON_FORCED = "forced"
-REASONS: tuple[str, ...] = (REASON_THRESHOLD, REASON_FORCED)
+REASON_RESUME = "cold_resume"
+REASONS: tuple[str, ...] = (REASON_THRESHOLD, REASON_FORCED, REASON_RESUME)
+
+# How a manifest ref is written. One prefix and one archive id: `msg:4812` is the archive's
+# own identity column, which is the same column the watermark is drawn from, so a ref and a
+# watermark can be compared without a translation table between them.
+REF_PREFIX = "msg"
 
 # The eleven fields the pass file names, in its order.
 FIELDS: tuple[str, ...] = (
@@ -193,6 +215,114 @@ separately - and update whatever the transcript since then has changed."""
 TRANSCRIPT_HEADING = "Transcript to compress, oldest first:"
 
 
+# --- the manifest ------------------------------------------------------------
+#
+# Dylan's ruling at the 5b boundary, and the half of it that ships here. 5b found that a
+# successor answers confidently from material the handoff dropped; a general warning moved
+# that behaviour and did not fix it. The manifest is the hook the warning did not have:
+# each dropped item named, with **a ref**, so that "I do not have that" has an alternative
+# other than guessing. 5d is the other half - the tool that resolves one of these refs -
+# and the two are one mechanism.
+#
+# Every field of an item is derived from the archive row. None of it is written by the
+# generator, for the same reason `important_memory_refs` is not: this is the list a
+# successor will fetch things from, and a model-written description of material nobody can
+# check without doing the fetch is the laundering channel in yet another costume.
+
+
+@dataclass(frozen=True)
+class DroppedItem:
+    """One thing the successor does not have, and how to ask for it.
+
+    `description` is an excerpt, not a summary. It is the first `manifest_excerpt_chars` of
+    the row with its whitespace collapsed, so it is verifiably what the row starts with -
+    a summary here would be a claim about material the reader cannot see, written by
+    whichever model happened to be cheap.
+    """
+
+    ref: str
+    kind: str
+    description: str
+    chars: int
+    # A private tool result - mail, for now. Listed, because a successor that does not know
+    # the mail was read will happily conclude it was not; excerpted nowhere and refused by
+    # the lookup, because the interlock this session must not weaken is what stops that
+    # text reaching a later turn through a door the original tool would have closed.
+    private: bool = False
+    trust: str = "trusted"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ref": self.ref, "kind": self.kind, "description": self.description,
+            "chars": self.chars, "private": self.private, "trust": self.trust,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DroppedItem:
+        return cls(
+            ref=data["ref"], kind=data["kind"], description=data.get("description", ""),
+            chars=int(data.get("chars") or 0), private=bool(data.get("private")),
+            trust=data.get("trust") or "trusted",
+        )
+
+    @property
+    def archive_id(self) -> int | None:
+        return parse_ref(self.ref)
+
+
+def ref_for(archive_id: int) -> str:
+    return f"{REF_PREFIX}:{archive_id}"
+
+
+def parse_ref(ref: str) -> int | None:
+    """The archive id inside a ref, or None if this is not one.
+
+    None rather than a raise: the caller that parses a ref is a tool handler holding a
+    string the model typed, and "that is not a ref I know" is an answer to give the model,
+    not an exception to propagate through a turn.
+    """
+    text = (ref or "").strip()
+    prefix = f"{REF_PREFIX}:"
+    if not text.startswith(prefix):
+        return None
+    try:
+        return int(text[len(prefix):])
+    except ValueError:
+        return None
+
+
+def manifest(rows: Sequence[dict[str, Any]]) -> tuple[DroppedItem, ...]:
+    """The manifest for a set of archive rows, oldest first.
+
+    `rows` is what `repo_archive.manifest_rows` returns: id, kind, actor, chars, an excerpt
+    taken in SQL, and the two flags. The `actor` is folded into the kind for a tool result
+    (`tool_result:fs_read`) because "a tool result" is not a description of anything and
+    the tool's name is the first thing a reader needs in order to decide whether to fetch it.
+    """
+    items: list[DroppedItem] = []
+    for row in sorted(rows, key=lambda r: int(r["id"])):
+        actor = str(row.get("actor") or "")
+        kind = str(row["kind"])
+        if kind == "tool_result" and actor.startswith("tool:"):
+            kind = f"tool_result:{actor[len('tool:'):]}"
+        private = bool(row.get("private"))
+        items.append(
+            DroppedItem(
+                ref=ref_for(int(row["id"])),
+                kind=kind,
+                description=(
+                    "(private tool result; not excerpted here)"
+                    if private
+                    else " ".join((row.get("excerpt") or "").split())
+                ),
+                chars=int(row.get("chars") or 0),
+                private=private,
+                trust=str(row.get("trust") or "trusted"),
+            )
+        )
+    return tuple(items)
+
+
 # --- the object --------------------------------------------------------------
 
 
@@ -228,6 +358,11 @@ class Handoff:
     # this conversation, not a missing value.
     watermark: int | None
     source: dict[str, Any]
+    # Session 5c. Every item the successor does not have, with a ref it can resolve. Empty
+    # is a real answer - a handoff that replaced nothing and ran no tools drops nothing -
+    # and is not the same as the `source["manifest"]` note an upgraded version 1 object
+    # carries, which says the list could not be known.
+    dropped_manifest: tuple[DroppedItem, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Exactly what goes into `checkpoint.handoff_object`."""
@@ -244,19 +379,35 @@ class Handoff:
                 "created_at": self.created_at,
                 "watermark": self.watermark,
                 "source": dict(self.source),
+                "dropped_manifest": [item.as_dict() for item in self.dropped_manifest],
             }
         )
         return body
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Handoff:
-        """Read one back. Raises on a version this module was not written for, rather than
-        reading unknown fields as absent ones."""
+        """Read one back, upgrading a version this module still knows.
+
+        Raises for anything outside `READABLE_SCHEMAS`, which is the rule 5b shipped and is
+        unchanged: a record written under rules this build has never seen cannot have its
+        missing fields read as absent ones. What is new is that "older" and "unknown" have
+        stopped being the same case.
+        """
         version = data.get("handoff_schema")
-        if version != SCHEMA_VERSION:
+        if version not in READABLE_SCHEMAS:
             raise HandoffError(
-                f"handoff_schema {version!r} is not {SCHEMA_VERSION}; this object was "
-                "written under different rules and its fields cannot be assumed"
+                f"handoff_schema {version!r} is not one of {READABLE_SCHEMAS}; this object "
+                "was written under rules this build does not have, and its fields cannot "
+                "be assumed"
+            )
+        source = dict(data.get("source") or {})
+        if version < SCHEMA_VERSION:
+            # Stated in the object rather than inferred from the empty list, because a
+            # successor reading "nothing was dropped" and one reading "what was dropped is
+            # not recoverable" must not behave the same way.
+            source["manifest"] = (
+                f"absent: this handoff was written under handoff_schema {version}, which "
+                "had no manifest. What it dropped is not listed and cannot be looked up."
             )
         return cls(
             **{
@@ -269,8 +420,24 @@ class Handoff:
             reason=data["reason"],
             created_at=data["created_at"],
             watermark=data.get("watermark"),
-            source=dict(data.get("source") or {}),
+            source=source,
+            dropped_manifest=tuple(
+                DroppedItem.from_dict(d) for d in (data.get("dropped_manifest") or [])
+            ),
         )
+
+    def item(self, ref: str) -> DroppedItem | None:
+        """The manifest item this ref names, or None.
+
+        The whole authorisation check for a lookup: a ref that is not in this list is not
+        fetchable, whatever it parses to. That is what keeps 5d a lookup over what the
+        successor was told it lost rather than a reader pointed at the archive.
+        """
+        wanted = (ref or "").strip()
+        for entry in self.dropped_manifest:
+            if entry.ref == wanted:
+                return entry
+        return None
 
 
 # --- validation --------------------------------------------------------------
@@ -309,6 +476,7 @@ def build(
     source: dict[str, Any],
     active_subagents: Sequence[str] = (),
     important_memory_refs: Sequence[str] = (),
+    dropped_manifest: Sequence[DroppedItem] = (),
     handoff_id: str | None = None,
 ) -> Handoff:
     """Validate a draft and turn it into the stored object. Raises `HandoffInvalid`."""
@@ -336,6 +504,7 @@ def build(
         created_at=utcnow().isoformat(),
         watermark=watermark,
         source=dict(source),
+        dropped_manifest=tuple(dropped_manifest),
     )
 
 
@@ -418,7 +587,13 @@ def transcript(src: Source, *, excerpt_chars: int, total_chars: int) -> str:
         role = message.get("role")
         body = (message.get("content") or "").strip()
         if role == "tool":
-            who = f"tool {names.get(message.get('tool_call_id', ''), 'result')}"
+            # `tool_name` is set by the cold-resume path (session 5c), which builds this
+            # list out of archive rows rather than out of a live message list: an archived
+            # `tool_result` knows which tool produced it (`actor`) and has no
+            # `tool_call_id` to resolve against an assistant message. Same label either
+            # way, so a result is never attributable to the user or to the model.
+            who = names.get(message.get("tool_call_id", "")) or message.get("tool_name")
+            who = f"tool {who or 'result'}"
         elif role == "assistant":
             called = ", ".join(
                 (c.get("function") or {}).get("name", "?") for c in message.get("tool_calls") or []
@@ -428,6 +603,15 @@ def transcript(src: Source, *, excerpt_chars: int, total_chars: int) -> str:
             who = str(role)
         if not body and role == "assistant":
             body = "(no text; tool calls only)"
+        # Session 5c. A message the archive does not hold in full, offered to the generator
+        # as what it actually is. Session 4b refused to hand the journal's previews to a
+        # model as message bodies and that refusal stands: a preview may be *shown*, and it
+        # may not be shown as the message. The count is in the stored object's `source`.
+        if message.get("preview_only"):
+            body = (
+                f"{body}\n[preview only - the journal holds the first "
+                f"{len(body)} characters of this message and the rest was never archived]"
+            )
         if len(body) > excerpt_chars:
             # Whose truncation this is, said in the marker. The first live run of baseline
             # task B23 reported "the document you pasted was truncated in multiple places",
@@ -500,6 +684,7 @@ async def generate(
     dropped: tuple[int, int] = (0, 0),
     active_subagents: Sequence[str] = (),
     important_memory_refs: Sequence[str] = (),
+    dropped_manifest: Sequence[DroppedItem] = (),
 ) -> tuple[Handoff, Source, int]:
     """One handoff from one live message list. Returns it with its source and the ms it took.
 
@@ -550,9 +735,11 @@ async def generate(
                     # first run of baseline task B23 did.
                     "dropped_messages": dropped[0],
                     "dropped_chars": dropped[1],
+                    "manifest_items": len(dropped_manifest),
                 },
                 active_subagents=active_subagents,
                 important_memory_refs=important_memory_refs,
+                dropped_manifest=dropped_manifest,
             )
             return handoff, src, int((time.perf_counter() - started) * 1000)
         attempt = [
@@ -594,7 +781,72 @@ DROPPED_LINE = (
 )
 
 
-def render(handoff: Handoff) -> str:
+# The manifest, addressed to the successor. Session 5c.
+#
+# Two headings rather than one paragraph, because they say different things and only one of
+# them is conditional. `MANIFEST_HEADING` states that the items exist and what may be done
+# about them; `MANIFEST_LOOKUP` is appended only when a tool that can resolve a ref is
+# actually on this turn's tool list, since telling a model to fetch something with a tool it
+# has not been given is how a turn is spent hallucinating a call.
+#
+# The rule in the last sentence is the whole point of the field. 5b's evidence: the same
+# code, the same task, two runs, one of which answered the dropped material confidently and
+# wrongly with no hedge. A general warning ("the original messages are not available")
+# moved that behaviour and did not fix it, and the reading taken from that is that a refusal
+# needs something to attach to. These lines are it.
+MANIFEST_HEADING = """### What this conversation contains that you do not have
+
+Each line is one item, with a ref, a kind, its size, and how it begins. The excerpt is the
+first characters of the item and nothing more - it is not a summary and the rest of the item
+is not in it. You have never seen any of these."""
+
+MANIFEST_LOOKUP = (
+    "To use one, fetch it by its ref with `{tool}`, one ref per call. If you do not fetch "
+    "it, you do not have it: say so plainly rather than answering from this list, and never "
+    "quote, count or describe the contents of an item you have not fetched."
+)
+
+MANIFEST_NO_LOOKUP = (
+    "You have no way to fetch these. If a question needs what is in one, say that you no "
+    "longer have it - do not quote, count or describe the contents of an item from this "
+    "list, and do not reconstruct it from the summary above."
+)
+
+MANIFEST_OMITTED = (
+    "...and {count} further items, older than these, which are not listed individually."
+)
+
+
+def manifest_block(
+    handoff: Handoff, *, lookup_tool: str | None = None, limit: int | None = None
+) -> str:
+    """The manifest as the successor reads it, or "" when there is nothing to list.
+
+    `lookup_tool` is the name of the tool that can resolve a ref *on this turn*, or None.
+    The caller knows which tools it is about to offer; this module does not, and guessing
+    would produce an instruction to call something that is not there.
+    """
+    items = handoff.dropped_manifest
+    if not items:
+        return ""
+    shown = items if limit is None else items[-limit:] if limit > 0 else ()
+    lines = [MANIFEST_HEADING, ""]
+    if len(shown) < len(items):
+        lines += [MANIFEST_OMITTED.format(count=len(items) - len(shown)), ""]
+    for entry in shown:
+        note = " untrusted" if entry.trust == "untrusted" else ""
+        lines.append(
+            f"  {entry.ref}  [{entry.kind}, {entry.chars:,} chars{note}]  "
+            f"{entry.description}"
+        )
+    lines += [
+        "",
+        MANIFEST_LOOKUP.format(tool=lookup_tool) if lookup_tool else MANIFEST_NO_LOOKUP,
+    ]
+    return "\n".join(lines)
+
+
+def render(handoff: Handoff, *, lookup_tool: str | None = None) -> str:
     """The handoff as the block a fresh orchestrator is started with."""
     parts = [RENDER_HEADING]
     dropped = int(handoff.source.get("dropped_messages") or 0)
@@ -605,6 +857,11 @@ def render(handoff: Handoff) -> str:
                 messages=dropped, chars=int(handoff.source.get("dropped_chars") or 0)
             ),
         ]
+    note = handoff.source.get("manifest")
+    if note:
+        # An upgraded version 1 object. Said out loud, because "no manifest was recorded"
+        # and "nothing was dropped" must not read the same way to the successor.
+        parts += ["", str(note)]
     parts.append("")
     for name in FIELDS:
         value = getattr(handoff, name)
@@ -616,6 +873,9 @@ def render(handoff: Handoff) -> str:
             parts.extend(f"  - {item}" for item in value)
         elif value:
             parts.append(f"{label}: {value}")
+    block = manifest_block(handoff, lookup_tool=lookup_tool)
+    if block:
+        parts += ["", block]
     return "\n".join(parts)
 
 
@@ -627,6 +887,7 @@ def fresh_messages(
     context_block: str = "",
     recent: Sequence[dict[str, Any]] = (),
     user_text: str,
+    lookup_tool: str | None = None,
 ) -> list[dict[str, Any]]:
     """The message list a fresh orchestrator starts from.
 
@@ -641,7 +902,7 @@ def fresh_messages(
         context_block=context_block,
         history=list(recent),
         user_text=user_text,
-        handoff_block=render(handoff),
+        handoff_block=render(handoff, lookup_tool=lookup_tool),
     )
 
 
@@ -651,12 +912,20 @@ __all__ = [
     "FIELDS",
     "INSTRUCTION",
     "LIST_FIELDS",
+    "MANIFEST_HEADING",
+    "MANIFEST_LOOKUP",
+    "MANIFEST_NO_LOOKUP",
+    "MANIFEST_OMITTED",
+    "READABLE_SCHEMAS",
     "REASONS",
     "REASON_FORCED",
+    "REASON_RESUME",
     "REASON_THRESHOLD",
+    "REF_PREFIX",
     "REQUIRED_LISTS",
     "REQUIRED_TEXT",
     "SCHEMA_VERSION",
+    "DroppedItem",
     "Handoff",
     "HandoffDraft",
     "HandoffError",
@@ -666,7 +935,11 @@ __all__ = [
     "carry_window",
     "fresh_messages",
     "generate",
+    "manifest",
+    "manifest_block",
+    "parse_ref",
     "problems",
+    "ref_for",
     "render",
     "source",
     "transcript",

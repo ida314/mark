@@ -232,6 +232,40 @@ class HandoffConfig(BaseModel):
     excerpt_chars: int = 1500
     source_chars: int = 48000
 
+    # Session 5c - the manifest, and the lookup that resolves one of its refs.
+    #
+    # `manifest_excerpt_chars` is how an item is described: the first characters of the
+    # item, taken in SQL so a 42,000-character paste is described without being read, and
+    # never a summary - a summary is a claim about material the reader cannot check.
+    # 160 is about one terminal line, which is what a list of forty of them has to be.
+    manifest_excerpt_chars: int = 160
+    # How many items are listed. Newest first: the oldest are the ones a summary is most
+    # likely to have covered, and the block says how many were left out rather than
+    # trailing off. A cap is needed at all because a long session's tool results are
+    # unbounded and the manifest lives in every subsequent prompt.
+    manifest_items: int = 40
+    # The bound on one lookup. Deliberately smaller than `agent.tool_result_max_chars`
+    # (8000): a lookup is a second look at material already summarised, so it buys less
+    # per character than a first read, and a successor that can pull 8k per call has a
+    # cheaper route back to the whole conversation than one that cannot.
+    lookup_max_chars: int = 4000
+
+    # Session 5c - cold resume. How recently a run must have been touched for its message
+    # list to be replayed verbatim rather than compressed.
+    #
+    # The pass file says "start with a few hours and tune from traces" and there are no
+    # traces yet, so this is four hours and says so. It is not a correctness boundary in
+    # either direction: the lossless path is right whenever the messages still fit, and
+    # the reason a stale run takes the lossy one anyway is that a conversation resumed
+    # after a long gap is usually being resumed *about* something else.
+    warm_window_s: int = 14400
+    # The budget a rehydrated message list must fit inside to be replayed whole. Unset
+    # means `agent.history_tokens`, which is the budget the next turn's history window
+    # would be spent against anyway - a list that does not fit there would be trimmed by
+    # `history_messages` on the first turn, silently, which is the loss a handoff exists
+    # to replace with something deliberate.
+    resume_budget_tokens: int | None = None
+
 
 class NtfyConfig(BaseModel):
     """Push delivery. Self-hosted and reached over Tailscale, so notification bodies never

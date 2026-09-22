@@ -482,6 +482,28 @@ class Checkpointer:
         )
         return Checkpoint.from_row(rows[0]) if rows else None
 
+    def latest_handoff_for_session(self, session_id: str) -> dict[str, Any] | None:
+        """The most recent stored handoff for one conversation, across all its runs.
+
+        A conversation is not a run. Every turn opens a run of its own (the turn id is the
+        run id), so the handoff a session handed off under lives on some *earlier* run's
+        checkpoint, and a resumed session that asked only about its own next run would find
+        nothing and quietly start reading the whole archive again - the compression undone
+        by a process restart, with every number still looking healthy.
+
+        The session id is read out of the stored object rather than off a column, because
+        the checkpoint table has no session: a checkpoint is a snapshot of a *run*, and a
+        run is not always a turn (session 3b's detached calls have no session at all).
+        `json_extract` keeps that true while still making this one query.
+        """
+        rows = self.store.query(
+            "SELECT * FROM checkpoint "
+            "WHERE json_extract(handoff_object, '$.session_id') = ? "
+            "ORDER BY event_seq DESC LIMIT 1",
+            (session_id,),
+        )
+        return _loads_or_none(rows[0]["handoff_object"]) if rows else None
+
     def at(self, run_id: str, through_seq: int) -> Checkpoint | None:
         """The furthest-along snapshot that does not overrun a position.
 

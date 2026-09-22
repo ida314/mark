@@ -21,7 +21,7 @@ from ..db.repo_archive import RawEvent
 from ..db.repo_ops import ActionRecord
 from ..ids import utcnow, uuid7
 from ..journal import events as jevents
-from ..journal.checkpoints import checkpoint_at
+from ..journal.checkpoints import Checkpointer, checkpoint_at
 from ..journal.ledger import EffectLedger
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
@@ -89,9 +89,9 @@ class Session:
     private: bool = False
     # The handoff in force, once this conversation has run out of room to carry itself
     # (session 5b). While it is set, a turn is assembled from it plus the messages after its
-    # watermark, and the part of the conversation it replaced is not read again. In-process
-    # only: the durable copy is `handoff_object` on the `turn_end` checkpoint, and putting it
-    # back on a resumed session is 5c's.
+    # watermark, and the part of the conversation it replaced is not read again. The durable
+    # copy is `handoff_object` on the `turn_end` checkpoint, and session 5c's `resume` puts
+    # it back - so a handoff now survives a process, and not only a conversation.
     handoff: handoff_mod.Handoff | None = None
 
     @classmethod
@@ -100,7 +100,9 @@ class Session:
         return cls(id=sid, channel=channel, autonomy=autonomy)
 
     @classmethod
-    async def resume(cls, session_id: UUID, autonomy: str = "assist") -> Session:
+    async def resume(
+        cls, session_id: UUID, autonomy: str = "assist", *, cfg: Config | None = None
+    ) -> Session:
         row = await repo_archive.get_session(session_id)
         if row is None:
             raise ValueError(f"No such session: {session_id}")
@@ -110,7 +112,35 @@ class Session:
             # interlock had been earned and then forgotten. The archive already knows: every
             # private tool result was written with a marker, so no migration is needed.
             private=await repo_archive.session_read_private(session_id),
+            handoff=_stored_handoff(session_id, cfg=cfg),
         )
+
+
+def _stored_handoff(session_id: UUID, *, cfg: Config | None = None) -> handoff_mod.Handoff | None:
+    """The handoff this conversation handed off under, read back off a checkpoint.
+
+    None on three different roads, and all three are honest: the conversation never handed
+    off, `[checkpoints] enabled` is off so nothing was stored (session 5b's open question 5,
+    still open - the object then survives a conversation and not a process), or the stored
+    object was written under rules this build cannot read. The third is the only one worth
+    a word, and it gets one rather than a silent `None`: a resumed session that quietly
+    dropped a handoff would start replaying the whole archive again, which is the
+    compression undone by a restart with every number still looking healthy.
+
+    Never raises into a resume. A conversation that can be continued without its handoff is
+    a conversation that costs more context than it should; one that cannot be continued at
+    all because reading an accelerator failed is worse.
+    """
+    cfg = cfg or get_config()
+    try:
+        stored = Checkpointer.reading(get_writer(cfg).store).latest_handoff_for_session(
+            str(session_id)
+        )
+        return handoff_mod.Handoff.from_dict(stored) if stored else None
+    except handoff_mod.HandoffError:
+        return None
+    except Exception:  # a journal that cannot be read must not stop a conversation
+        return None
 
 
 @dataclass
@@ -434,6 +464,13 @@ class AgentLoop:
                 # is the turn an injected instruction would actually use.
                 autonomy=autonomy, tainted=session.tainted, private=session.private,
             )
+            if carried_over is not None:
+                # The lookup's whole authorisation check: a ref is fetchable only if the
+                # handoff in force lists it. Handed through the context rather than bound
+                # into the tool, because the object changes every time the conversation
+                # hands off again and a tool holding a stale one would resolve refs
+                # against a manifest nobody was shown.
+                tctx.extra["handoff"] = carried_over
             if correction_cue is not None:
                 tctx.extra["correction_cue"] = correction_cue
 
@@ -545,6 +582,30 @@ class AgentLoop:
                     },
                     step_id=sid,
                 )
+                if assistant_text:
+                    # The model's own words, archived as they arrive rather than only as
+                    # part of the joined answer at the end of a turn that finished. Dylan's
+                    # ruling at the Pass 4/5 boundary, taken with the cost that was written
+                    # into it: **it fixes nothing for runs already journaled.** What it
+                    # fixes from here is the case 5c needs - a turn that died at step 9
+                    # leaves the journal holding 200-character previews of what it said,
+                    # and session 4b refused to hand previews to a model as bodies. Now the
+                    # bodies are in the archive and the refusal costs nothing.
+                    #
+                    # A separate kind, not `assistant_message`. `recent_messages` selects
+                    # user and assistant *messages* to rebuild a prompt's history, and a
+                    # kind it does not select cannot reach a later prompt - which is the
+                    # whole point: a turn that completes archives its prose twice, once per
+                    # step here and once joined below, and exactly one of those is ever
+                    # replayed. Two rows in an append-only archive is cheap; the same text
+                    # twice in a prompt is the bug this runtime shipped for five passes.
+                    await repo_archive.append_event(
+                        RawEvent(
+                            kind="assistant_step", actor=self.actor,
+                            content=assistant_text, session_id=session.id, turn_id=turn_id,
+                            payload={"step": steps, "tool_calls": len(calls)},
+                        )
+                    )
 
                 if not calls:
                     final_text.append(assistant_text)
@@ -789,6 +850,27 @@ class AgentLoop:
 
         dropped = sizes[kept:]
 
+        # The manifest (session 5c). Everything this session holds that the successor will
+        # not see, with a ref against the archive's own identity column. Two different
+        # reasons for two kinds of item, which `manifest_rows` draws the line for: a
+        # conversation message is gone because it fell below the watermark, a tool result
+        # is gone because tool results are never replayed into a later prompt at all - and
+        # the second is most of what a turn that spent its step budget actually learned.
+        upto = (
+            watermark
+            if watermark is not None
+            else await repo_archive.max_event_id(session.id)
+        )
+        items = handoff_mod.manifest(
+            await repo_archive.manifest_rows(
+                session.id,
+                upto_id=upto,
+                watermark=watermark,
+                excerpt_chars=self.cfg.handoff.manifest_excerpt_chars,
+                limit=self.cfg.handoff.manifest_items,
+            )
+        )
+
         def done(status: str, *, chars: int, error: str | None) -> None:
             rj.emit(
                 "handoff_finished",
@@ -826,6 +908,7 @@ class AgentLoop:
                 # here would be the only source of a sub-agent that never existed.
                 active_subagents=(),
                 important_memory_refs=[str(r) for r in refs.get("items", [])],
+                dropped_manifest=items,
             )
         except handoff_mod.HandoffError as exc:
             done("failed", chars=0, error=str(exc))

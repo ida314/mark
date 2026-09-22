@@ -171,6 +171,21 @@ carry_tokens = 2000          # ...and the budget that binds first, so the succes
 excerpt_chars = 1500         # per source message shown to the generator
 source_chars = 48000         # total shown to the generator, newest first
 
+# The manifest and the lookup (session 5c/5d). A handoff drops material; the manifest is
+# the list of what it dropped - one line per item, with a ref - and the lookup is a
+# read-class tool that fetches exactly one of those refs. Together they are what lets a
+# successor say "I do not have that" and then go and get it, instead of answering from a
+# summary as though it were the thing.
+manifest_excerpt_chars = 160   # how an item is described: its first characters, not a summary
+manifest_items = 40            # how many are listed, newest first; the rest are counted
+lookup_max_chars = 4000        # the bound on one lookup, deliberately below tool_result_max_chars
+
+# Cold resume (session 5c). A run picked up after its process died is replayed verbatim
+# when it is recent and still fits, and compressed into a handoff when it is not. Lossless
+# where the lossless path fits; the pass file's third Must not is the other direction.
+warm_window_s = 14400          # four hours, untuned - there are no traces yet and it says so
+# resume_budget_tokens = 24000 # unset means agent.history_tokens
+
 [mcp]
 http_port = 8770
 

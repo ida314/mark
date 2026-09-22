@@ -61,6 +61,54 @@ class SessionGrants:
         return False
 
 
+@dataclass
+class RerunGrants:
+    """'The user said to run that one again', for a call a crash left uncertain.
+
+    Session 5c, and Dylan's requirement B at the Pass 4/5 boundary. After a crash an
+    `unsafe_write` that was announced and never reported back is closed as *uncertain*: it
+    may have happened. `agent/observations.py` tells the model so and tells it not to re-run
+    the call on its own - and until now that sentence was the entire guard. A re-issued call
+    mints a *new* idempotency key, because `step_id` is part of the key and the resumed turn
+    is at a different step, so nothing downstream recognises it as the same call. The model
+    being asked to comply is a local 27B.
+
+    So the refusal moved into the executor, and this is the only way past it. Same shape as
+    `SessionGrants` and for the same reason: never persisted, never inferred, and never
+    granted by the runtime on the model's behalf. A grant is one (run, tool, arguments) that
+    a person named.
+
+    Keyed on the run because that is the scope of the doubt. The uncertain call belongs to
+    one run; a later run doing the same thing is ordinary work, not a duplicate.
+    """
+
+    exact: set[tuple[str, str, str]] = field(default_factory=set)
+
+    def allow(self, *, run_id: str, tool: str, args_hash: str) -> None:
+        self.exact.add((run_id, tool, args_hash))
+
+    def allow_tool(self, *, run_id: str, tool: str) -> None:
+        """Every uncertain call of one tool in one run.
+
+        The coarse grain exists because the fine one is unusable at a terminal: the thing a
+        person can see and act on is "re-send the two emails that may not have gone", not a
+        64-character digest. `ANY` is a sentinel rather than an empty string, which would be
+        a real hash that never matches and would look identical in a set dump.
+        """
+        self.exact.add((run_id, tool, ANY))
+
+    def granted(self, *, run_id: str, tool: str, args_hash: str) -> bool:
+        return (
+            (run_id, tool, args_hash) in self.exact
+            or (run_id, tool, ANY) in self.exact
+        )
+
+
+# Not "" and not None: both would be values a real digest could be confused with by a
+# reader, and this one is unmistakable in a dump of the set.
+ANY = "*any-arguments*"
+
+
 class AutoApprover:
     """Approves or denies everything. Tests and non-interactive scripts only."""
 

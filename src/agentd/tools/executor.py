@@ -25,13 +25,27 @@ from ..db import repo_ops
 from ..db.repo_ops import ActionRecord
 from ..ids import uuid7
 from ..journal.checkpoints import checkpoint_at
-from ..journal.ledger import Effect, EffectLedger, get_ledger, ledgered
+from ..journal.ledger import ORPHANED, Effect, EffectLedger, get_ledger, ledgered
 from ..obs import otel
-from ..policy.approvals import ApprovalRequest, Approver, SessionGrants
+from ..policy.approvals import ApprovalRequest, Approver, RerunGrants, SessionGrants
 from ..policy.engine import PolicyContext, PolicyEngine, ToolCallInfo
 from . import effects
 from .base import Tool, ToolContext, ToolResult
-from .idempotency import CanonicalizationError, declared_names
+from .idempotency import CanonicalizationError, args_hash, declared_names
+
+# What the model is told when the guard refuses. It names the tool, says what is actually
+# known - the call was announced and never reported back, so it *may* have gone out - and
+# gives the one way past, which is the user's own instruction and not a retry the model can
+# choose. It must not claim the effect happened: that is the inference Dylan struck at the
+# Pass 4/5 boundary, and `observations.CLOSING_TEXT` is careful about it one layer up.
+RERUN_REFUSED = (
+    "Refusing to run {tool} again. An earlier {tool} call in this run, with these exact "
+    "arguments, was interrupted before it reported back, so it may already have taken "
+    "effect - running it again could duplicate a real-world action that cannot be taken "
+    "back. This refusal is the runtime's, not a policy decision you can appeal by "
+    "rephrasing. Tell the user what you wanted to do and that the earlier attempt is "
+    "unresolved; only they can say it is safe to run again."
+)
 
 UNTRUSTED_WRAPPER = (
     '<untrusted_content source="{source}">\n{body}\n</untrusted_content>\n'
@@ -49,6 +63,7 @@ class ToolExecutor:
         *,
         max_result_chars: int = 8000,
         grants: SessionGrants | None = None,
+        rerun_grants: RerunGrants | None = None,
         ledger: EffectLedger | None = None,
     ) -> None:
         self.tools = tools
@@ -56,6 +71,10 @@ class ToolExecutor:
         self.approver = approver
         self.max_result_chars = max_result_chars
         self.grants = grants or SessionGrants()
+        # Empty by default, which is the strict setting: with no grant in it, every
+        # `unsafe_write` matching an unresolved uncertain call in the same run is refused.
+        # A caller acting on the user's instruction puts entries in; nothing else does.
+        self.rerun_grants = rerun_grants or RerunGrants()
         # Resolved on the first effecting call rather than here, so constructing an
         # executor still opens nothing. There is no "off": an executor with no ledger would
         # be a second path on which an unsafe write happens unannounced, which is the exact
@@ -146,6 +165,23 @@ class ToolExecutor:
         if tool.effect_class == effects.UNSAFE_WRITE:
             checkpoint_at("pre_effect", run_id=ctx.run_id, writer=self._resolve_ledger().writer)
 
+        # Dylan's requirement B (session 5c). The last refusal before the intent, and the
+        # only one that is about the *past* rather than about this call: an `unsafe_write`
+        # whose twin in this run was left uncertain by a crash is not run again unless the
+        # user has said so.
+        #
+        # Here rather than beside the policy check because it must sit after approval and
+        # before `_intend`. After approval, because approving a write is an answer to "is
+        # this allowed", not to "did this already happen", and the approval prompt does not
+        # say the second thing. Before the intent, because announcing an effect that is
+        # about to be refused would put a promise on disk that nothing kept.
+        refusal = self._rerun_refusal(tool, args, ctx)
+        if refusal is not None:
+            return await self._fail(
+                action_id, parent_id, ctx, name, args, refusal, started, rationale=reason,
+                data={"rerun_refused": True},
+            )
+
         # The intent is recorded here and not one line earlier: everything above this point
         # can still refuse the call, and an approval can sit unanswered for an hour. From
         # here on there is a record on disk saying this was about to happen.
@@ -222,6 +258,43 @@ class ToolExecutor:
             else:
                 effect.failed(_one_line(result.content), result_ref=_result_ref(action_id))
         return result
+
+    def _rerun_refusal(
+        self, tool: Tool, args: dict[str, Any], ctx: ToolContext
+    ) -> str | None:
+        """Why this call must not run, or None.
+
+        The match is `(run_id, tool, canonical arguments)`, which is the pass file's
+        wording. Deliberately **not** the idempotency key: the key hashes `step_id` too, so
+        a resumed turn re-issuing the identical call mints a fresh key and matches nothing.
+        That is the hole this exists to close, and keying the guard the same way would
+        reproduce it exactly.
+
+        `unsafe_write` only. An `idempotent_write` converges on re-execution - the
+        reconciliation table says re-execute - and a `read` changes nothing outside, so
+        refusing either would be a prompt about a danger that is not there, which is how a
+        signal stops meaning anything.
+        """
+        if tool.effect_class != effects.UNSAFE_WRITE or not ctx.run_id:
+            return None
+        try:
+            digest_of_args = args_hash(args, declared=declared_names(tool.parameters))
+        except CanonicalizationError:
+            # The arguments have no canonical form, so this call is about to be refused by
+            # `_intend` anyway, with a better message than this one could give.
+            return None
+        if self.rerun_grants.granted(
+            run_id=ctx.run_id, tool=tool.name, args_hash=digest_of_args
+        ):
+            return None
+        unresolved = [
+            row
+            for row in self._resolve_ledger().entries(ctx.run_id)
+            if row.tool == tool.name
+            and row.args_hash == digest_of_args
+            and row.state == ORPHANED
+        ]
+        return RERUN_REFUSED.format(tool=tool.name) if unresolved else None
 
     def _intend(
         self, tool: Tool, args: dict[str, Any], ctx: ToolContext, action_id: UUID
