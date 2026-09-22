@@ -16,7 +16,8 @@ the three ways it can produce something and still be wrong:
   about an interrupted call, folded into a summary, becomes a claim the user never made and
   no tool ever returned - and once the conversation is gone there is nothing left to check
   it against. The same applies to `FINAL_NUDGE` and `STUCK_NUDGE`, which are the runtime
-  talking to the model and are not flagged at all.
+  talking to the model, carry no flag, and since 2026-09-22 are `user` messages rather than
+  `system` ones - so the role no longer keeps them out and `RUNTIME_NOTE` has to.
 * **A handoff taken when nothing needed handing off.** Session 5a measured the whole
   assembled prompt and handed the consequence forward: a turn with twelve full-size tool
   results fills the window with material that is gone by the next turn. Compressing a
@@ -33,8 +34,8 @@ import pytest
 from agentd.agent import budget
 from agentd.agent import handoff as handoff_mod
 from agentd.agent.handoff import Handoff, HandoffDraft, HandoffError, HandoffInvalid
-from agentd.agent.loop import FINAL_NUDGE, AgentLoop, Session
-from agentd.agent.observations import RUNTIME_PREFIX, ClosingMessage
+from agentd.agent.loop import FINAL_NUDGE, STUCK_NUDGE, AgentLoop, Session
+from agentd.agent.observations import RUNTIME_NOTE, RUNTIME_PREFIX, ClosingMessage
 from agentd.db import repo_archive
 from agentd.db.repo_archive import RawEvent
 from agentd.llm.base import CallParams, LLMError
@@ -242,16 +243,37 @@ def test_runtime_text_that_lost_its_flag_is_still_refused_and_counted() -> None:
 def test_the_runtimes_notes_to_the_model_are_never_summarised_as_conversation() -> None:
     """`FINAL_NUDGE` and `STUCK_NUDGE` carry no `synthetic` flag and never will - they are
     not tool results. They are the runtime talking to the model, and a handoff that read them
-    would report "the user said to stop calling tools"."""
+    would report "the user said to stop calling tools".
+
+    They are `user` messages now (the backend rejects a trailing `system` message with a
+    400), so the role does none of this work any more and `RUNTIME_NOTE` does all of it.
+    That is the whole reason this test asserts on `unflagged_runtime_text` rather than on
+    `system_excluded`: the count says which rule caught them.
+    """
     src = handoff_mod.source(
         [
             {"role": "system", "content": "you are an agent"},
             {"role": "user", "content": "find the file"},
-            {"role": "system", "content": FINAL_NUDGE},
+            {"role": "user", "content": FINAL_NUDGE},
+            {"role": "user", "content": STUCK_NUDGE.format(name="fs_read", attempts=2)},
         ]
     )
-    assert src.system_excluded == 2
+    assert src.system_excluded == 1
+    assert src.unflagged_runtime_text == 2
     assert [m["content"] for m in src.messages] == ["find the file"]
+
+
+def test_the_runtimes_notes_go_on_the_wire_as_something_this_backend_accepts() -> None:
+    """The 400 that made this change, stated as a property of the strings themselves.
+
+    `sir` turns one caller's malformed request into a cancelled stream for every other
+    caller on the model (`baseline-v2.md` v2-1), so a trailing `system` message here cost
+    three suite rows 600 seconds each on a fault they did not cause. The role is asserted
+    at the append site in `test_agent_loop.py`; what is asserted here is the other half of
+    the trade - a `user` message the user did not write is only safe while it is marked.
+    """
+    assert FINAL_NUDGE.startswith(RUNTIME_NOTE)
+    assert STUCK_NUDGE.startswith(RUNTIME_NOTE)
 
 
 def test_a_tool_result_is_labelled_with_the_tool_that_produced_it() -> None:

@@ -36,11 +36,27 @@ from ..tools.registry import Registry, get_registry
 from . import budget
 from . import context as ctxmod
 from . import handoff as handoff_mod
+from .observations import RUNTIME_NOTE
 from .stream import Answer, Delta, Notice, TurnStream
 
+# The runtime's two mid-turn notes to the model, and why they are `user` messages carrying
+# a marker rather than `system` messages.
+#
+# They were `system` messages until 2026-09-22. Appending one at the end of the list is
+# what this backend's chat template rejects with HTTP 400 "System message must be at the
+# beginning", and `sir` turns that 400 into a cancelled stream for every *other* caller on
+# the model, which is the whole of `baseline-v2.md` finding v2-1: three suite rows lost
+# 600 seconds and returned nothing, on a fault they did not cause. Verified both ways
+# against vLLM on :8001 before the change - trailing `system` 400, trailing `user` 200.
+#
+# Position is why they are not folded into the leading system block instead: "stop calling
+# tools now" and "that tool has been withdrawn" are about what just happened, and a 27B
+# reads them where they are. The cost of the role is that a `user` message the user did not
+# write is now in the list, so each one carries `RUNTIME_NOTE` and `agent/handoff.py`
+# refuses anything carrying it - the marker does the work the role used to do for free.
 FINAL_NUDGE = (
-    "You have used your whole tool budget for this turn. Stop calling tools. "
-    "Summarize what you found, what you changed, and what is still open."
+    f"{RUNTIME_NOTE} You have used your whole tool budget for this turn. Stop calling "
+    "tools. Summarize what you found, what you changed, and what is still open."
 )
 
 # How many times one tool may reject the identical arguments before the loop takes it away
@@ -50,9 +66,9 @@ FINAL_NUDGE = (
 # rejection is the one that carries the repair advice and the model deserves to act on it.
 STUCK_LIMIT = 2
 STUCK_NUDGE = (
-    "`{name}` rejected the same arguments {attempts} times, so it has been withdrawn for "
-    "the rest of this turn. Do not look for another way to call it. Carry on without it, "
-    "and tell the user plainly what you were unable to do."
+    RUNTIME_NOTE + " `{name}` rejected the same arguments {attempts} times, so it has been "
+    "withdrawn for the rest of this turn. Do not look for another way to call it. Carry on "
+    "without it, and tell the user plainly what you were unable to do."
 )
 
 
@@ -434,11 +450,14 @@ class AgentLoop:
                 last_step = step == self.cfg.agent.max_steps - 1
                 step_tools = None if last_step else tool_schemas
                 if last_step:
-                    messages.append({"role": "system", "content": FINAL_NUDGE})
+                    messages.append({"role": "user", "content": FINAL_NUDGE})
                     rj.emit(
                         "message_appended",
                         {
-                            "role": "system", "actor": self.actor, "chars": len(FINAL_NUDGE),
+                            # The role that was sent, and the actor who wrote it. Both are
+                            # needed to read this row correctly: `user` is what went on the
+                            # wire, and `actor` is what says the user did not type it.
+                            "role": "user", "actor": self.actor, "chars": len(FINAL_NUDGE),
                             "preview": jevents.preview(FINAL_NUDGE), "trust": "trusted",
                         },
                         step_id=sid,
@@ -659,11 +678,11 @@ class AgentLoop:
 
                 # After the batch, never between an assistant's tool calls and their results.
                 for note in stuck:
-                    messages.append({"role": "system", "content": note})
+                    messages.append({"role": "user", "content": note})
                     rj.emit(
                         "message_appended",
                         {
-                            "role": "system", "actor": self.actor, "chars": len(note),
+                            "role": "user", "actor": self.actor, "chars": len(note),
                             "preview": jevents.preview(note), "trust": "trusted",
                         },
                         step_id=sid,

@@ -24,12 +24,17 @@ about a call, folded into a summary, becomes a claim nobody made and no tool ret
 1. `observations.ClosingMessage` and anything else carrying `synthetic=True`. Dylan's
    requirement at the Pass 4/5 boundary, and it is enforced by the flag rather than by the
    `RUNTIME_PREFIX` string, which is a second and independent signal.
-2. Every `system` message. `FINAL_NUDGE`, `STUCK_NUDGE` and the assembled instruction block
-   are all the runtime talking to the model, none of them is flagged, and a summary that
-   read them would report "the user said to stop calling tools".
-3. Anything still carrying `RUNTIME_PREFIX` after the first two passes. That cannot happen
-   today; if it ever does it is a caller that lost the flag, so it is excluded *and counted*
-   into the stored object rather than dropped quietly.
+2. Every `system` message. The assembled instruction block is the runtime talking to the
+   model, it is not flagged, and a summary that read it would report the user's standing
+   instructions as things said in this conversation.
+3. Anything carrying one of `observations.RUNTIME_MARKERS`. This is the rule that catches
+   `FINAL_NUDGE` and `STUCK_NUDGE`, which the `system` rule used to catch for free and no
+   longer does: they became `user` messages on 2026-09-22 because this backend rejects a
+   trailing system message with HTTP 400, and a `user` message the user did not write is
+   the exact shape rule 1 exists to keep out of a summary. It also still catches a
+   `ClosingMessage` whose caller lost the flag - which cannot happen today, and is
+   excluded *and counted* into the stored object rather than dropped quietly if it ever
+   does.
 
 ## What the model is not asked for
 
@@ -66,7 +71,7 @@ from ..llm.base import LLMError, LLMProvider
 from ..llm.roles import get_provider, params_for
 from . import budget
 from . import context as ctxmod
-from .observations import RUNTIME_PREFIX
+from .observations import RUNTIME_MARKERS
 
 # The stored object's shape, so anything that reads one later can tell which rules it was
 # built under. Session 5a's open question 2 is the reason this exists at all: five
@@ -383,7 +388,8 @@ def source(
         ):
             synthetic += 1
             continue
-        if RUNTIME_PREFIX in (message.get("content") or ""):
+        content = message.get("content") or ""
+        if any(marker in content for marker in RUNTIME_MARKERS):
             runtime_text += 1
             continue
         kept.append(message)

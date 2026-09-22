@@ -601,6 +601,21 @@ def _paths_sentence(observation: Observation) -> str:
 # the runtime's, not the tool's, and it says so in the first characters the model reads.
 RUNTIME_PREFIX = "[runtime, on resume - not output from the tool]"
 
+# The same rule for the runtime's mid-turn notes to the model - `agent/loop.py`'s
+# `FINAL_NUDGE` and `STUCK_NUDGE`. They used to be `system` messages, which is what kept
+# them out of a handoff for free, and they are `user` messages now because this backend's
+# chat template rejects a system message that is not first with HTTP 400 (baseline-v2
+# finding v2-1). A `user` message the user did not write needs the marker the `system` role
+# used to be, or the next summary of a transcript reports "the user said to stop calling
+# tools" - which is exactly the laundering `RUNTIME_PREFIX` exists to prevent one message
+# type earlier.
+RUNTIME_NOTE = "[runtime, not from the user]"
+
+# Every prefix that means "the runtime wrote this, nobody said it". `agent/handoff.py`
+# refuses all of them. One tuple rather than two checks, so a third marker cannot be added
+# to the module and forgotten at the only place that reads them.
+RUNTIME_MARKERS: tuple[str, ...] = (RUNTIME_PREFIX, RUNTIME_NOTE)
+
 # Keyed by evidence, exactly as `STATEMENTS` is, and total over the same seven values.
 #
 # Keying it by *status* was a bug with one loud case and several quiet ones. `uncertain`
@@ -848,6 +863,8 @@ __all__ = [
     "PROCEED_WITHOUT",
     "READBACK",
     "RETRY",
+    "RUNTIME_MARKERS",
+    "RUNTIME_NOTE",
     "RUNTIME_PREFIX",
     "SETTLED",
     "STATEMENTS",

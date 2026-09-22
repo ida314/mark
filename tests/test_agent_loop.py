@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.loop import FINAL_NUDGE, AgentLoop, Session
 from agentd.agent.stream import Answer, Delta
 from agentd.db import repo_ops
 from agentd.llm.fake import FakeProvider
@@ -150,6 +150,22 @@ async def test_the_step_budget_ends_with_a_summary(cfg, journaled):
     assert ended.payload["status"] == "abandoned"
     # the last call had no tools and carried the nudge
     assert provider.calls[-1]["tools"] == []
+    # ...and the nudge went on the wire as a `user` message, not a trailing `system` one.
+    # Qwen3's chat template answers a system message that is not first with HTTP 400, and
+    # `sir` turns that 400 into a cancelled stream for every other caller on the model -
+    # three baseline-v2 rows lost 600 seconds each to a fault they did not cause
+    # (`baseline-v2.md` v2-1). The marker is what keeps a user-role message the user did
+    # not write out of the next handoff; `tests/test_handoff.py` holds that half down.
+    # `FakeProvider` keeps the live list rather than a copy, so this reads the list as it
+    # ended up rather than as it was sent. Both assertions survive that: the nudge is the
+    # one message with this text, and "no system message after the first" is the property
+    # the 400 is actually about.
+    sent = provider.calls[-1]["messages"]
+    nudges = [m for m in sent if (m.get("content") or "") == FINAL_NUDGE]
+    assert len(nudges) == 1 and nudges[0]["role"] == "user"
+    assert not any(m.get("role") == "system" for m in sent[1:]), (
+        "a system message anywhere but first is a 400 from this backend"
+    )
 
 
 async def test_invalid_tool_arguments_are_reported_not_raised(cfg, journaled):
