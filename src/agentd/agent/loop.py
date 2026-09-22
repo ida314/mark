@@ -315,6 +315,24 @@ class AgentLoop:
             "agent.turn", {"agentd.autonomy": autonomy, "agentd.origin": origin}
         ), rec:
             trace_ids = otel.current_ids()
+
+            # The conversation so far, read *before* the current message is archived.
+            # `build_messages` appends `user_text` as the final turn, so a window that had
+            # already absorbed it would state the user's message twice - which is what every
+            # prompt did until this ordering was fixed.
+            #
+            # With a handoff in force this is the fresh orchestrator the pass file describes:
+            # the same system instructions and the same retrieved memory, plus the handoff
+            # object, plus only the conversation after the handoff's watermark. The old
+            # context is not copied in beside its own summary - `after_id` is what makes that
+            # structural rather than a rule somebody has to remember.
+            carried_over = session.handoff
+            history = await ctxmod.history_messages(
+                session.id, budget_tokens=self.cfg.agent.history_tokens,
+                summary=session.summary,
+                after_id=carried_over.watermark if carried_over else None,
+            )
+
             if record_user_message:
                 await repo_archive.append_event(
                     RawEvent(
@@ -365,19 +383,8 @@ class AgentLoop:
             exposed = {t.name: t for t in tools}
             tele.tools_offered(list(exposed), registry_size=len(self.registry.enabled()))
 
-            # 3. Build the messages.
-            #
-            # With a handoff in force this is the fresh orchestrator the pass file describes:
-            # the same system instructions and the same retrieved memory, plus the handoff
-            # object, plus only the conversation after the handoff's watermark. The old
-            # context is not copied in beside its own summary - `after_id` is what makes that
-            # structural rather than a rule somebody has to remember.
-            carried_over = session.handoff
-            history = await ctxmod.history_messages(
-                session.id, budget_tokens=self.cfg.agent.history_tokens,
-                summary=session.summary,
-                after_id=carried_over.watermark if carried_over else None,
-            )
+            # 3. Build the messages. The history window was read at the top of the turn,
+            # before the current message was archived, so `user_text` is stated once.
             messages = ctxmod.build_messages(
                 self.cfg, autonomy=autonomy, context_block=context_block,
                 history=history, user_text=user_text,

@@ -510,10 +510,10 @@ async def test_the_successor_is_started_from_the_handoff_and_not_from_the_old_co
     assert "Rewrite the ingest window sweep" in system
     assert "run the connector tests" in system
     # The system block, the four messages after the watermark, and this turn's own user
-    # message twice - the loop archives it before it reads the history back, which predates
-    # this session and is why `history` and `user_text` overlap on every turn. The twenty
-    # seeded messages are gone: they are what the handoff replaced.
-    assert len(successor) == 1 + cfg.handoff.carry_messages + 2
+    # message once. It used to be counted twice here: the loop archived the current message
+    # before it read the history window back, so `history` and `user_text` overlapped on
+    # every turn. The twenty seeded messages are gone: they are what the handoff replaced.
+    assert len(successor) == 1 + cfg.handoff.carry_messages + 1
     body = " ".join(m.get("content") or "" for m in successor)
     assert body.count(LONG_MESSAGE) <= cfg.handoff.carry_messages
 

@@ -449,3 +449,59 @@ async def test_the_fast_path_carries_the_key_onto_the_fact_it_writes(cfg):
     assert facts[0]["predicate"] == "lives_in"
     assert facts[0]["object_text"] == "the East Village"
     assert facts[0]["subject_entity_id"] is not None
+
+
+# --- the current user message is stated once ----------------------------------
+#
+# Why this matters. Every prompt this runtime ever assembled carried the user's current
+# message twice: `run_turn` archived it before reading the history window back, so the
+# window returned the message that had just been written and `build_messages` then appended
+# it again as the final turn. The model saw a user who repeats themselves verbatim, and the
+# cost was paid on every turn, out of the same budget `agent/budget.py` measures and the
+# handoff threshold reads. The property is about the assembled prompt, because that is what
+# reaches the model — a history window that is clean while some other reader still sees the
+# duplicate would be the same bug wearing a different hat.
+
+
+def _prompt(provider: FakeProvider) -> list[dict]:
+    """The message list of the first model call of the most recent turn."""
+    return provider.calls[0]["messages"]
+
+
+async def test_the_current_user_message_appears_exactly_once_in_the_prompt(cfg):
+    provider = FakeProvider(turns=["Noted."])
+    loop = AgentLoop(
+        cfg=cfg, registry=Registry(), engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    text = "the kettle is in the third cupboard"
+    await _run(loop, session, text)
+
+    stated = [m for m in _prompt(provider) if (m.get("content") or "") == text]
+    assert len(stated) == 1, f"user message appears {len(stated)} times in the prompt"
+    assert stated[0]["role"] == "user"
+    # And it is the last thing the model reads, not buried in the history window.
+    assert _prompt(provider)[-1]["content"] == text
+
+
+async def test_an_earlier_message_is_carried_once_and_the_new_one_is_not_doubled(cfg):
+    """A second turn: the previous exchange comes back from the archive exactly once, and
+    the message being asked about now is still stated only at the end."""
+    provider = FakeProvider(turns=["First.", "Second."])
+    loop = AgentLoop(
+        cfg=cfg, registry=Registry(), engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    first = "remember the kettle"
+    second = "where did i say the kettle was"
+    await _run(loop, session, first)
+    provider.calls.clear()
+    await _run(loop, session, second)
+
+    contents = [(m.get("content") or "") for m in _prompt(provider)]
+    assert contents.count(first) == 1
+    assert contents.count(second) == 1
+    assert contents.count("First.") == 1
+    assert contents[-1] == second
