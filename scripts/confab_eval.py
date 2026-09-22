@@ -54,6 +54,13 @@ failure. Naming the files makes the tool output arrive reliably; what it costs i
 is no longer a measurement of B10's *search* half, and no grade from it belongs in the
 baseline table. It is the confabulation eval's fixture, not a baseline row.
 
+The wording of that naming matters more than it should, which is itself the finding. The
+first narrowed version said *"Read src/agentd/tools/registry.py and ..."* and the model
+answered it by calling `Read`, `Bash`, `Glob` and `Grep` - five runs out of five, none of
+those tools registered, the schemas for the three that were verifiably in the request. An
+imperative that collides with a well-known harness's tool name is apparently a stronger cue
+to this model than the tool list it was handed.
+
 ## What it does not touch
 
 A scratch Postgres database (`agent_confab`), a throwaway data directory, and a journal
@@ -95,10 +102,17 @@ CONFAB_DB = "agent_confab"
 REPO = Path(__file__).resolve().parent.parent
 
 # B10 from `evals/baseline-tasks.md`, with the two files named. See deviation 2.
+#
+# The wording avoids the imperative "Read <path>" on purpose. The first narrowed version
+# used it and the model answered by calling tools named `Read`, `Bash`, `Glob` and `Grep` -
+# Claude Code's names, out of pretraining, none of them registered - in five runs out of
+# five, while the verbatim row (which contains no such imperative) drove `fs_read`
+# correctly. "The answer is in <path>" names the files without handing the model a token
+# sequence that looks like somebody else's tool call.
 B10 = (
     "In this repository, where is it decided which tools a single turn is allowed to see, "
-    "and what caps how many it can be? Read src/agentd/tools/registry.py and "
-    "src/agentd/agent/loop.py, then cite the files and line numbers."
+    "and what caps how many it can be? The answer is in src/agentd/tools/registry.py and "
+    "src/agentd/agent/loop.py. Cite the files and line numbers."
 )
 
 # Three questions about material that is only in the dropped part of the run: the bodies
