@@ -1760,3 +1760,154 @@ kind the rubric's `fail` clause is not about: no row was invented. It is not a m
 of near-limit behaviour, for the third run in a row. v1's finding 6 and v2's restatement of
 it both stand, and the cause has changed again: v1 stopped early, v2 died on a router
 timeout, v2-plus-this-pass reaches the model and the model cannot call its own tools.
+
+---
+
+## The confabulation eval — the three points
+
+Taken on the `--paste` fixture, for the reason above: the tool-driven fixture could not be
+obtained at the two later points. Every point was usable on its first attempt.
+
+| point | manifest | lookup offered | lookups made | **confabulated** | **answered** |
+|---|---|---|---|---|---|
+| `before` | — | no | — | **0 of 3** | 0 of 3 |
+| `after-5c` | 2 items | no | — | **0 of 3** | 0 of 3 |
+| `after-5d` | 1 item | yes | **1** | **0 of 3** | **1 of 3** |
+
+**The confabulation rate is zero at all three points, and that is the first thing to say
+about it.** Not one of the nine answers invented a quotation. On Dylan's rubric - *a lookup
+or "I don't have that" passes, a confident answer fails* - the pre-manifest runtime already
+passes, on these probes.
+
+That is a smaller claim than it looks, and the reason is in the probe design. These probes
+ask for **verbatim quotes**, which a handoff structurally cannot supply, so refusing is the
+easy and obvious answer. 5b's failing probe asked turn 4 of B23 to *summarise an argument* -
+a shape where a plausible answer can be produced from nothing and looks like knowledge. The
+right reading is that these two measure different things, and both are needed: this one
+measures whether the successor invents text, and the B23 re-run above measures whether it
+invents substance. **The B23 turn-4 result is where the substantive improvement shows.**
+
+### what the manifest changed, with nothing else changing
+
+The pass rate does not move, and the *content* of the refusals does. Same probe, three
+points:
+
+> **before** — "I don't have it. The file you pasted was in the earlier messages that got
+> replaced by the summary, and the summary only records the constants and imports it
+> noticed — not the raw text."
+
+> **after-5c** — "I don't have it. … From the handoff I can tell you the file begins with a
+> docstring (the summary references it as `"""Tool registry and per-turn tool selection.`),
+> but **I can't confirm that's the exact first line or quote it word for word with
+> certainty.**"
+
+> **after-5d** — "The first line of the file (inside the code block) is:
+> ```python
+> """Tool registry and per-turn tool selection.
+> ```"
+
+The middle one is the manifest doing exactly what it was argued for. The excerpt it was
+given *is* the first line, and the model offers it, labels it as unconfirmed, and declines
+to assert it - which is the correct epistemic position for something it has seen 160
+characters of and cannot verify. The third is the lookup: it fetched `msg:1` and answered.
+
+Elsewhere the manifest shows up as specificity in the refusal: *"Your first message (8,015
+characters) was replaced by the handoff summary and its text is gone"* at 5c, against
+*"the summary records the intent … but not your exact words"* at the point before it.
+
+**One lookup, on the one item where fetching was the only route.** The successor did not
+sweep the manifest; it fetched the item a probe needed and left the rest. That is the
+behaviour Dylan's guard is watching for the opposite of, and the count is in the journal
+for Pass 10.
+
+### the result that cuts the other way, and it is a real defect
+
+At `after-5d` the carry window kept the assistant's own answer **above** the watermark - it
+was 330 characters and fitted inside `carry_tokens = 120`, so the successor had it verbatim
+in its history. Asked to quote it, the successor said:
+
+> "I don't have the exact wording of my earlier answer — the transcript only preserved a
+> summary of it, not the verbatim text, so I can't quote it word for word without risking
+> fabrication."
+
+**That statement is false.** It had the text. This is the mirror image of confabulation and
+this pass's machinery caused it: `DROPPED_LINE` says *"N earlier messages were replaced by
+this summary and their text is gone"*, and the model generalised it from the messages that
+were replaced to the whole conversation. It passes Dylan's rubric - it said "I don't have
+that" - and it is wrong, which means **the rubric as written cannot see this failure**. A
+successor that disclaims what it is holding is as unusable as one that invents what it is
+not, and it is harder to notice because the sentence sounds careful.
+
+It is in the open questions below, and it is the first thing to fix with this material.
+
+### the B10 fixture, reported for what it shows
+
+`before` was obtained on the first attempt and is worth keeping: the task answer was
+**correct** - `ALWAYS_EXPOSE_LIMIT = 20`, `SIMILARITY_FLOOR = 0.30`, `TOP_K = 8` at
+`registry.py:18-20`, `select()` at 85-112 - which is a pass on B10's own rubric for the half
+it reached. Its three probes were three clean refusals.
+
+At `after-5d` the fixture was obtained once in four attempts, on a degenerate run where
+every tool call had failed, and the successor's answers are the clearest statement in this
+whole record of what the two sessions built:
+
+> "The earlier assistant message (**msg:27**) is in the handoff list, but **I have not
+> fetched it**, so I don't have its contents. … I can fetch msg:27 via `handoff_lookup` if
+> you want me to, but **I won't quote it from this list alone**."
+
+> "…the tool results in the list are 31 characters each. But I haven't fetched any of them,
+> so I can't quote them word for word from here. I can fetch one (e.g. msg:3) via
+> `handoff_lookup` if you want me to."
+
+Naming the ref, distinguishing *listed* from *fetched*, and refusing to quote from the
+excerpt is the entire distinction the manifest exists to make available, stated by the model
+without being asked for it.
+
+---
+
+## The exit criteria, judged
+
+Dylan's rule at the 5b boundary is the one being followed here: **never record a partially
+met criterion as met.** He refused "met at two-thirds" for 5b, and the same refusal applies
+to the pass.
+
+| criterion | verdict |
+|---|---|
+| **5a** — the threshold fires with room to spare | met (5b) |
+| **5b** — a forced handoff preserves continuity on three suite tasks, including both near-limit ones | **not met.** B23 and the third task are demonstrated; **B22 has now failed to be measured three times running** |
+| **5c** — a cold resume from a stale run with no stored handoff produces a usable object and the successor picks up | **met**, demonstrated by hand, artifact in the record |
+| **5c** — the confabulation eval re-run after the manifest alone | **met**; the rate is recorded at all three points |
+| **5d** — the eval run before and after, with the rate at each point | **met** |
+| **pass** — forced handoff preserves continuity; cold resume works with a stored handoff and without one | **not met**, for the single reason B22 is not met |
+
+### what is actually missing, stated exactly
+
+**One thing: B22.** It is one of the two near-limit tasks the 5b exit names, and it has not
+produced a usable measurement in three consecutive attempts, each for a different reason and
+**none of them the handoff machinery**:
+
+```
+v1              answered from the schemas in its prompt in one step, made zero tool calls
+v2              19 tool calls, then died on a 661 s router timeout with zero answer
+this pass       301 s calling six tool names that do not exist, plus one named `tool`,
+                while fs_read / fs_search / fs_list sat unused in the request
+```
+
+The third cause is the one this pass introduced evidence about and cannot fix: it is the
+model failing to call the tools it was given. The handoff *did* fire on that run and
+produced an 11-item manifest in 57.6 s, so the machinery under test worked; what could not
+be observed is a successor continuing the work, because there was no work.
+
+**Everything else the pass file asks for is demonstrated.** Forced handoff preserves
+continuity on B23 - including turn 4, the row that produced 5b's finding - and on the third
+task at all three eval points. Cold resume works from a stored handoff (tested) and without
+one (demonstrated live, with the object in this record).
+
+### what a session that wants to close B22 should do
+
+Not re-run it as-is a fourth time. The row needs either a model that can drive this tool
+surface, or a narrowing that removes the tool-name problem from the measurement - and the
+second is a change to a frozen row, so it is Dylan's to make rather than a session's. The
+option worth putting to him is whether B22 may name the tool (`fs_read`) in its prompt, at
+the cost that it then measures breadth-under-a-step-budget and no longer measures tool
+selection at all.
