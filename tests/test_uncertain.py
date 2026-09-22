@@ -342,6 +342,71 @@ def test_a_closing_tool_message_never_says_the_call_failed(writer) -> None:
     assert "failed" not in message.content and "error" not in message.content
 
 
+def test_a_failed_calls_closing_message_never_says_it_was_interrupted(writer) -> None:
+    """The closing text used to be keyed by status, and `uncertain` has two very different
+    inhabitants: a call that vanished mid-flight, and a call that resolved and answered with
+    an error. One sentence served both and it opened "This call was interrupted by the
+    process exiting" - which, for the second, is a claim the journal contradicts. The model
+    was being told the runtime did not know the call had finished, when it does.
+
+    Keyed by evidence, the failed call says what actually happened: it ran, it reported a
+    failure, and what it changed outside is still unknown - the one inference nobody may
+    draw from a failure, and the reason this evidence is `uncertain` rather than `blocked`.
+    """
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    effect = _call(rj, EffectLedger(writer), "web_fetch", {"url": "https://example.com/pay"})
+    effect.failed("502 from upstream", result_ref="action:1")
+
+    (message,) = obs.closing_messages(_plan(writer))
+    assert message.evidence == obs.EFFECT_FAILED
+    assert "interrupted by the process exiting" not in message.content
+    assert "reported a failure" in message.content
+    # Neither of the two inferences a failure does not support.
+    assert "duplicates nothing" not in message.content
+    assert "changed nothing" not in message.content
+
+
+def test_a_closing_message_claims_an_earlier_attempt_only_when_there_was_one(writer) -> None:
+    """`never_dispatched` is a statement about *this* attempt: the ledger row is keyed by
+    idempotency key, and a re-intent resets it to `intended`. On a first attempt there is no
+    earlier one, and a sentence that says one "may still have run" invents a doubt about a
+    call that was never made - which is how a model is talked out of making a call it should
+    make. `statement` has always gated this on `attempt`; the closing text now does too."""
+    rj = RunJournal(writer, "run-1")
+    _started(rj)
+    _assistant(rj, "p1")
+    _call(
+        rj, EffectLedger(writer), "web_fetch", {"url": "https://example.com/a"},
+        dispatched=False,
+    )
+
+    (message,) = obs.closing_messages(_plan(writer))
+    assert message.evidence == R.NEVER_DISPATCHED
+    assert "earlier attempt" not in message.content
+
+
+def test_every_evidence_value_has_a_closing_sentence_of_its_own(writer) -> None:
+    """Total over the evidence vocabulary, and distinct within it. A value that quietly
+    inherited another's sentence would describe a call as something it is not, which is the
+    failure the whole module is built to stop - and two identical sentences would be the
+    status-keyed bug growing back under a different name."""
+    vocabulary = {
+        R.MAY_HAVE_RUN, R.NEVER_DISPATCHED, R.UNKNOWN,
+        obs.NEVER_ANNOUNCED, obs.COMMITTED, obs.EFFECT_FAILED, obs.CLOSED_UNCERTAIN,
+    }
+    assert set(obs.CLOSING_TEXT) == vocabulary
+    assert len(set(obs.CLOSING_TEXT.values())) == len(vocabulary)
+
+    unknown = obs.Observation(
+        status=obs.UNCERTAIN, tool="web_fetch", subject=None, evidence="invented",
+        effect_class="unsafe_write", seq=1, paths=(obs.ASK,),
+    )
+    with pytest.raises(obs.ObservationError):
+        obs._closing_text(unknown)
+
+
 def test_an_unknown_status_raises_rather_than_defaulting_to_a_question(writer) -> None:
     """A fourth kind of observation must not inherit whichever branch was written first.
     The same rule 4b applied to effect classes, in the layer that phrases the sentence."""

@@ -601,21 +601,89 @@ def _paths_sentence(observation: Observation) -> str:
 # the runtime's, not the tool's, and it says so in the first characters the model reads.
 RUNTIME_PREFIX = "[runtime, on resume - not output from the tool]"
 
+# Keyed by evidence, exactly as `STATEMENTS` is, and total over the same seven values.
+#
+# Keying it by *status* was a bug with one loud case and several quiet ones. `uncertain`
+# covers a call that vanished mid-flight and a call that resolved, returned an error and
+# was closed as `failed` - and one sentence for both opened "This call was interrupted by
+# the process exiting", which for the second is a claim about the call's fate that its own
+# evidence contradicts. The model was then told the runtime did not know something the
+# journal does know: that the call finished, and how. Evidence determines status uniquely
+# here (see `SETTLED` and the orphan branch of `observations`), so keying by evidence loses
+# nothing and says the specific true thing in place of the general one.
+#
+# What every line may and may not claim, since that is the part worth getting wrong slowly:
+# it may say how far the call got, because the journal records that. It may not infer an
+# effect from a failure, which is the inference Dylan struck at the Pass 4/5 boundary and
+# the reason `effect_failed` is `uncertain` at all.
 CLOSING_TEXT: dict[str, str] = {
-    UNCERTAIN: (
-        "This call was interrupted by the process exiting. Whether it completed is not "
-        "known, and it has not been re-run. Do not re-run it yourself."
+    R.MAY_HAVE_RUN: (
+        "This call started and never reported back; the process exited first. Whether it "
+        "completed is not known."
     ),
-    BLOCKED: (
+    R.NEVER_DISPATCHED: (
+        "This attempt at the call was recorded and never started, and the process exited "
+        "before it was."
+    ),
+    R.UNKNOWN: (
+        "This call was announced, and the journal holds no record of whether it was ever "
+        "started. Whether it ran at all is not known."
+    ),
+    NEVER_ANNOUNCED: (
         "This call was interrupted by the process exiting. The runtime never recorded it "
-        "as started, so it changed nothing outside and no result came back. Making the "
-        "call again duplicates nothing."
+        "as started, so it changed nothing outside and no result came back."
     ),
-    UNREPORTED: (
+    COMMITTED: (
         "This call went through - the runtime holds the record that it did - and what it "
-        "returned was lost when the process exited. Do not run it again."
+        "returned was lost when the process exited."
+    ),
+    EFFECT_FAILED: (
+        "This call ran and reported a failure, and that report went with the process. It "
+        "was not interrupted: it got far enough to answer. What it changed outside, if "
+        "anything, is not known - a reported failure can be raised after the effect has "
+        "already gone out."
+    ),
+    CLOSED_UNCERTAIN: (
+        "This call was interrupted by a restart earlier than this one, which left it "
+        "unresolved. Whether it completed is still not known, and no attempt has been "
+        "made since."
     ),
 }
+
+
+# The one directive each closing message carries, derived from the paths the observation
+# already holds rather than written beside them. `paths_for` is the single place that
+# decides whether re-running a call is safe; a sentence that decided it a second time could
+# disagree with the first, and a model reads the sentence.
+def _rerun_clause(observation: Observation) -> str:
+    if RETRY in observation.paths:
+        return "Running it again duplicates nothing."
+    return "Do not run it again on your own - take one of the paths listed for it."
+
+
+def _closing_text(observation: Observation) -> str:
+    """The sentence for this call's evidence, or a raise.
+
+    Total over the evidence vocabulary and never defaulted, for the reason `statement`
+    gives: an evidence value that quietly inherited another one's sentence would describe a
+    call as something it is not, which is the whole failure this module exists to stop.
+    """
+    try:
+        said = CLOSING_TEXT[observation.evidence]
+    except KeyError:
+        raise ObservationError(
+            f"no closing text for evidence {observation.evidence!r}; expected one of "
+            f"{', '.join(CLOSING_TEXT)}"
+        ) from None
+    # The same condition `statement` applies, and for the same reason: the ledger row is
+    # keyed by idempotency key and a re-intent resets it to `intended`, so "never started"
+    # is a statement about *this attempt*. Saying an earlier one may have run when the
+    # journal records no earlier one would invent the very doubt this text exists to report
+    # accurately - and it is the kind of sentence that stops a model making a call that was
+    # never made at all.
+    if observation.evidence == R.NEVER_DISPATCHED and observation.attempt > 1:
+        return said + " An earlier attempt at the same call may still have run."
+    return said
 
 
 @dataclass(frozen=True)
@@ -640,6 +708,10 @@ class ClosingMessage:
     content: str
     step_id: str | None = None
     synthetic: bool = True
+    # Beside the status rather than derivable from it. `uncertain` is the ambiguous word -
+    # it covers a call that vanished and a call that answered with an error - so a consumer
+    # reading only `status` is reading the one field that does not distinguish them.
+    evidence: str = ""
 
 
 def closing_messages(plan: R.ResumePlan) -> tuple[ClosingMessage, ...]:
@@ -658,7 +730,10 @@ def closing_messages(plan: R.ResumePlan) -> tuple[ClosingMessage, ...]:
                 tool_call_id=item.call_id,
                 tool=item.tool,
                 status=item.status,
-                content=f"{RUNTIME_PREFIX} {CLOSING_TEXT[item.status]}",
+                evidence=item.evidence,
+                content=(
+                    f"{RUNTIME_PREFIX} {_closing_text(item)} {_rerun_clause(item)}"
+                ),
                 step_id=item.step_id,
             )
         )
