@@ -421,6 +421,13 @@ PRIVATE_SAFE = {
     # Same argument for coursework: a SELECT over archived deadlines, no egress, and
     # "what is due before that trip" is the same read-then-compare workflow.
     "calendar_upcoming", "coursework_due",
+    # The manifest lookup (session 5d). It resolves one ref against *this session's own*
+    # archive and sends nothing anywhere, so the egress door it would open is none. The
+    # reason it is safe under the interlock rather than merely harmless is stricter than
+    # that and lives in the tool: a manifest item marked private is refused outright, so
+    # the one thing the interlock is protecting cannot come back through this door even
+    # though the door itself is local.
+    "handoff_lookup",
     "fs_list", "fs_read", "fs_search", "gmail_message", "gmail_search", "goal_upsert",
     "goals_list", "memory_history", "memory_remember", "memory_search", "notify_user",
     "open_loop_add", "open_loop_close", "open_loops_list", "profile_read", "reminder_set",

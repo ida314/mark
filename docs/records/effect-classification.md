@@ -38,6 +38,7 @@ one place and not the other fails the suite rather than going quietly stale.
 | `calendar_upcoming` | read | `SELECT` over the `raw_events` archive the daemon fills. Google is never called. |
 | `coursework_due` | read | The same `SELECT` shape against the Brightspace rows. No D2L call. |
 | `tool_search` | read | `SELECT` over `tools` plus an embedding call that stores nothing; the tools it adds live in `ctx.extra` and die with the turn. |
+| `handoff_lookup` | read | Session 5d. One `SELECT` of one `raw_events` row, by an id that must already be in the handoff manifest and must belong to this session. Nothing outside changes, so a crash between intent and result leaves no question to answer — which is also why it gets no ledger row and can never reach a user as an `uncertain` effect. It is a `read` in the strict sense `memory_search` is not: no counter moves, and re-running it returns the identical excerpt. |
 | `goal_upsert` | idempotent_write | `INSERT ... ON CONFLICT (slug) DO UPDATE`, and `slug` defaults to `slugify(title)`, so the same arguments always land on the same row. |
 | `open_loop_close` | idempotent_write | `UPDATE open_loops SET status='closed' WHERE id`; closing a closed loop is a no-op. Only `closed_at` moves. |
 | `open_loop_add` | unsafe_write | Fresh `uuid7` per call, no dedup key: a replay opens a second loop the user has to close twice. |

@@ -135,6 +135,7 @@ def build_registry() -> Registry:
         builtin_coursework,
         builtin_delegate,
         builtin_fs,
+        builtin_handoff,
         builtin_mail,
         builtin_memory,
         builtin_shell,
@@ -151,6 +152,13 @@ def build_registry() -> Registry:
     reg.add(*builtin_web.TOOLS)
     reg.add(*builtin_agenda.TOOLS)
     reg.add(*builtin_delegate.TOOLS)
+    # Registered like anything else, and offered on a turn only when a handoff is actually
+    # in force - `agent/loop.py` takes it back out otherwise. `always_on` is what makes
+    # "offered whenever there is a manifest" reliable rather than dependent on whether the
+    # user's wording happened to embed near it; the loop's filter is what makes it the only
+    # condition. A tool that can never work, offered on every turn, is a line of the prompt
+    # spent teaching the model a call that returns an error.
+    reg.add(*builtin_handoff.TOOLS)
     reg.add(tool_search_tool(reg))
     return reg
 

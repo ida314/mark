@@ -31,6 +31,7 @@ from ..obs import otel, telemetry
 from ..policy.approvals import Approver, AutoApprover
 from ..policy.engine import PolicyEngine, engine_from_config
 from ..tools.base import ToolContext
+from ..tools.builtin_handoff import LOOKUP
 from ..tools.executor import ToolExecutor
 from ..tools.registry import Registry, get_registry
 from . import budget
@@ -425,6 +426,14 @@ class AgentLoop:
             tools = await self.registry.select(
                 user_text, session_used=session.tools_used, cfg=self.cfg
             )
+            # Session 5d. The manifest lookup is on this turn's list exactly when there is
+            # a manifest to look things up in, and off it otherwise - both directions, so
+            # that "is it offered" is decided here and not by whether the user's wording
+            # happened to embed near its description. A successor with nothing dropped is
+            # not a successor; offering it the tool would be one more call to discover is
+            # useless.
+            tools = self._with_lookup(tools, carried_over)
+            lookup_offered = any(t.name == LOOKUP for t in tools)
             tool_schemas = [t.openai_schema() for t in tools]
             exposed = {t.name: t for t in tools}
             tele.tools_offered(list(exposed), registry_size=len(self.registry.enabled()))
@@ -434,7 +443,16 @@ class AgentLoop:
             messages = ctxmod.build_messages(
                 self.cfg, autonomy=autonomy, context_block=context_block,
                 history=history, user_text=user_text,
-                handoff_block=handoff_mod.render(carried_over) if carried_over else "",
+                # The successor is told to fetch a ref only when it has been given
+                # something that can fetch one. Telling a model to call a tool it does not
+                # have is a step spent on a call that cannot exist.
+                handoff_block=(
+                    handoff_mod.render(
+                        carried_over, lookup_tool=LOOKUP if lookup_offered else None
+                    )
+                    if carried_over
+                    else ""
+                ),
             )
             if extra_system:
                 messages.insert(1, {"role": "system", "content": extra_system})
@@ -808,6 +826,22 @@ class AgentLoop:
                 usage_reported=tele.usage_reported,
             )
             yield Answer(turn_id=str(turn_id), text=answer)
+
+    def _with_lookup(
+        self, tools: list[Any], handoff: handoff_mod.Handoff | None
+    ) -> list[Any]:
+        """This turn's tools, with the manifest lookup added or taken away.
+
+        Total in both directions on purpose. `select` may return it because it is
+        `always_on`, and a turn with no handoff must not have it; a turn with one must,
+        whatever `select` thought of the user's wording.
+        """
+        if handoff is None or not handoff.dropped_manifest:
+            return [t for t in tools if t.name != LOOKUP]
+        if any(t.name == LOOKUP for t in tools):
+            return tools
+        found = self.registry.get(LOOKUP)
+        return [*tools, found] if found is not None else tools
 
     async def _hand_off(
         self,
