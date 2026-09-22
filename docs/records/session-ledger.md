@@ -404,3 +404,63 @@ not one anyone tuned the handoff against, preferring one where substantial mater
 mid-run, with the handoff forced after it so there is something real to drop. It answers one
 question in one line: **is the unreliability general, or specific to the near-limit tasks?**
 And it is the "before" point of the confabulation eval.
+
+
+## The re-baseline, and the thing it invalidates
+
+`docs/records/baseline-v2.md` is written. `baseline.md` and the `eval-baseline` tag are
+untouched. `eval-baseline-v2` = `bb31388`. All 22 automated rows re-run live against
+`Qwen/Qwen3.8-27B-FP8` — the same model as v1, verified by live completion rather than by
+`/v1/models`, which lists both residents.
+
+**The v1→v2 delta does not measure the duplicate-message fix, and no later pass may cite it
+as though it does.** The two tags are **23 commits apart** — all of passes 02, 03, 04 and 05;
+`git diff --shortstat` reports 73 files, +20,007/−341. The orchestrator's brief framed the
+re-run as measuring the fix; that framing was wrong and the session running it said so rather
+than producing the number that had been asked for. **A clean measurement of that fix alone is
+no longer recoverable**, because the baseline had not been re-run since Pass 1.
+
+What *is* attributable to the fix is the figure measured directly from archived messages
+rather than differenced between runs: **mean 33.7 estimated tokens saved per suite prompt**
+(median 33, max 75), 52.3 over all 140 archived rows. `ids.estimate_tokens`, an estimate,
+never a count.
+
+**v2's real value is undiminished for the purpose the ledger already recorded**: it is the
+reference point Passes 8, 9 and 10 compare against. It is a fresh measurement of the current
+tree, which is what those passes need; it is only the *difference* from v1 that cannot carry
+an explanation.
+
+**Grades moved on two of 22.** B02 fail → pass (v1's `merged.append()` bug is gone, verified
+against the rubric's own input) and B05 pass → partial (correct deadlines, no freshness
+stated, which the rubric requires). Both are single samples from a 0.7-temperature model on
+rows whose mechanism did not change, and B05 carries an explicit grading note because v1's
+answer text cannot be re-read to rule out a grader-caused delta. Aggregate: pass 5→5,
+partial 3→4, fail 12→11, inconclusive 2→2. Turns hitting 12/12 rose 3→4; **zero-answer turns
+rose 3→7**.
+
+**The threshold did not move, and the reasoning is recorded either way**: `[handoff]
+threshold_tokens` stays 8000. The inflation removed is ~34 estimated tokens, 0.42% of the
+threshold. Meanwhile the largest observed prompt rose 6,251 → 10,979 and `context_crossed`
+was false on all 31 turns. **It is verified unreachable on the `ask` path and unverified on
+the multi-turn path it exists for — which is B23, one of Dylan's attended rows.**
+
+**New in v2 and not present in v1: three rows died on 600-second router streaming timeouts**
+(B06 attempt 1, B12, B22) with zero answer characters. This contaminates latency for the
+whole run and changes B12's and B22's failure modes. It is an environment finding, not a code
+one, and nobody has looked at it.
+
+**Running the suite writes eval text into the live memory store.** The consolidator accepted
+B11's prompt as a preference. The suite was always going to do this — v1 did too — but it is
+recorded here because it is the user's real memory being written by a test.
+
+**Reproduced unchanged at `bb31388`:** B09's unaudited duplicate loop (no `actions` row, no
+`due_at`), B20's queued write reported as saved, delegation dead (three sub-agent turns, all
+under 110 ms, `llm_ms: 0`), and the `FINAL_NUDGE` mid-list HTTP 400.
+
+**Method deviations from v1, four:** the run was split into two windows about 12 hours apart
+(tooling stalls, with model, daemon, feeds and commit re-verified across the gap, and B04–B08
+all inside window one); B06's fault window was 43 minutes rather than ≈4; the tree was on
+`main` at `bb31388` rather than detached, because this repo is edited in parallel; and the
+daemon was restarted mid-history where v1's ran throughout.
+
+**Still owed before 8a, in both baselines:** B11, B12, B13 and B21 under `chat`, and B23.
