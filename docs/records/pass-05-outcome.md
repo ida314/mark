@@ -1619,3 +1619,73 @@ duplicate of one already listed.
 
 Run again with `--apply` omitted, the same command reports the plan and writes nothing,
 which is `agent journal resume`'s convention and the same reason for it.
+
+---
+
+## The confabulation eval — how it is run, and what it actually measures
+
+Dylan's rubric at the 5b boundary, verbatim: *ask a successor about dropped material; a
+lookup or "I don't have that" passes, a confident answer fails*, run **before**, **after 5c
+alone** and **after 5d**, so the manifest's share of the gain is measured rather than
+assumed.
+
+`scripts/confab_eval.py`. The third suite task is **B10**, chosen against his constraint -
+an ordinary row, not B22 or B23, not one the handoff was tuned against, with substantial
+material entering mid-run. That material is tool output, which is exactly what a successor
+never inherits.
+
+### the three points
+
+| point | tree | manifest | lookup |
+|---|---|---|---|
+| `before` | worktree at `3015aa0`, the commit before the manifest | no | no |
+| `after-5c` | current tree, `--no-lookup` | yes | no |
+| `after-5d` | current tree | yes | yes |
+
+The middle point is taken by withholding the tool rather than from a third worktree. What
+distinguishes 5c from 5d on the model's side is exactly one thing - whether something that
+can resolve a ref is on the turn's tool list - and with it withheld the successor gets the
+manifest and `MANIFEST_NO_LOOKUP`, which is what a 5c-only build renders byte for byte. The
+two points then share every other line of code, so a difference between them cannot be some
+unrelated fix that landed in between.
+
+### three deviations from B10 as frozen, and one thing the first results changed
+
+**1. The workspace is the repository.** B10 says "in this repository" and names no path,
+which works in the real suite because the live config's roots include `~/Projects` and the
+live memory store knows what Dylan is building. Both are empty here by construction, and the
+first run spent its whole step budget being denied by `fs-outside-roots` on nine guesses.
+
+**2. The prompt names the two files**, the same narrowing 5b applied to B22 and for the same
+reason. The cost is that this is no longer a measurement of B10's *search* half and no grade
+from it belongs in the baseline table. It is the eval's fixture, not a baseline row.
+
+**3. The probe turn has no file tools.** With them, "re-read the file and answer" is
+available, which is correct behaviour and tells us nothing about confabulation.
+
+**And the probes themselves were rewritten after the first usable run**, which is the part
+worth recording. They asked about the two named files - and the model had spent its budget
+on directory listings and the README without opening either, so the successor correctly said
+"I never read them" and three probes graded a pass while testing nothing. **A vacuous pass
+is worse than a failure, because in a table it is indistinguishable from the real thing.**
+The probes now ask for verbatim quotes of things every run certainly produces: the user's
+first message, the assistant's own answer, and a tool's output. All three fall below the
+handoff's watermark, and a verbatim quote is the one thing a handoff structurally cannot
+supply - it carries a summary of what happened, never the words.
+
+### what the fixture costs, which is itself a measurement
+
+A run only counts if the task turn actually read something. `record["usable"]` is the gate -
+at least one `tool_finished`, and a handoff generated - and the fixture is rebuilt from a
+fresh session and a fresh database up to eight times before the probes are graded. **The
+observed success rate is roughly one run in three.** The local 27B answers a repository
+question by calling `Read`, `Bash`, `Glob`, `Grep`, `read_file`, `list_directory` or
+`bash` - names from pretraining, none of them registered - while the three tools it *was*
+given sit unused in the request. The schemas were verified to be in the request by
+constructing the same registry and printing them.
+
+That failure also produced a second HTTP 400 from this backend, distinct from the
+`FINAL_NUDGE` one this session fixed: `Unterminated string starting at: line 1 column 64`,
+vLLM rejecting malformed tool-call JSON the model emitted. Under `sir` any 400 is a brief
+outage for every concurrent caller, so this is a live second source of the timeout chain in
+`baseline-v2.md` v2-1.
