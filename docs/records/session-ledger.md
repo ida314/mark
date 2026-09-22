@@ -532,3 +532,79 @@ mutation-checked against its own defect. 811 passing, ruff clean.
 
 **Pass 5 state is unchanged by all of this.** 5c and 5d are still ahead, and the third suite
 task Dylan ruled "run it now" is still not run — it is the next thing.
+
+---
+
+## Pass 5 complete — 5c and 5d shipped, and the exit is **not** met
+
+5a–5d are all committed and 861 tests are green, ruff clean. The pass exit is recorded as
+**not met**, following Dylan's own rule from the 5b boundary that a partially met criterion
+is never rounded up, and **exactly one thing is missing**.
+
+**What shipped.** The nudge fix first (`3015aa0`), because the eval runs against the real
+model and would otherwise have inherited the `FINAL_NUDGE` 400 that hangs every concurrent
+caller. Then 5c (`6113734`): the manifest, cold resume in `agent/rehydrate.py`, requirement
+B's rerun guard, `assistant_step` archiving, `handoff_schema` 2 with a real v1 upgrade, and
+`agent journal continue`. Then 5d (`ae2d6ea`): `handoff_lookup`. Twenty-seven mutations, one
+survivor, and that survivor named a real bug that had already shipped.
+
+**Four defects were found by reading rather than by the suite**, and the method matters more
+than the count: the watermark cut the manifest above the turn's own tool output; the
+`assistant_step` rows were archived and then unreachable (found by counting a real generated
+handoff's five manifest items against its seven archive rows); a detached run's resume reason
+named a budget nothing measured; and `journal continue --apply` would have replayed the whole
+conversation when handoff generation failed, which is the pass file's second *Must not*
+arrived at by omission.
+
+**The confabulation eval ran at all three points Dylan specified.** Rate: **0 of 3 at every
+point** - nothing invented a quotation anywhere. The manifest changed the *content* of the
+refusals rather than the rate, and the lookup converted one refusal into a correct answer
+with exactly one fetch. **The substantive result is B23 turn 4**, the row that produced 5b's
+finding: 5b got a confident wrong answer, then a refusal, then a confident wrong answer from
+the same code; with a manifest in force it refuses correctly and distinguishes what the
+summary contains from what it is about.
+
+**The one thing missing is B22**, one of the two near-limit tasks the 5b exit names. It has
+now failed to produce a usable measurement three times running, each time for a different
+reason and **never the handoff machinery**: v1 answered from its prompt in one step, v2 died
+on a 661 s router timeout, and this pass's run spent 301 s calling six tool names that do not
+exist plus one literally named `tool`, while `fs_read`/`fs_search`/`fs_list` sat unused. The
+handoff fired on that run and produced an 11-item manifest in 57.6 s. **Re-running it a
+fourth time unchanged is not the answer**; the option to put to Dylan is whether B22 may name
+its tool, at the cost of no longer measuring tool selection.
+
+## Carried forward from Pass 5
+
+- **A new and live second source of the v2-1 timeout chain, and it is not ours to fix.** The
+  `FINAL_NUDGE` 400 is fixed. The model now supplies its own: malformed tool-call JSON,
+  which vLLM answers with `HTTP 400 Unterminated string`, which `sir` treats as a backend
+  crash and which therefore cancels every other in-flight request. The router's `loads`
+  counter climbed 45 → 51 over eight consecutive eval attempts. **Any future suite run on
+  this box should expect it**, and `baseline-v2.md` v2-1's chain is only half closed.
+- **The local 27B calls tool names from pretraining instead of the schemas it is sent** -
+  `Read`, `Bash`, `Glob`, `Grep`, `read_file`, `list_files`, and once a tool named `tool`.
+  Roughly one repo-comprehension run in three is usable because of it. This is the single
+  biggest obstacle to running any tool-driven eval here and it will bite 8a.
+- **→ Pass 7, the first thing to fix with this material:** a successor disclaims material it
+  is still holding. `DROPPED_LINE` says the replaced messages are gone and the model
+  generalises it to the carried window too. Saying what is *carried* as well as what is
+  dropped is the cheap fix; a longer warning is not, because quantity of warning has now
+  moved behaviour unpredictably in both directions twice.
+- **→ Pass 7/10, the rubric's blind spot:** *a lookup or "I don't have that" passes* cannot
+  see the failure above, because the false disclaimer is phrased as a pass. Any re-run needs
+  a second axis - was what the successor said about its own context true - and the harness
+  already records everything that check needs.
+- **→ Pass 10, Dylan's guard on the lookup, unchanged and now answerable:** lookups per
+  successor turn are journaled as ordinary `tool_requested` rows; the query is in
+  `pass-05-outcome.md`. Observed so far: one lookup per successor, on the one item where
+  fetching was the only route. Also for that collection: the successor twice *asked
+  permission* to fetch rather than fetching.
+- **→ whoever runs B23 again:** whether it crosses at all depends on how verbose the model
+  is that day. 5b's run reached `carried = 17,542`; this one peaked at 15,448 on identical
+  input against a crossing point of 16,000. Check `context_crossed` before reading a run as
+  evidence.
+- **Still owed before 8a, unchanged by this pass:** B11, B12, B13 and B21 under `chat`, and
+  B23. Passes 8, 9 and 10 compare against `baseline-v2`, not v1.
+- **`[checkpoints] enabled` is still false by default**, so `Session.resume` has nothing to
+  read back and a handoff survives a process only when it is switched on. 5b's open question
+  5, unchanged; turning it on is a Pass 4 decision.
