@@ -24,7 +24,8 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 4d | complete | 2026-09-20 | pass-04-outcome.md | fork.py + `agent journal fork`. Parent bit-for-bit untouched; disclosure has three lists, not one. 751 tests green. 10 deviations, no Must not crossed. Pass-level exit criteria met. |
 | 5a | complete | 2026-09-21 | pass-05-outcome.md | `agent/budget.py` + `[handoff]`; ceiling is `agent.history_tokens` 24000, **not** `max_context_tokens` 262144. Threshold 8000 kept. 767 tests green. 6 deviations, no Must not crossed. Gives the `handoff` checkpoint trigger its first producer. |
 | 5b | complete | 2026-09-21 | pass-05-outcome.md | `agent/handoff.py`: object, validator, generator, successor block; stored in `handoff_object` on the `turn_end` checkpoint. 806 tests green. 6 deviations, no Must not crossed. **Exit criterion partly met — 2 of the required 3 suite tasks.** |
-| 5c | pending | — | — | |
+| 5c | pending | — | — | scope grew at the 5b boundary: cold resume **+ the manifest** **+ requirement B's guard** |
+| 5d | pending | — | — | **added by Dylan 2026-09-21**: the lookup. Pass exit is judged here, not at 5c |
 | 6a | pending | — | — | |
 | 6b | pending | — | — | |
 | 6c | pending | — | — | |
@@ -342,3 +343,64 @@ done this, it inflates every context reading 5a and 5b take by the size of the c
 message, and fixing it is a behaviour change to every turn that would move the Pass 1
 baseline. Same shape as the `loop.py:213` budget-exhaustion crash carried since Pass 2:
 recorded, not fixed, and **whoever fixes it must re-measure the threshold afterwards.**
+
+
+## The 5b boundary — Dylan's three rulings, 2026-09-21
+
+### 1. Confabulation: the manifest and the lookup, as one mechanism
+
+Both directions, not one. **His reading of the pass's second Must not, which is what makes
+the lookup permissible, recorded verbatim at his instruction** (also in
+`pass-05-outcome.md`):
+
+> it forbids the runtime restoring the old context wholesale as a fallback. It does not
+> forbid the successor requesting a specific named item. The line is who chooses what comes
+> back and how much.
+
+5c ships the manifest — each dropped item with a kind, a one-line description and a **ref**,
+not just a kind, so a lookup can be targeted; and a successor context that says it must look
+one up or say it does not have it, never answer from memory of it. **5d is new and is in the
+pass file**: a `read`-class tool taking one ref and returning a bounded excerpt, no free-text
+query, no "everything", model-invoked only, journaled, reading the journal/archive.
+
+**The guard he attached, binding:** record lookups per successor turn. If successors
+routinely fetch every manifest item as their first action, that is the wholesale restore by
+another route — **flag it for Pass 10 rather than tuning it**.
+
+**The eval he specified:** ask a successor about dropped material; a lookup or "I don't have
+that" passes, a confident answer fails. Run it before, **after 5c alone**, and after 5d, so
+the manifest's share of the gain is measured rather than assumed.
+
+### 2. The duplicated user message: fixed now, as its own commit
+
+Before the 5a threshold is treated as final. His five steps are in the dispatch brief; the
+ones that outlive this session:
+
+- **`baseline.md` and the `eval-baseline` tag stay v1. They are not overwritten.** The fix
+  commit is tagged `eval-baseline-v2` and `baseline-v2.md` is a new file.
+- **The attended rows — B11, B12, B13, B21, B23 — are Dylan's to run at the next sitting,
+  and they must be done before 8a**, because Pass 8 compares the coder family against them.
+- **From here, Passes 8, 9 and 10 compare against v2.** Recorded here so a later session
+  does not pick up v1 by default.
+- The v1→v2 delta per row, and tokens saved per turn, is itself a finding: what the
+  duplication was costing.
+- The 5a threshold is recalibrated against v2 readings, with both values recorded and why it
+  moved.
+
+**Answered at the boundary:** this is **not** the same bug as the carried "token accounting
+broken upstream" item. That is the SIR router dropping the streaming `usage` chunk, so
+provider counts arrive as zero. This is prompt assembly sending the same text twice. Different
+layers, neither causes the other; they interact only in that one makes counts unavailable and
+the other makes estimates too large.
+
+### 3. The third task: run it, and the 5b exit is **not met**
+
+Not "met at two-thirds". **Recorded as not met**, because the criterion asks for preserved
+continuity and the confabulation finding says the two tasks that ran did not fully preserve
+it. **The pass exit is judged after 5d** — re-run all three tasks, same grading, compare.
+
+The third task is chosen rather than convenient: an ordinary suite task, **not B22 or B23**,
+not one anyone tuned the handoff against, preferring one where substantial material enters
+mid-run, with the handoff forced after it so there is something real to drop. It answers one
+question in one line: **is the unreliability general, or specific to the near-limit tasks?**
+And it is the "before" point of the confabulation eval.
