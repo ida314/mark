@@ -1282,3 +1282,229 @@ GROUP BY run_id, step_id;
 `tests/test_handoff_lookup.py::test_every_lookup_is_journaled_like_any_other_tool_call` is
 what stops that query silently becoming unanswerable. **Nothing here caps or throttles
 lookups**, because he said to flag it for Pass 10 rather than tune it now.
+
+---
+
+## 5c and 5d — what deviated from the plan, and why
+
+**1. The manifest lists more than the handoff dropped, and "dropped" was widened to say
+so.** The pass file says "each dropped item". Read narrowly that is the conversation
+messages below the watermark, and the manifest for the eval fixture would then have had two
+entries and named none of the file bodies the turn actually read. Tool results are never
+replayed into any later prompt, so the successor has no more access to them than to a
+replaced message; they are in. The cost is that `dropped_messages` (the conversation) and
+`len(dropped_manifest)` (everything) are different numbers in the same object, and a reader
+who assumes they agree will be wrong. They are documented as the two different things they
+are, and `DROPPED_LINE` still speaks only about the conversation.
+
+**2. A version 1 handoff is upgraded rather than refused.** 5b shipped `from_dict` raising
+on any version that is not the current one, and this session had to change that the moment
+there *was* a second version. The rule that survives is the one that mattered: an object
+written under rules this build does not have still raises. What changed is that "older" and
+"unknown" stopped being the same case, and the upgrade states its own loss in the object.
+
+**3. `already_handed_off` is a third resume reason the pass file does not mention.** It came
+out of a test that failed for the right reason and is argued in the 5c section above. Left
+undiscovered it would have made every resume of a handed-off conversation pay for a second
+handoff at the end of its first turn.
+
+**4. Requirement B's guard has exactly one door, and it is a CLI flag.** The pass file says
+"unless the user has said to run it again" and does not say how the user says it. The
+candidates were: the existing approval prompt (rejected - approving a write answers "is this
+allowed", not "did this already happen", and the prompt does not say the second thing, so it
+is not informed consent for a duplicate), a durable grant in the journal (rejected - it
+needs an eighteenth event type and Pass 2 fixed the vocabulary at seventeen with a
+drift-guard test), and an in-process grant populated by a person at a terminal. The last
+one, which is also `SessionGrants`' shape and lifetime.
+
+**5. `agent journal continue` is new surface that the pass file did not ask for.** 5c's exit
+asks that "the new orchestrator picks up correctly", and nothing in this runtime could start
+one: 4b deliberately stopped at reconcile-and-announce. The command is the smallest thing
+that makes the exit checkable by a person, and it is where `--allow-rerun` lives.
+
+**6. `assistant_step` is a new archive kind, and a turn that completes now archives its
+prose twice.** One row per step plus the joined answer. The duplication is in the archive,
+never in a prompt, because `recent_messages` selects two kinds and this is not one of them.
+The alternative - reassembling an answer from step rows - would have changed the shape of
+every turn's history window to serve one reader.
+
+**7. The 5d lookup is offered per turn rather than registered per session.** It is in the
+registry like anything else, and `AgentLoop._with_lookup` adds or removes it. Doing it in
+`Registry.select` would have meant teaching the selector about handoffs, and doing it with
+`enabled=False` would have meant a registered tool that `enabled()` denies and the executor
+still runs - a shape that reads as a bug wherever it is met.
+
+**8. No new event type, for the lookup or for anything else.** The vocabulary is still
+seventeen types, sixteen emitted. A lookup is a tool call and is journaled as one, which is
+what makes Dylan's per-turn lookup count a query rather than a mechanism.
+
+## 5c and 5d — what is now true about the code that was not before
+
+- **A successor knows what it does not have, item by item, with a ref for each.** Before
+  this it knew a quantity: five messages, 42,198 characters. A quantity gives a refusal
+  nothing to attach to, which is what 5b measured.
+- **A successor can go and get one of them**, and cannot ask for anything else. One ref per
+  call, from the manifest in force, bounded, journaled, model-invoked.
+- **A handoff survives a process.** `Session.resume` reads the stored object back, found by
+  session rather than by run - the object lives on a checkpoint of the turn that generated
+  it, which is an earlier run than the one the next turn opens.
+- **A dead run can be picked up and continued**, by a path that decides between replaying
+  and compressing and records which it chose and why. Before this, `resume` reconciled and
+  announced, and nothing could start a turn.
+- **A handoff can be built for a run that stored none**, from archive bodies where they
+  exist and labelled previews where they do not, with the proportion in the object.
+- **A turn that dies mid-flight leaves the model's own words in the archive**, so the
+  previous sentence degrades for old runs rather than for new ones.
+- **An `unsafe_write` that may already have happened is refused by the runtime**, not by a
+  sentence in a 27B's prompt, and only a person gets past it.
+- **`handoff_schema` has survived a migration**, which is the first time any record in this
+  system has.
+- **A turn with no handoff is byte-for-byte the turn it was before**, except that the two
+  runtime nudges are `user` messages with a marker instead of `system` messages that this
+  backend rejects.
+
+## 5c and 5d — schemas exactly as implemented
+
+```python
+# agent/handoff.py
+SCHEMA_VERSION   = 2
+READABLE_SCHEMAS = (1, 2)          # 1 is upgraded and says so; anything else raises
+REASONS          = ("context_threshold", "forced", "cold_resume")
+REF_PREFIX       = "msg"           # msg:<raw_events.id>, the watermark's own column
+
+DroppedItem(frozen)
+  ref, kind, description: str
+  chars: int
+  private: bool = False
+  trust: str = "trusted"
+
+Handoff(frozen)                    # 5b's eleven fields and provenance, plus:
+  dropped_manifest: tuple[DroppedItem, ...] = ()
+  .item(ref) -> DroppedItem | None # the lookup's entire authorisation check
+```
+
+```json
+// checkpoint.handoff_object, the parts 5c added
+{
+  "handoff_schema": 2,
+  "dropped_manifest": [
+    {"ref": "msg:41", "kind": "user_message", "description": "I'm going to paste…",
+     "chars": 14212, "private": false, "trust": "trusted"},
+    {"ref": "msg:44", "kind": "tool_result:fs_read", "description": "ALWAYS_EXPOSE…",
+     "chars": 8000, "private": false, "trust": "trusted"}
+  ],
+  "source": {
+    "manifest_items": 2,
+    "manifest": "absent: … handoff_schema 1 …",   // only on an upgraded object
+    "archived_messages": 7, "preview_only": 2,     // only on a generated one
+    "archived_by_role": {"user": 3, "assistant": 2, "tool": 2},
+    "journal_messages": 9, "run_state": "interrupted"
+  }
+}
+```
+
+```python
+# agent/rehydrate.py
+LOSSLESS / COMPRESSED                          the path
+TOO_LARGE / TOO_OLD / ALREADY_COMPRESSED       why, when compressed
+FROM_CHECKPOINT / FROM_JOURNAL / NO_HANDOFF    where the handoff came from
+
+Restart(frozen)
+  run_id, session_id, path, reason, handoff, handoff_source,
+  history: tuple[dict, ...]          # replayed, or the carry window after a watermark
+  closing: tuple[ClosingMessage, ...]  # synthetic, flagged, RUNTIME_PREFIX'd
+  notice: str, age_s: float | None, carried_tokens, budget_tokens,
+  plan: resume.ResumePlan, generated_ms: int | None, source: dict
+
+restart(run_id, *, store, cfg, provider, now_s) -> Restart      # reads, never writes
+generate_from_journal(...) -> (Handoff | None, ms, provenance)
+```
+
+```python
+# policy/approvals.py
+RerunGrants
+  .allow(run_id, tool, args_hash)   # one call
+  .allow_tool(run_id, tool)         # every uncertain call of one tool in one run
+  .granted(run_id, tool, args_hash) -> bool
+ANY = "*any-arguments*"             # a sentinel, not "" - a real digest is never this
+```
+
+```
+# db/repo_archive.py
+MANIFEST_KINDS = ("user_message", "assistant_message", "tool_result")
+manifest_rows(session_id, *, upto_id, watermark, excerpt_chars, limit) -> list[dict]
+archived_item(session_id, event_id) -> dict | None      # scoped in the SQL, not after it
+```
+
+```
+# config, [handoff]
+manifest_excerpt_chars = 160     manifest_items = 40     lookup_max_chars = 4000
+warm_window_s = 14400            resume_budget_tokens = None  -> agent.history_tokens
+```
+
+```
+# the tool, 5d
+handoff_lookup(ref: str) -> bounded excerpt      effect_class=read, risk=read,
+                                                 tags=("core", "handoff"), always_on
+```
+
+## 5c and 5d — deferred items, and where they went
+
+- **Tuning the lookup, or capping it → Pass 10, on Dylan's instruction.** Nothing throttles
+  lookups and nothing should yet. The count per successor turn is in the journal and the
+  query is in the 5d section.
+- **`carry_tokens` and `carry_messages` → still untuned.** 5b's open question 4 is unchanged;
+  this session added `warm_window_s` and `resume_budget_tokens` to the same list, both
+  untuned and both saying so at their declaration.
+- **Announcing a handoff, a resume path or a lookup to the user → still nobody.**
+  `journal/render.py` gained no line. `agent journal continue` prints for the person who
+  typed it, which is a different thing from a frontend surface, and the wording review Dylan
+  holds is still open.
+- **`handoff_finished.successor_run_id` → still always null.** A continuation reuses the
+  run id it is continuing, so there is no second run to name. 5b expected 5c to fill it; the
+  honest value on this path is still null, and the field's value is that a later pass which
+  really does open a new run has somewhere to put it.
+- **A handoff on a turn that failed → still open.** 5b's open question 3, unchanged. The
+  `FINAL_NUDGE` 400 that made B22-in-full a failed turn is fixed, so the specific trace that
+  motivated it is gone; the question is not.
+- **`[checkpoints] enabled` is still false by default.** 5b's open question 5 said 5c's
+  "generate one from the journal" covers the gap, and it does - but `Session.resume` reads
+  the stored object, and with the flag off there is never one to read. So a handoff survives
+  a process only when checkpoints are on. Turning the flag on is still a Pass 4 decision.
+
+## 5c and 5d — open questions for later passes
+
+**1. `dropped_messages` and the manifest count disagree by design, and nothing enforces that
+a reader knows.** One is the conversation the summary replaced; the other is everything the
+successor cannot see. Both are in `source`. A later pass that renders either to a person
+should say which it is showing.
+
+**2. The manifest lives in every subsequent prompt, and nothing has measured what it costs.**
+Forty items at ~200 characters each is ~2,500 estimated tokens of system block, carried on
+every turn after a handoff, against a threshold measured in the same units. The handoff frees
+far more than that - 17,566 → 2,079 on 5b's B23 - but the manifest is a standing cost that
+the freed figure does not account for, and `manifest_items` was chosen without a measurement.
+
+**3. A successor that fetches every item is Pass 10's question and the query exists.** Also
+worth watching there: a lookup returns up to 4,000 characters and a manifest can hold forty
+items, so the ceiling on "how much of the old context can a determined successor pull back"
+is 160,000 characters over forty turns. The bound is the *tool budget per turn*, not this
+tool, which is the shape Dylan's guard is aimed at.
+
+**4. Requirement B's guard cannot see a detached call.** `policy/replay.execute_approved`
+runs a queued approval with `ctx.run_id = None`, and the guard needs a run. A queued
+`unsafe_write` approved after a crash is therefore outside it. This is the same hole 2b and
+3a both flagged and 3b keyed around (`detached:<action_id>`); the guard inherits it rather
+than widening it, because a guard keyed on "any run" would refuse a legitimate later call.
+
+**5. Nothing tests the CLI.** `agent journal continue` was verified by hand against a
+scratch database and data directory - it reports the lossless path correctly on a real run -
+and there is no CLI test in this repository at all to extend. `--allow-rerun`'s plumbing
+into `executor.rerun_grants` is a single assignment and is covered only by the executor
+tests on the other side of it.
+
+**6. The generated handoff's transcript ordering is the archive's, not the journal's.**
+Preview-only messages are appended after the archived ones rather than interleaved at their
+real positions, because matching a preview to its place in a turn is not something the
+journal makes reliable. For a run with a handful of them this is a small distortion of the
+order a summariser reads; for a long dead run it may not be.
