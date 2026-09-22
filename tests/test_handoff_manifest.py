@@ -160,6 +160,33 @@ async def test_a_tool_result_below_the_watermark_is_listed_even_with_nothing_dro
     assert [e.kind for e in entries] == ["tool_result:fs_read"]
 
 
+async def test_tool_output_above_the_watermark_is_still_listed(cfg):
+    """The asymmetry the two arguments exist for, and the bug the first version had.
+
+    A conversation message above the watermark is carried, so it is not listed. A tool
+    result above the watermark is *not* carried - nothing replays one, ever - so it is. The
+    archive lays a turn down as user message, then results, then the answer, which means a
+    watermark below the last user message puts every result that turn produced above it.
+    Reading the watermark as "the line for everything" dropped exactly the rows a successor
+    most needs named, and left a manifest that looked healthy.
+    """
+    session = await Session.create("test")
+    ids = await _seed(
+        session.id,
+        ("user_message", "user", "first, dropped"),
+        ("user_message", "user", "second, carried"),
+        ("tool_result", "tool:fs_read", "TOP_K = 8, and not carried either way"),
+        ("assistant_message", "main", "third, carried"),
+    )
+    rows = await repo_archive.manifest_rows(
+        session.id, upto_id=ids[-1], watermark=ids[0], excerpt_chars=60, limit=10
+    )
+    listed = {e.kind: e.description for e in handoff_mod.manifest(rows)}
+    assert listed["user_message"] == "first, dropped"
+    assert "tool_result:fs_read" in listed
+    assert "second, carried" not in listed.values()
+
+
 async def test_a_private_tool_result_is_listed_and_never_excerpted(cfg):
     """Reading mail closes the outside world for the rest of a conversation. The successor
     is still told the mail was read - not knowing would let it conclude the mailbox was
@@ -295,3 +322,65 @@ async def test_the_manifest_covers_the_tool_output_of_the_turn_that_handed_off(c
         e for e in session.handoff.dropped_manifest if e.kind == "tool_result:reads_a_file"
     )
     assert body.description.startswith("ALWAYS_EXPOSE_LIMIT = 20")
+
+
+async def test_the_manifest_still_names_the_tool_output_when_the_watermark_cuts_below_it(
+    cfg,
+):
+    """The same end-to-end shape, with a watermark actually set - which is the case the
+    confabulation eval runs and the one the first version of this code got wrong.
+
+    The archive lays a turn down as user message, then tool results, then the answer. With
+    a carry window small enough to draw a watermark inside the conversation, every result
+    that turn produced sits *above* it. Reading the watermark as the manifest's upper bound
+    therefore dropped exactly the rows a successor most needs named, while leaving a
+    manifest that still listed things and still looked healthy.
+
+    A mutation that restores that reading survives every test that asserts on
+    `manifest_rows` directly, because those pass the bound in themselves. This one fails.
+    """
+
+    async def handler(args, ctx):
+        return ToolResult(content="ALWAYS_EXPOSE_LIMIT = 20\n" + "x" * 4000)
+
+    reader = Tool(
+        name="reads_a_file", description="returns a lot", parameters=obj(path={}),
+        handler=handler, effect_class="read", risk="read",
+    )
+    small = cfg.model_copy(
+        update={"handoff": cfg.handoff.model_copy(
+            update={
+                "ceiling_tokens": 1000, "threshold_tokens": 999,
+                # Small enough that the watermark lands inside the conversation rather
+                # than below all of it, which is what puts the results above the line.
+                "carry_tokens": 40, "carry_messages": 2,
+            }
+        )}
+    )
+    provider = FakeProvider(
+        turns=[
+            "Ask me about the repository.",
+            [("reads_a_file", {"path": "registry.py"})],
+            "The cap is 20.",
+        ],
+        json_results=[draft().model_dump(), draft().model_dump()],
+    )
+    loop = AgentLoop(
+        cfg=small, registry=Registry(), engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    loop.registry.add(reader)
+    session = await Session.create("test")
+    async for _ in loop.run_turn(session, "hello, I have a question coming"):
+        pass
+    async for _ in loop.run_turn(session, "where is the cap"):
+        pass
+
+    assert session.handoff is not None
+    assert session.handoff.watermark is not None, (
+        "the fixture needs a watermark for this to be the case under test"
+    )
+    kinds = [e.kind for e in session.handoff.dropped_manifest]
+    assert "tool_result:reads_a_file" in kinds, (
+        f"the turn's own tool output fell outside the manifest; listed: {kinds}"
+    )

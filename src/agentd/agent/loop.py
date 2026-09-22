@@ -890,11 +890,14 @@ class AgentLoop:
         # conversation message is gone because it fell below the watermark, a tool result
         # is gone because tool results are never replayed into a later prompt at all - and
         # the second is most of what a turn that spent its step budget actually learned.
-        upto = (
-            watermark
-            if watermark is not None
-            else await repo_archive.max_event_id(session.id)
-        )
+        # Everything currently archived, *not* the watermark. The watermark is where the
+        # conversation is cut; it is not where the tool output is cut, because tool output
+        # is never carried at all. Passing the watermark here looked right and silently
+        # dropped the most recent turn's tool results from the manifest - the archive lays
+        # a turn down as user message, then results, then the answer, so a watermark below
+        # the last user message puts every result that turn produced above it. Those are
+        # exactly the rows a successor most needs named.
+        upto = await repo_archive.max_event_id(session.id)
         items = handoff_mod.manifest(
             await repo_archive.manifest_rows(
                 session.id,
