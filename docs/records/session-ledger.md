@@ -464,3 +464,69 @@ all inside window one); B06's fault window was 43 minutes rather than ≈4; the 
 daemon was restarted mid-history where v1's ran throughout.
 
 **Still owed before 8a, in both baselines:** B11, B12, B13 and B21 under `chat`, and B23.
+
+---
+
+## Boundary — the 600s timeout diagnosed, the eval cleaned out of memory, and a closing sentence that lied
+
+Three things Dylan asked for directly, none of them a pass session. Recorded here because
+the first closes an open finding in `baseline-v2.md`, the second changes his live data, and
+the third changes recovery wording Pass 4 ruled on.
+
+**1. The 600s timeout is the `FINAL_NUDGE` 400, arriving at somebody else's turn.** Full
+chain in `baseline-v2.md` finding v2-1, which is amended from "not diagnosed here" to
+diagnosed and reproduced. In short: the nudge is appended as a `system` message at the end
+of the list, Qwen3's template rejects that with a 400, `sir` treats *any* non-200 from the
+backend as a crash, and its crash handler cancels every other in-flight request without
+putting a terminator on their event queues — which its own docstring warns is a hang. The
+clients had already been sent a synthesised opening frame, so they sit on a live stream
+that never produces another byte until `llm.timeout_s`. The telemetry matches to the
+second, and it reproduces on demand.
+
+So **v2-1 and v2-2 are one finding, not two**, and `sir` is the amplifier rather than the
+cause. Two fixes, either sufficient, neither done: make `FINAL_NUDGE` not a system message
+(ours, one line, removes ~10 400s a day), or make `sir` not treat a caller's malformed
+request as a backend crash (not this repo). **Recommended: do ours before the 5c eval**,
+which runs against the real model and will otherwise inherit the same failure.
+
+Two things the record had backwards and now does not: `:8000` is `sir` and `:8001` is vLLM
+direct, not the reverse; and the 0.5s hand-sent probe was not evidence against queueing,
+because the backend re-adopts in ~3ms on the next request.
+
+**Unasked, from the same probes: the dead token accounting is one missing frame.** `sir`'s
+SSE renderer emits no usage chunk at all, while its non-streaming path does carry usage.
+That is the whole of the "`usage_reported` false on every streamed turn" finding carried
+since Pass 1. It does not make `budget.py`'s estimates wrong, but it means `BASIS_PROVIDER`
+has a reachable implementation whenever somebody wants it.
+
+**2. The eval is out of the memory store.** 47 eval sessions identified by matching every
+archived `user_message` against the frozen prompts; 4 facts retracted, 4 open loops closed,
+1 goal dropped, both markdown files regenerated, `agent backup` taken first. The table and
+the reasoning are in `baseline-v2.md` v2-3. The one that mattered: B20's prompt had been
+promoted into `profile/preferences.md` as a stated preference of Dylan's. `preferences.md`
+now reads `_Nothing established yet._`, which is true — no preference in that store was
+ever stated outside an eval.
+
+`candidate_memories` was deliberately left as the proposal log. **8d will re-contaminate
+the store**, and the §6 reset in `evals/baseline-tasks.md` does not cover any of this —
+it resets the connector, the loop, the working tree and the pending fact, and says nothing
+about what the consolidator promotes. That gap is worth closing before 8d, not after.
+
+Found doing it: `agent goals drop` prints `dropped` whether or not it matched anything.
+
+**3. `CLOSING_TEXT` was keyed by status, and told a failed call it had been interrupted.**
+Commit `f0be3ee`. This is the wording question left open twice at the Pass 4/5 boundary,
+now answered the way the rest of the module already works: keyed by evidence, total over
+the vocabulary. A failed call now says it ran, reported a failure, and was *not*
+interrupted — while still refusing the inference Dylan struck, that a failure proves the
+effect did not land.
+
+Two further defects fixed in passing, both found by rendering the output rather than by the
+suite: the re-run directive is now derived from the observation's own `paths`, so it can no
+longer contradict `paths_for` (an uncertain `idempotent_write` carries `retry` and was being
+told "Do not re-run it yourself"); and the `never_dispatched` text claimed an earlier
+attempt may have run when there had been no earlier attempt. Three tests added, each
+mutation-checked against its own defect. 811 passing, ruff clean.
+
+**Pass 5 state is unchanged by all of this.** 5c and 5d are still ahead, and the third suite
+task Dylan ruled "run it now" is still not run — it is the next thing.

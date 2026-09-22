@@ -318,6 +318,63 @@ calls before it died and returned nothing. **For Pass 4 this is the second infra
 failure mode that presents as "the turn crashed", and unlike the 400 it can strike at any
 step, not only the last.**
 
+**Diagnosed 2026-09-22, and it is not a second failure mode. It is v2-2's 400, arriving at
+a different turn.** The chain, every link of it observed:
+
+1. A turn spending its whole step budget appends `FINAL_NUDGE` as a `role: "system"`
+   message at the *end* of the list (`agent/loop.py:437`). Qwen3's chat template rejects a
+   system message that is not first, so vLLM answers **HTTP 400 "System message must be at
+   the beginning."**
+2. `sir`'s vLLM backend raises `BackendError` on **any** non-200 from the generate call
+   (`backends/vllm.py:167`), without distinguishing "the caller sent something malformed"
+   from "the engine died". `_serve` catches it and adds the model to `self._failed`.
+3. `_handle_failures` (`engine.py:388`) treats that as a crash: it marks the model
+   unavailable, **cancels every other in-flight request on that backend**, clears the
+   resident model and unloads it.
+4. That cancellation is the hang. `_serve`'s own docstring says "every exit path except
+   client cancellation puts a terminator on the event queue - the API handler is blocked
+   reading it and would otherwise hang forever", and its `except asyncio.CancelledError`
+   branch re-raises **without** putting one there. The exemption is sound for a client that
+   went away; `_handle_failures` reuses the same `task.cancel()` for a server-side
+   abandonment, where the client is still connected and still reading.
+5. `api.py`'s `_sse` has already yielded a synthesised `ChatDelta(role="assistant")` frame
+   before its first `events.get()`, so the client holds a stream that returned 200, emitted
+   one frame, and then goes silent with no `[DONE]` and no error. It waits out its own
+   `llm.timeout_s`.
+
+The telemetry is exact about it. Each timeout ends **600.0s to the second** after a
+concurrent turn died on the 400: the 15:05:36 hang ended 15:16:31, and its 400 finished at
+15:06:31; the 15:36:02 hang ended 15:47:04 against a 400 that finished at 15:37:04. B06's
+first attempt is the same shape with the stall starting at its own first frame.
+
+Reproduced deliberately on an idle GPU: one long stream plus one request carrying a system
+message out of position, both through `:8000`. The poisoner got its 400 at t=3.04s and the
+victim's stream **stopped at that instant** — 19 frames, then nothing until the client's own
+read timeout. `/status` showed `resident: null` immediately after, and `loads` had gone
+36 → 37 by the next request, which is how the counter reached 36 in two days.
+
+**So it answers the question the finding left open, and it is not the router's fault
+alone.** The 400 is ours (`FINAL_NUDGE` is malformed for this chat template) and it fires
+about ten times a day; `sir` turns one caller's malformed request into an outage for every
+other caller on that model. Fixing either link removes the timeouts. The cheap one is ours:
+`FINAL_NUDGE` does not need to be a system message.
+
+Two corrections to what this record said before the diagnosis. The hand-sent completion
+that answered in 0.5s was not evidence against queueing — the backend recovers on the next
+request, in about 3ms, because `manage_lifecycle: false` means `sir` only re-adopts a vLLM
+it never stopped. And the ports are the other way round from the config comment's
+implication: `:8000` is `sir` (`owned_by: "sir"`), `:8001` is vLLM direct
+(`owned_by: "vllm"`), and the `--port 8000` in vLLM's command line is its port *inside* its
+container, published to the host on 8001.
+
+A third thing fell out of the same probes, unasked: **`sir` drops the usage chunk in its
+SSE renderer and only there.** `_sse` yields role, content, a finish frame and `[DONE]`,
+with no usage frame anywhere; the non-streaming path's `build_response` does carry usage.
+A streamed request through `:8000` returns 4 frames and no usage, the same request to
+`:8001` returns 5 and does carry it. That is the whole of the "token accounting is dead
+upstream" finding carried since Pass 1 — it is one missing frame in one renderer, and the
+non-streamed path already has the number.
+
 ### v2-2. Four of 22 rows now die at `steps 12/12`, up from three
 
 Same 400, same `FINAL_NUDGE`, one more row (B21-ask, which in v1 merely wandered and
@@ -332,6 +389,35 @@ about what Dylan wants. The eval corpus is leaking into the user-scoped store. N
 changed here; it is recorded because **8d re-runs this suite and will do it again**, and
 because a memory store that has absorbed the eval prompts is no longer a neutral input to
 the rows that read memory (B04 already answers a calendar question out of `facts`).
+
+**Cleaned 2026-09-22 on Dylan's instruction, and the leak was wider than the one candidate.**
+The 47 eval sessions were identified by matching every archived `user_message` against the
+frozen prompts in `evals/baseline-tasks.md` — 24 from v1, 23 from v2 — and everything
+traceable to them was removed through the product's own commands, after `agent backup`:
+
+| What | How many | Disposition |
+|---|---|---|
+| facts | 4 | `agent memory retract`, reason recorded |
+| open loops | 4 open (2 already closed) | `agent loops close` |
+| goals | 1 | `agent goals drop` |
+| markdown | 2 files | `regenerate_markdown()`, 2 commits in the memory repo |
+
+The four facts were B20's calendar-freshness preference (twice, once per run, plus a merged
+restatement) and a duplicate of the genuine "building a personal agent runtime" fact that
+B08 caused. **One had reached `profile/preferences.md`** — `promoted_to_md = true` — so the
+eval prompt had become a bullet in the file the agent reads as Dylan's stated preferences.
+That block now reads `_Nothing established yet._`, which is the true state: no preference in
+this store was ever stated outside an eval.
+
+Two notes for 8d. `candidate_memories` was left intact as the proposal log — the beliefs are
+retracted, and rewriting what the gate decided would be a second falsification. And
+`retract` is a database write only: it does not touch the markdown, so a cleanup that skips
+`regenerate_markdown()` leaves the retracted fact sitting in `preferences.md`.
+
+Found while doing it: **`agent goals drop` prints `dropped` whether or not it matched.** It
+takes a slug and runs `UPDATE goals SET status=… WHERE slug=%s` (`repo_agenda.py:62`)
+without checking rowcount, so an id — which is what `agent goals list` shows — reports
+success and changes nothing. Same signature as the rest: wrong, plausible, never an error.
 
 ### v2-4. `invalid_args` fired for the first time
 
