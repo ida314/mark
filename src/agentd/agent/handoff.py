@@ -305,6 +305,13 @@ def manifest(rows: Sequence[dict[str, Any]]) -> tuple[DroppedItem, ...]:
         kind = str(row["kind"])
         if kind == "tool_result" and actor.startswith("tool:"):
             kind = f"tool_result:{actor[len('tool:'):]}"
+        elif kind == "assistant_step":
+            # Only ever listed when the turn it belongs to has no joined answer, which
+            # means the turn did not finish. Saying so is the difference between "here is
+            # something the model said" and "here is what the model had said when the
+            # process went away", and a successor deciding whether to fetch it needs the
+            # second one.
+            kind = "assistant_step (from a turn that did not finish)"
         private = bool(row.get("private"))
         items.append(
             DroppedItem(

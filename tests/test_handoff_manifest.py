@@ -31,6 +31,7 @@ from agentd.agent.handoff import DroppedItem, Handoff, HandoffError
 from agentd.agent.loop import AgentLoop, Session
 from agentd.db import repo_archive
 from agentd.db.repo_archive import RawEvent
+from agentd.ids import uuid7
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
 from agentd.policy.engine import engine_from_config
@@ -383,4 +384,42 @@ async def test_the_manifest_still_names_the_tool_output_when_the_watermark_cuts_
     kinds = [e.kind for e in session.handoff.dropped_manifest]
     assert "tool_result:reads_a_file" in kinds, (
         f"the turn's own tool output fell outside the manifest; listed: {kinds}"
+    )
+
+
+async def test_a_finished_turns_prose_is_offered_once_and_a_dead_turns_prose_is_offered_at_all(
+    cfg,
+):
+    """`assistant_step` is written per step and the joined answer is written at the end, so
+    a turn that finishes holds its prose twice. Listing both would hand the successor two
+    refs for one piece of text. Listing neither - which is what the first version did, by
+    leaving the kind out of `MANIFEST_KINDS` - loses the only record a turn that *died*
+    leaves of what the model said.
+
+    So: the step rows of a turn with an answer are not listed; the step rows of a turn
+    without one are, and the kind says why they are the only copy.
+    """
+    session = await Session.create("test")
+    finished, died = uuid7(), uuid7()
+    for turn_id, kind, content in (
+        (finished, "assistant_step", "reading the file now"),
+        (finished, "assistant_message", "reading the file now\nThe cap is 20."),
+        (died, "assistant_step", "half an answer, and then the process went away"),
+    ):
+        await repo_archive.append_event(
+            RawEvent(
+                kind=kind, actor="main", content=content,
+                session_id=session.id, turn_id=turn_id,
+            )
+        )
+
+    rows = await repo_archive.manifest_rows(
+        session.id, upto_id=10**9, watermark=10**9, excerpt_chars=80, limit=10
+    )
+    listed = {e.description: e.kind for e in handoff_mod.manifest(rows)}
+    assert "reading the file now" not in listed, "the finished turn's step row is a duplicate"
+    assert listed["reading the file now The cap is 20."] == "assistant_message"
+    assert (
+        listed["half an answer, and then the process went away"]
+        == "assistant_step (from a turn that did not finish)"
     )

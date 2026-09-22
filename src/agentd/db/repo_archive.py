@@ -222,7 +222,9 @@ async def recent_message_sizes(session_id: UUID, limit: int = 200) -> list[tuple
 # make the manifest a list of what the *handoff* dropped rather than of what the successor
 # does not have, and those differ by exactly the material a turn spent its whole step
 # budget gathering.
-MANIFEST_KINDS: tuple[str, ...] = ("user_message", "assistant_message", "tool_result")
+MANIFEST_KINDS: tuple[str, ...] = (
+    "user_message", "assistant_message", "tool_result", "assistant_step",
+)
 
 
 async def manifest_rows(
@@ -248,19 +250,28 @@ async def manifest_rows(
     """
     rows = await fetch_all(
         """
-        SELECT id, kind, actor, trust,
-               coalesce(length(content), 0) AS chars,
-               left(coalesce(content, ''), %s) AS excerpt,
-               (payload->>'private' = 'true') AS private
-        FROM raw_events
-        WHERE session_id = %s
-          AND id <= %s
+        SELECT e.id, e.kind, e.actor, e.trust,
+               coalesce(length(e.content), 0) AS chars,
+               left(coalesce(e.content, ''), %s) AS excerpt,
+               (e.payload->>'private' = 'true') AS private
+        FROM raw_events e
+        WHERE e.session_id = %s
+          AND e.id <= %s
           AND (
-                (kind = 'tool_result')
-             OR (kind IN ('user_message', 'assistant_message')
-                 AND %s::bigint IS NOT NULL AND id <= %s::bigint)
+                (e.kind = 'tool_result')
+             OR (e.kind IN ('user_message', 'assistant_message')
+                 AND %s::bigint IS NOT NULL AND e.id <= %s::bigint)
+             -- A step row is listed only when it is the *only* copy of what the model
+             -- said. A turn that finished archives its prose twice - once per step, once
+             -- joined as the answer - and offering both would hand the successor two refs
+             -- for one piece of text. A turn that died has no joined answer, and then the
+             -- step rows are the only record there is.
+             OR (e.kind = 'assistant_step' AND NOT EXISTS (
+                   SELECT 1 FROM raw_events a
+                   WHERE a.session_id = e.session_id AND a.turn_id = e.turn_id
+                     AND a.kind = 'assistant_message'))
           )
-        ORDER BY id DESC LIMIT %s
+        ORDER BY e.id DESC LIMIT %s
         """,
         (excerpt_chars, session_id, upto_id, watermark, watermark, limit),
     )
