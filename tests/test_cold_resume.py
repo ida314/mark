@@ -359,6 +359,35 @@ async def test_a_resume_carries_the_interrupted_calls_out_to_the_model(cfg, writ
     assert "https://example.com/a" in plan.notice
 
 
+async def test_a_run_with_no_conversation_says_that_rather_than_blaming_a_budget(
+    cfg, writer
+):
+    """Session 3b's `detached:<action_id>` - a queued approval replayed long after its turn
+    ended. It has effects worth reconciling, no session, and therefore no conversation to
+    replay or compress.
+
+    The first version reported it as `messages_exceed_budget`, which is a statement about a
+    budget nothing was ever measured against: `conversation_tokens` is 0 for a run with no
+    session, so it "fits" and the branch fell through to whichever reason was left. A real
+    value degrading into a plausible wrong one that still folds is this codebase's
+    signature failure, and a resume reason is exactly the kind of field nobody re-derives.
+    """
+    ledger = EffectLedger(writer)
+    effect = ledger.intend(
+        run_id="detached:abc", step_id="s1", tool="sends_mail",
+        effect_class="unsafe_write", args={"to": "dylan@example.com"},
+    )
+    effect.dispatched()
+
+    writer.flush()
+    plan = await rehydrate.restart("detached:abc", store=writer.store, cfg=cfg, now_s=30.0)
+    assert plan.path == rehydrate.COMPRESSED
+    assert plan.reason == rehydrate.NO_CONVERSATION
+    assert plan.session_id is None
+    assert plan.handoff is None
+    assert plan.history == ()
+
+
 # --- requirement B: the rerun guard ------------------------------------------
 
 

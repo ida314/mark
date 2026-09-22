@@ -99,6 +99,13 @@ TOO_OLD = "outside_warm_window"
 # exactly one turn. And with the manifest and the lookup, what the handoff dropped is
 # named and fetchable rather than gone.
 ALREADY_COMPRESSED = "already_handed_off"
+# And a fourth, for the run that has no conversation to take either path with: session 3b's
+# `detached:<action_id>`, a queued approval replayed long after its turn ended. It has
+# effects worth reconciling and no session at all. Naming it is not pedantry - the
+# alternative was reporting it as `messages_exceed_budget`, which is a statement about a
+# budget nothing was measured against, and this codebase's characteristic bug is a real
+# value degrading into a plausible wrong one that still folds.
+NO_CONVERSATION = "no_conversation"
 
 # Where a compressed resume's handoff came from.
 FROM_CHECKPOINT = "checkpoint"
@@ -236,12 +243,14 @@ async def restart(
             source={"messages_replayed": len(history), "conversation_tokens": carried},
         )
 
-    reason = ALREADY_COMPRESSED if stored else (TOO_LARGE if not fits else TOO_OLD)
     if session_id is None:
-        # A detached run - a queued approval replayed long after its turn ended (session
-        # 3b's `detached:<action_id>`). It has effects worth reconciling and no conversation
-        # at all, so there is nothing to replay and nothing to compress.
-        reason = TOO_OLD if not fresh else TOO_LARGE
+        reason = NO_CONVERSATION
+    elif stored:
+        reason = ALREADY_COMPRESSED
+    elif not fits:
+        reason = TOO_LARGE
+    else:
+        reason = TOO_OLD
 
     handoff, source_of, generated_ms, provenance = await _compressed_handoff(
         run_id, plan=plan, session_id=session_id, cfg=cfg, provider=provider
@@ -475,6 +484,7 @@ async def generate_from_journal(
 __all__ = [
     "ALREADY_COMPRESSED",
     "COMPRESSED",
+    "NO_CONVERSATION",
     "FROM_CHECKPOINT",
     "FROM_JOURNAL",
     "LOSSLESS",
