@@ -1559,7 +1559,10 @@ def journal_continue(
                 + "[/dim]"
             )
         elif not plan.lossless:
-            console.print("[yellow]no handoff and no replay: see the record below[/yellow]")
+            console.print(
+                "[yellow]no handoff, and this run may not be replayed instead - "
+                "`--apply` will refuse. See the record below[/yellow]"
+            )
             console.print(plan.source, markup=False, highlight=False)
         if plan.closing:
             console.print(
@@ -1571,6 +1574,21 @@ def journal_continue(
             return
         if plan.session_id is None:
             console.print("[red]this run has no session, so there is no turn to take[/red]")
+            raise typer.Exit(1)
+        if not plan.lossless and plan.handoff is None:
+            # The pass file's second *Must not*, at the one place it could have been
+            # crossed by accident. This run was judged too large, too old or already
+            # compressed, and no handoff could be produced for it. Continuing anyway would
+            # hand the successor a `Session` with no handoff in force, and `run_turn` would
+            # then read the whole conversation back out of the archive - which is exactly
+            # "copy the old context into the new orchestrator as a fallback when handoff
+            # generation looks weak". So it refuses, and says what failed.
+            console.print(
+                "[red]this run needs a handoff to continue and none could be produced, so "
+                "there is nothing to continue from. Replaying the conversation instead is "
+                "the one thing this path may not do.[/red]"
+            )
+            console.print(plan.source, markup=False, highlight=False)
             raise typer.Exit(1)
 
         grants = RerunGrants()
