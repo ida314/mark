@@ -1448,6 +1448,41 @@ handoff_lookup(ref: str) -> bounded excerpt      effect_class=read, risk=read,
                                                  tags=("core", "handoff"), always_on
 ```
 
+## 5c and 5d — mutation testing
+
+Twenty-seven mutations, one at a time, against `tests/test_handoff_manifest.py`,
+`test_handoff_lookup.py` and `test_cold_resume.py`. **Twenty-six caught. One survivor, and
+it was a real gap that had already shipped a bug.**
+
+The first twenty-four, in one batch, all caught:
+
+| area | mutations | all caught |
+|---|---|---|
+| the manifest | description blanked; carried messages listed too; tool results left out; a private item excerpted | 4 |
+| the lookup | any parseable ref resolves; the archive is not scoped to the session; the excerpt is not bounded; the item comes back trusted; offered on every turn | 5 |
+| the successor's block | the manifest is not rendered; an old object is read as though it had none | 2 |
+| cold resume | always compress; freshness is not consulted; a stored handoff does not pin the path; the generator gets previews rather than bodies; a preview is shown as a message | 5 |
+| the rerun guard | keyed on the idempotency key; applies to every effect class; the grant is ignored; fires on a resolved call too; not scoped to the run; refused after the effect is announced | 6 |
+| the archive | mid-turn prose written as an ordinary assistant message; a stored handoff is not read back on resume | 2 |
+
+**The survivor, which is the useful part.** Restoring the manifest's upper bound to the
+*watermark* - the bug described in the deviations above - survived every test in the file.
+Read twice, it is the third kind of survivor and not an invalid mutation: the tests asserted
+on `repo_archive.manifest_rows`, which takes both bounds **as arguments**, so they were
+supplying the very value under test and could not possibly catch the caller choosing it
+wrongly. A test of a helper proves nothing about the code that decides what to pass it. The
+test that catches it goes through `AgentLoop.run_turn` with a carry window small enough to
+draw a real watermark, and the mutation fails against it.
+
+Two more were run after the `assistant_step` listing rule was added - never listing a step
+row, and always listing one - and both are caught.
+
+**And one thing no mutation found**, recorded because the method that did find it is
+cheaper than the one that did not: the `assistant_step` rows being unreachable through the
+manifest was found by **counting the items in a real generated handoff against the archive
+rows behind it** - five against seven - and asking which two were missing. Nothing about the
+shape of the object was wrong, so nothing that asserted on its shape could have noticed.
+
 ## 5c and 5d — deferred items, and where they went
 
 - **Tuning the lookup, or capping it → Pass 10, on Dylan's instruction.** Nothing throttles
