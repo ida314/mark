@@ -18,6 +18,19 @@ confabulation; without them the only paths left are the three the rubric grades.
 the probe turn is given exactly one tool, the manifest lookup, which is the fourth path and
 the one the whole exercise exists to create.
 
+## The three points, and how each is taken
+
+`before` runs against a git worktree at the commit *preceding* the manifest, so there is no
+manifest and nothing to fetch. `after-5c` and `after-5d` both run against the current tree
+and differ only in `--no-lookup`, which withholds the tool from the probe turns.
+
+Taking the middle point with a flag rather than with a third worktree is deliberate. What
+distinguishes 5c from 5d, from the model's side, is exactly one thing: whether a tool that
+can resolve a ref is on the turn's tool list. With the tool withheld the successor gets the
+manifest and `MANIFEST_NO_LOOKUP` - which is what a 5c-only build renders, byte for byte -
+and the two points then share every other line of code, so a difference between them cannot
+be some unrelated fix that landed in between.
+
 ## Two deviations from B10 as frozen, stated rather than smoothed over
 
 Both exist because the thing being measured is what a *successor* does, and a task turn that
@@ -177,7 +190,7 @@ async def _turn(loop: AgentLoop, session: Session, text: str) -> str:
 MAX_FIXTURE_ATTEMPTS = 4
 
 
-async def run_once(label: str) -> dict[str, Any]:
+async def run_once(label: str, *, with_lookup: bool) -> dict[str, Any]:
     base = load_config()
     dsn = await _fresh_database(base)
     tmp = Path(tempfile.mkdtemp(prefix="confab-"))
@@ -212,6 +225,7 @@ async def run_once(label: str) -> dict[str, Any]:
     record: dict[str, Any] = {
         "label": label,
         "task": "B10",
+        "with_lookup": with_lookup,
         "started_at": datetime.now(UTC).isoformat(),
         "model": cfg.llm.model,
         "handoff_config": {
@@ -247,13 +261,17 @@ async def run_once(label: str) -> dict[str, Any]:
         # The probe turns. The file tools are gone; whatever is registered here is the
         # entire set of ways to answer that is not memory of a transcript nobody has.
         probe_registry = Registry()
-        try:
-            from agentd.tools import builtin_handoff
+        record["lookup_available"] = False
+        if with_lookup:
+            try:
+                from agentd.tools import builtin_handoff
 
-            probe_registry.add(*builtin_handoff.TOOLS)
-            record["lookup_available"] = True
-        except ImportError:
-            record["lookup_available"] = False
+                probe_registry.add(*builtin_handoff.TOOLS)
+                record["lookup_available"] = True
+            except ImportError:
+                # The "before" point runs against a worktree at the commit preceding the
+                # manifest, where this module does not exist.
+                pass
 
         probes = AgentLoop(
             cfg=cfg, registry=probe_registry, engine=engine_from_config(cfg),
@@ -333,11 +351,11 @@ def _usable(record: dict[str, Any]) -> bool:
     return bool(record.get("material_entered")) and record.get("handoff") is not None
 
 
-async def run(label: str, out: Path) -> dict[str, Any]:
+async def run(label: str, out: Path, *, with_lookup: bool = True) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     record: dict[str, Any] = {}
     for _ in range(MAX_FIXTURE_ATTEMPTS):
-        record = await run_once(label)
+        record = await run_once(label, with_lookup=with_lookup)
         attempts.append(
             {
                 "material_entered": record.get("material_entered"),
@@ -358,9 +376,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", required=True, help="before | after-5c | after-5d")
     parser.add_argument("--out", default=None, help="where the record goes")
+    parser.add_argument(
+        "--no-lookup",
+        action="store_true",
+        help=(
+            "Withhold the manifest lookup from the probe turns. This is how the 'after 5c "
+            "alone' point is taken: the manifest is present and the successor is told it "
+            "has no way to fetch from it, which is exactly what a 5c-only build renders."
+        ),
+    )
     args = parser.parse_args()
     out = Path(args.out or f"/tmp/confab-{args.label}.json")
-    record = asyncio.run(run(args.label, out))
+    record = asyncio.run(run(args.label, out, with_lookup=not args.no_lookup))
 
     print(f"\n=== confabulation eval: {args.label} ===")
     print(f"usable fixture:     {record.get('usable')} "
