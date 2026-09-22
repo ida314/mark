@@ -221,7 +221,10 @@ async def _turn(loop: AgentLoop, session: Session, text: str) -> str:
 # next invents `grep`, `read_file`, `bash` or `Read` and dies having read nothing - and a
 # successor handed an empty conversation "passes" every probe while measuring nothing. The
 # same policy is applied at all three eval points, and every attempt is kept in the record.
-MAX_FIXTURE_ATTEMPTS = 4
+# Eight, because the observed success rate is roughly one run in three: the first three
+# points cost 1, 4 (all failures) and 1 attempts respectively, which is a measurement of
+# the model and is itself reported.
+MAX_FIXTURE_ATTEMPTS = 8
 
 
 async def run_once(label: str, *, with_lookup: bool) -> dict[str, Any]:
