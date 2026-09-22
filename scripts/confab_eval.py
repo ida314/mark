@@ -273,8 +273,22 @@ async def run_once(label: str, *, with_lookup: bool) -> dict[str, Any]:
                 # manifest, where this module does not exist.
                 pass
 
+        # The probe turns run against the *real* threshold, not the forced one. Only the
+        # task turn needs forcing; leaving the forced ceiling in place would make every
+        # probe cross on its own two-message conversation, generate a fresh handoff on the
+        # way out, and hand the next probe a different object. Each probe would then be
+        # answering from a summary of the probe before it, which is not the thing being
+        # measured - and each would cost another 40-80s generator call. The handoff the
+        # task turn produced stays in force across all three.
+        probe_cfg = cfg.model_copy(
+            update={
+                "handoff": cfg.handoff.model_copy(
+                    update={"ceiling_tokens": None, "threshold_tokens": 8000}
+                )
+            }
+        )
         probes = AgentLoop(
-            cfg=cfg, registry=probe_registry, engine=engine_from_config(cfg),
+            cfg=probe_cfg, registry=probe_registry, engine=engine_from_config(cfg),
             approver=AutoApprover(True),
         )
         for name, prompt in PROBES:
