@@ -959,3 +959,326 @@ open questions 3 (the threshold has now fired outside the suite - on B23, agains
 configured threshold, which closes the "synthetic evidence only" half of it), 4 (a worker's
 crossing marks nothing) and 5 (`estimate_tokens` is uncalibrated - every number in this
 session inherits its error, including the ones in the tables above).
+
+---
+
+## Session 5c — the manifest, cold resume, and a guard the prompt could not be
+
+5b found that a successor does not reliably refuse to answer from material the handoff
+dropped, and Dylan ruled at the boundary that the fix is two things and not one. This session
+is the first of them, plus the two items the pass file had already put here (cold resume, and
+requirement B), plus the archive write that makes the first of those possible.
+
+**His reading of this pass's second *Must not*, recorded verbatim at his instruction**,
+because it is what makes 5d permissible and is the line every design decision in both
+sessions was taken against:
+
+> it forbids the runtime restoring the old context wholesale as a fallback. It does not
+> forbid the successor requesting a specific named item. The line is who chooses what comes
+> back and how much.
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/agent/rehydrate.py` | cold resume: which path, and the journal-to-handoff generator | 341 |
+| `src/agentd/agent/handoff.py` | `DroppedItem`, the manifest, refs, schema v2 and its upgrade, the successor's manifest block | +212 −24 |
+| `src/agentd/agent/loop.py` | the manifest is built at handoff time; `assistant_step` is archived; `Session.resume` reads a stored handoff back | +72 −9 |
+| `src/agentd/db/repo_archive.py` | `manifest_rows`, `archived_item`, `MANIFEST_KINDS` | +76 |
+| `src/agentd/tools/executor.py` | requirement B: the rerun refusal | +54 −2 |
+| `src/agentd/policy/approvals.py` | `RerunGrants` | +42 |
+| `src/agentd/journal/checkpoints.py` | `latest_handoff_for_session` | +21 |
+| `src/agentd/cli/app.py` | `agent journal continue`, and `--allow-rerun` | +97 |
+| `src/agentd/config.py`, `config/default.toml` | six `[handoff]` keys | +58 |
+| `tests/test_handoff_manifest.py` | 14 tests | 297 |
+| `tests/test_cold_resume.py` | 20 tests | 452 |
+| `scripts/confab_eval.py` | the confabulation eval harness, run at three points | 384 |
+
+Suite 812 → 846 passing. `ruff check src tests scripts` clean. No tool added or
+re-classified in this session (5d adds one), no effect class changed.
+
+### the manifest, and why it lists more than the handoff dropped
+
+A handoff field listing **each dropped item** with a kind, a one-line description and a
+**ref resolvable against the journal/archive** - the pass file's words, and the ref is the
+part that matters, because a list of kinds gives a refusal nothing to attach to and gives a
+lookup nothing to aim at.
+
+```python
+DroppedItem(frozen)
+  ref: str            # "msg:4812" - the archive's own identity column, the same column
+                      # the watermark is drawn from, so the two compare without a table
+  kind: str           # user_message | assistant_message | tool_result:<tool name>
+  description: str    # the item's first `manifest_excerpt_chars`, whitespace collapsed
+  chars: int          # how big the real thing is
+  private: bool       # listed, never excerpted, never fetchable
+  trust: str          # carried through to the lookup's result
+```
+
+**Every field is derived from the archive row. None is written by the generator**, for the
+reason `important_memory_refs` is not: this is the list a successor will fetch from, and a
+model-written description of material nobody can check without doing the fetch is the same
+laundering channel as a summarised synthetic message, one layer out. The excerpt is taken in
+SQL (`left(content, n)`), so a 42,000-character paste is described without being read into
+the process - the same reason `recent_message_sizes` returns sizes.
+
+**Tool results are in the manifest, and that is a deliberate widening of "dropped".** Two
+kinds of item are listed, for two different reasons, and `manifest_rows` draws the line in
+one query:
+
+```
+a conversation message   is listed when it fell below the handoff's watermark
+a tool result            is listed whenever it is at or below the same point
+```
+
+A message above the watermark is carried verbatim and is not listed: offering to fetch what
+the reader already holds is a step spent re-reading its own prompt. A tool result is never
+replayed into any later prompt and never was - `history_messages` selects two kinds of row
+and `tool_result` is not one of them - so the successor has no more access to it than to a
+message the handoff replaced. Leaving them out would make the manifest a list of what the
+*handoff* dropped rather than of what the successor does not have, and those two differ by
+exactly the material a turn spent its whole step budget gathering. On the eval fixture
+below, the conversation contributes two items and the tool output contributes the rest.
+
+**A private tool result is listed and never excerpted.** Both halves are the requirement. Not
+listing it would let a successor conclude the mailbox was never opened, which is a false
+belief about the user's own data; excerpting it would carry the text into every subsequent
+prompt without the tool that closed the egress door. The description reads `(private tool
+result; not excerpted here)` and 5d's lookup refuses it outright.
+
+### `handoff_schema` 2, and the first real migration
+
+5b's open question 6 said the version rule was in place and had never been exercised. It has
+now, and exercising it changed it: version 1 is **upgraded** rather than refused.
+
+```
+version in READABLE_SCHEMAS (1, 2)   read it
+version 1                            dropped_manifest = (), and source["manifest"] says why
+anything else                        HandoffError, as before
+```
+
+Refusing a version 1 object would throw away a good handoff over a field that did not exist
+when it was written. What must not happen instead is for the successor to read an empty
+manifest as "nothing was dropped", so the upgrade writes a sentence into `source["manifest"]`
+and `render` prints it: *"absent: this handoff was written under handoff_schema 1, which had
+no manifest. What it dropped is not listed and cannot be looked up."* Those two states lead
+to opposite behaviour and must not arrive as the same sentence.
+
+### what the successor is told
+
+`render` gains a manifest block, and the block's last line is conditional on something this
+module cannot know - whether a tool that can resolve a ref is on *this turn's* tool list. The
+caller passes `lookup_tool=`; `agent/loop.py` passes it only when the lookup is really
+offered. Telling a model to fetch a ref with a tool it has not been given is a step spent
+discovering the call does not exist.
+
+```
+### What this conversation contains that you do not have
+
+Each line is one item, with a ref, a kind, its size, and how it begins. The excerpt is the
+first characters of the item and nothing more - it is not a summary and the rest of the item
+is not in it. You have never seen any of these.
+
+  msg:41  [user_message, 14,212 chars]  I'm going to paste some material and then ask…
+  msg:44  [tool_result:fs_read, 8,000 chars]  ALWAYS_EXPOSE_LIMIT = 20 SIMILARITY_FLOOR…
+
+To use one, fetch it by its ref with `handoff_lookup`, one ref per call. If you do not fetch
+it, you do not have it: say so plainly rather than answering from this list, and never quote,
+count or describe the contents of an item you have not fetched.
+```
+
+With no lookup available the last paragraph is `MANIFEST_NO_LOOKUP` instead, which says to
+say so rather than to call anything.
+
+### cold resume: which path, and the one that was found by a test
+
+`agent/rehydrate.py`. The pass file's policy, with one addition that is not in it.
+
+```
+lossless    the conversation is replayed verbatim
+compressed  a handoff is carried forward instead, with a reason beside it:
+              messages_exceed_budget    it no longer fits `resume_budget_tokens`
+              outside_warm_window       nothing has happened in it for `warm_window_s`
+              already_handed_off        ...and this one was not designed
+```
+
+**`already_handed_off` came out of a failing test and is the finding of this half.** A
+conversation crosses the threshold at `ceiling - threshold` = 16,000 estimated tokens. The
+resume budget is the same ceiling, 24,000. So a run that has *just* handed off still fits,
+and a resume that asked only about size would replay it whole, discard a handoff somebody
+already paid a model call for, and cross the threshold again at the end of the very first
+resumed turn - paying for a second one. Every number about it would look healthy. It is not
+the pass file's third *Must not* in disguise: that forbids the lossy path where the lossless
+one fits, and the lossless one fits here for exactly one turn.
+
+Defaults, which the pass file asks to be recorded and which are **untuned and say so**:
+
+| key | value | why this value |
+|---|---|---|
+| `warm_window_s` | 14400 (4 hours) | the pass file says "start with a few hours and tune from traces". There are no traces. |
+| `resume_budget_tokens` | unset → `agent.history_tokens` (24000) | the budget the next turn's history window would be spent against anyway, so a list that does not fit here is one `history_messages` would silently trim on the first turn |
+| `manifest_excerpt_chars` | 160 | about one terminal line, which is what a list of forty has to be |
+| `manifest_items` | 40 | the manifest lives in every subsequent prompt and a long session's tool results are unbounded |
+| `lookup_max_chars` | 4000 | half `tool_result_max_chars`; a second look at summarised material buys less per character than a first read |
+
+### the journal-to-handoff generator
+
+The pass file: *"If a cold resume needs a handoff object and none exists, generate one from
+the journal with a cheap model call before starting the new orchestrator."* It is
+`rehydrate.generate_from_journal`, and it calls the same `handoff.generate` 5b shipped with
+`reason="cold_resume"` - so the model, the prompt, the guided decode and the one repair pass
+are 5b's exactly, unchanged, and the cost per invocation is 5b's 65-86 s figure. What is new
+is where the transcript comes from.
+
+**Session 4b's refusal is kept rather than traded for a better handoff.** Bodies come from
+the Postgres archive. Anything the journal recorded that the archive does not hold is shown
+to the generator **labelled as a preview** - `[preview only - the journal holds the first N
+characters of this message and the rest was never archived]` - and counted into
+`source["preview_only"]`. Matching is by prefix on the collapsed text, which is exactly the
+transformation `events.preview` applies, so a preview that really is the head of an archived
+row is recognised and not shown twice.
+
+`source` on a generated object carries `archived_messages`, `archived_by_role`,
+`preview_only`, `journal_messages` and `run_state`, so "this handoff was written mostly from
+previews" is answerable from the object rather than guessed at.
+
+### the archive write, and its stated cost
+
+Dylan took "archive mid-turn assistant prose" at the Pass 4/5 boundary **with the cost that
+was written into the option**: *it fixes nothing for runs already journaled.* That sentence
+is binding and it is why the generator reports `preview_only` at all.
+
+The row is `kind="assistant_step"`, written as each step's prose arrives. A separate kind,
+not `assistant_message`, and that is the whole safety of it: `recent_messages` selects
+`user_message` and `assistant_message` to rebuild a prompt's history, so a kind it does not
+select cannot reach a prompt. A turn that completes therefore archives its prose twice - once
+per step, once joined as the answer - and exactly one of those copies is ever replayed. Two
+rows in an append-only archive are cheap; the same text twice in a prompt is the bug this
+runtime shipped for five passes.
+
+### requirement B, and why it is not keyed on the idempotency key
+
+Dylan's, filed at the Pass 4/5 boundary, inherited here because 5b consumed neither
+`notice()` nor `closing_messages()` and said so. *A runtime guard that refuses an
+`unsafe_write` matching an unresolved uncertain call's tool and `canonical_args` in the same
+run, unless the user has said to run it again.*
+
+```
+match on      (run_id, tool, args_hash)        where args_hash = sha256(canonical_args)
+state         ORPHANED - the only unresolved-uncertain state there is
+class         unsafe_write only
+past it       RerunGrants, populated by `agent journal continue --allow-rerun <tool>`
+placed        after approval, before `_intend`
+```
+
+**Not the idempotency key, and this is the point of the whole thing.** The key is
+`hash(run_id, step_id, tool, canonical_args)`. A resumed turn re-issuing the identical call
+is at a *different step*, so it mints a fresh key and matches nothing - which is exactly the
+hole Dylan named, and keying the guard the same way would have reproduced it while looking
+correct. A mutation that does precisely that is caught by
+`test_the_guard_matches_the_same_call_at_a_different_step`.
+
+**Where it sits is also argued.** After approval, because approving a write answers "is this
+allowed", not "did this already happen", and the approval prompt does not say the second
+thing - so an approval is not informed consent for a duplicate. Before `_intend`, because
+announcing an effect that is then refused would leave a promise on disk that nothing kept,
+and the next resume would reconcile it as a second orphan.
+
+`unsafe_write` only, because an `idempotent_write` converges on re-execution - the pass's own
+reconciliation table says re-execute - and a refusal there would be a prompt about a danger
+that is not present, which is how the signal stops meaning anything for the calls where it
+is. That is Dylan's governing argument about prompts, applied to a refusal.
+
+**Scoped to the run**, because the doubt belongs to one run. A later run doing the same thing
+is ordinary work, and refusing everywhere would mean one crashed send poisoned that address
+for the life of the ledger.
+
+### `agent journal continue`
+
+The continuation path 4b named and did not build, and the first consumer of `notice()` and
+`closing_messages()`. Reports by default, writes with `--apply`, and prints which path the
+resume took and why before doing anything. It is also the only door `--allow-rerun` has,
+which is deliberate: the grant is a person typing a tool's name, never the model asking and
+never the runtime inferring.
+
+---
+
+## Session 5d — the lookup
+
+Added to the pass file by Dylan at the 5b boundary, after 5b found that a successor does not
+reliably refuse to answer from material the handoff dropped. 5c ships the manifest; this
+ships the only thing a successor can do about it other than refuse.
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/tools/builtin_handoff.py` | `handoff_lookup`, its refusals, and why each one is there | 148 |
+| `src/agentd/agent/loop.py` | offered iff a manifest is in force; the handoff reaches the tool through `ctx.extra` | +28 |
+| `src/agentd/tools/registry.py` | registered like anything else | +8 |
+| `tests/test_handoff_lookup.py` | 10 tests | 176 |
+| `tests/test_policy.py`, `docs/records/effect-classification.md` | `PRIVATE_SAFE` and a classification row, both with their reasoning | +12 |
+
+Suite 846 → 856 passing. One tool added: 27 registered, `UNAUDITED_TOOLS` still empty.
+
+### the tool, against the constraints it was given
+
+```
+takes        exactly one manifest ref                    {"ref": "msg:4812"}
+returns      a bounded excerpt                           [handoff] lookup_max_chars = 4000
+cannot       take a free-text query                      there is one parameter and it is a ref
+cannot       return "everything"                         one ref per call, no list, no range
+invoked by   the model only                              nothing in the runtime calls it, and
+                                                         in particular nothing calls it at
+                                                         orchestrator start
+journaled    every call                                  tool_requested / tool_started /
+                                                         tool_finished, no new event type
+reads        the archive                                 not a new store
+```
+
+**The authorisation is the manifest, not the archive.** `Handoff.item(ref)` is the check: a
+ref resolves only if the handoff in force lists it. Without that this is a tool that reads
+any row of the archive by integer, which is a different and much larger thing than the one
+that was argued for. The session scope is *in the SQL* rather than checked after the fetch,
+because the caller is a tool the model can call with any integer it likes and a lookup that
+fetched first and compared session ids second would be one forgotten branch from reading
+another conversation's mail. A mutation of each is caught.
+
+**Two refusals that are not bugs.** A private item is refused and told to call the original
+tool instead - reading mail closes the outside world for the rest of a conversation, and a
+door that hands the same text back one turn later is the interlock defeated in one hop. An
+untrusted item comes back with `trust="untrusted"`, so the executor's quarantine wrapper
+applies exactly as it did the first time: a web page does not become trustworthy by being
+read out of an archive.
+
+**Offered iff there is a manifest.** `AgentLoop._with_lookup` is total in both directions - it
+adds the tool when a handoff with a non-empty manifest is in force and removes it otherwise,
+whatever `registry.select` thought of the user's wording. A successor with an empty manifest
+(an upgraded version 1 object, or a handoff that really dropped nothing) gets neither the
+tool nor the sentence telling it to use one.
+
+**`read`, in the strict sense `memory_search` is not.** One `SELECT`, no counter moves,
+re-running returns the identical excerpt. No ledger row, no `effect_*` events, and therefore
+no way for it to reach a user as an uncertain effect.
+
+### Dylan's guard against this becoming the fallback in disguise
+
+His, and binding, recorded as he wrote it:
+
+> Guard against it becoming the fallback in disguise: record lookups per successor turn. If
+> successors routinely fetch every manifest item as their first action, that's the wholesale
+> restore by another route — flag it for Pass 10 rather than tuning it now.
+
+It is satisfied by the tool being journaled like any other, which makes the count a query
+rather than a second mechanism:
+
+```sql
+-- lookups per successor turn, for Pass 10
+SELECT step_id, count(*) FROM journal
+WHERE type = 'tool_requested' AND json_extract(payload, '$.name') = 'handoff_lookup'
+GROUP BY run_id, step_id;
+```
+
+`tests/test_handoff_lookup.py::test_every_lookup_is_journaled_like_any_other_tool_call` is
+what stops that query silently becoming unanswerable. **Nothing here caps or throttles
+lookups**, because he said to flag it for Pass 10 rather than tune it now.

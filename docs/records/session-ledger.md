@@ -24,8 +24,8 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 4d | complete | 2026-09-20 | pass-04-outcome.md | fork.py + `agent journal fork`. Parent bit-for-bit untouched; disclosure has three lists, not one. 751 tests green. 10 deviations, no Must not crossed. Pass-level exit criteria met. |
 | 5a | complete | 2026-09-21 | pass-05-outcome.md | `agent/budget.py` + `[handoff]`; ceiling is `agent.history_tokens` 24000, **not** `max_context_tokens` 262144. Threshold 8000 kept. 767 tests green. 6 deviations, no Must not crossed. Gives the `handoff` checkpoint trigger its first producer. |
 | 5b | complete | 2026-09-21 | pass-05-outcome.md | `agent/handoff.py`: object, validator, generator, successor block; stored in `handoff_object` on the `turn_end` checkpoint. 806 tests green. 6 deviations, no Must not crossed. **Exit criterion partly met — 2 of the required 3 suite tasks.** |
-| 5c | pending | — | — | scope grew at the 5b boundary: cold resume **+ the manifest** **+ requirement B's guard** |
-| 5d | pending | — | — | **added by Dylan 2026-09-21**: the lookup. Pass exit is judged here, not at 5c |
+| 5c | complete | 2026-09-22 | pass-05-outcome.md | committed as 6113734. The manifest (with tool results in it), cold resume (`agent/rehydrate.py` + `agent journal continue`), requirement B's rerun guard, `assistant_step` archiving, `handoff_schema` 2 with a real v1 upgrade. 846 tests green. 16 mutations, all caught. A failing test found a third resume reason nobody designed - `already_handed_off`. |
+| 5d | complete | 2026-09-22 | pass-05-outcome.md | committed as ae2d6ea. `handoff_lookup`: one ref, a bounded excerpt, model-invoked only, journaled like any other tool call so Dylan's per-turn lookup count is a query and not a mechanism. 856 tests green. 8 further mutations, all caught. |
 | 6a | pending | — | — | |
 | 6b | pending | — | — | |
 | 6c | pending | — | — | |
