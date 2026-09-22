@@ -280,6 +280,36 @@ async def test_prose_the_archive_never_held_is_offered_as_a_preview_and_counted(
     assert "preview only" in sent
 
 
+async def test_a_stored_handoff_this_build_cannot_read_is_replaced_and_said_so(cfg, writer):
+    """The other half of the schema rule, on the path that has to survive it. A stored
+    object written under rules this build does not have cannot be read, and continuing with
+    no handoff at all would be the version check quietly costing a resume its context. It is
+    regenerated, and what happened to the old one is in the provenance rather than in a log
+    nobody reads."""
+    session = await Session.create("test")
+    rj = RunJournal(writer, "run-1")
+    _started(rj, str(session.id))
+    await _archive(session.id, "user_message", "user", "where is the cap")
+    writer.flush()
+    from agentd.journal.checkpoints import Checkpointer
+
+    Checkpointer(writer, cfg=cfg.model_copy(
+        update={"checkpoints": cfg.checkpoints.model_copy(update={"enabled": True})}
+    )).write(
+        "run-1", trigger="turn_end",
+        handoff_object={"handoff_schema": 99, "task": "from the future"},
+    )
+
+    writer.flush()
+    plan = await rehydrate.restart(
+        "run-1", store=writer.store, cfg=cfg, provider=_fake(DRAFT), now_s=30.0
+    )
+    assert plan.handoff_source == rehydrate.FROM_JOURNAL
+    assert plan.handoff is not None
+    assert plan.handoff.task == DRAFT["task"]
+    assert "handoff_schema" in plan.source["stored_object_unreadable"]
+
+
 async def test_a_run_whose_generator_fails_resumes_without_a_handoff_rather_than_not_at_all(
     cfg, writer
 ):
