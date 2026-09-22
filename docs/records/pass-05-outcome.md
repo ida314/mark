@@ -1552,3 +1552,70 @@ Preview-only messages are appended after the archived ones rather than interleav
 real positions, because matching a preview to its place in a turn is not something the
 journal makes reliable. For a run with a handful of them this is a small distortion of the
 order a summariser reads; for a long dead run it may not be.
+
+---
+
+## Session 5c — the exit criterion, demonstrated
+
+> **Exit.** A cold resume from a stale run with no stored handoff produces a usable handoff
+> object and the new orchestrator picks up correctly.
+
+**Met, and driven by hand rather than only by a test.** `scripts/cold_resume_demo.py` lays
+down one run with the scripted provider - a question, a file read, an answer - against a
+scratch database and a throwaway data directory, with `[checkpoints] enabled = false`, which
+is the shipped default and is what makes "no stored handoff" real rather than simulated. The
+run is made stale by `AGENT_HANDOFF__WARM_WINDOW_S=0`, which is the same comparison the code
+makes against a real clock.
+
+```
+$ agent journal continue 01a0cacb-… "what was the number again" --apply
+
+run 01a0cacb-…: complete, through seq 9, 9 events, 5 messages, 0 uncertain, 0 retryable
+compressed (outside_warm_window) - last activity 0.0h ago, conversation 67 of 24000
+  estimated tokens
+handoff: generated_from_journal, 3 manifest items, generated in 38481 ms
+
+ALWAYS_EXPOSE_LIMIT = 20 — that's the per-turn tool cap in `src/agentd/tools/registry.py`.
+```
+
+The successor's answer is the dead run's own conclusion, recovered through an object built
+from the journal and the archive after the process that produced it was gone. The generated
+handoff:
+
+```json
+{
+  "handoff_schema": 2,
+  "reason": "cold_resume",
+  "task": "Determine where in the codebase it is decided which tools a single turn may see, and what caps that set.",
+  "user_intent": "The user wants to know the specific location and mechanism that limits the number of tools exposed to the agent in a single turn.",
+  "relevant_evidence": [
+    "File: src/agentd/tools/registry.py",
+    "Constants: ALWAYS_EXPOSE_LIMIT = 20, SIMILARITY_FLOOR = 0.30, TOP_K = 8",
+    "Logic: if len(enabled) <= ALWAYS_EXPOSE_LIMIT, return enabled (all tools exposed).",
+    "TOP_K = 8 bounds how many similar tools are added on top of the always-exposed set."
+  ],
+  "next_actions": ["Work is finished. The user's question has been answered: …"],
+  "unresolved_questions": ["None. The user's specific question … has been fully answered."],
+  "watermark": 7,
+  "source": {
+    "archived_messages": 7,
+    "archived_by_role": {"assistant": 4, "tool": 1, "user": 2},
+    "preview_only": 0,
+    "journal_messages": 8,
+    "run_state": "complete",
+    "model": "Qwen/Qwen3.8-27B-FP8"
+  }
+}
+```
+
+Three numbers in that object are worth reading. `preview_only: 0` is the `assistant_step`
+write earning its place: every body the generator needed was in the archive, and none of it
+had to be shown as a preview. `generated in 38481 ms` is the cost of the model call, on the
+same 27B and through the same router as everything else - slower than a turn and paid once
+per resume. And `manifest_items` was **5 against 7 archived rows**, which is what exposed the
+`assistant_step` rows being unreachable: two rows the generator could read and no successor
+could ask for. That gap is fixed and the count now accounts for every row that is not a
+duplicate of one already listed.
+
+Run again with `--apply` omitted, the same command reports the plan and writes nothing,
+which is `agent journal resume`'s convention and the same reason for it.
