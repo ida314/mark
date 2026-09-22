@@ -1911,3 +1911,40 @@ second is a change to a frozen row, so it is Dylan's to make rather than a sessi
 option worth putting to him is whether B22 may name the tool (`fs_read`) in its prompt, at
 the cost that it then measures breadth-under-a-step-budget and no longer measures tool
 selection at all.
+
+## Open questions the eval produced — for Pass 7 and Pass 10
+
+Numbered on from the six in the 5c/5d block above, because they are the same list.
+
+**7. A successor disclaims material it is still holding, and this pass caused it.** The
+defect above. `DROPPED_LINE` states that the replaced messages are gone, and on a run where
+the carry window kept the assistant's own answer the successor said it could not quote that
+answer either. Three directions, none taken here: say what is *carried* as well as what is
+dropped ("the last N messages are below, verbatim"); render the manifest so that its
+boundary with the live history is visible; or accept it and grade it. **The first is cheap
+and is probably right.** What it must not become is a longer warning - the evidence from 5b
+and from here is that quantity of warning moves behaviour unpredictably in both directions.
+
+**8. The rubric cannot see failure 7.** *A lookup or "I don't have that" passes* - and a
+successor that says "I don't have that" about something it is holding passes while being
+wrong. Any future run of this eval needs a second axis: not just "did it invent", but "was
+what it said about its own context true". The harness already records the watermark and the
+manifest, so the check is mechanical.
+
+**9. A verbatim-quote probe and a summarise-this probe measure different failures**, and
+only the second one found anything in 5b. Both are needed. If the eval is run again, run
+B23's turn 4 as one of the probes rather than only as a separate task.
+
+**10. The successor asks permission to use the lookup rather than using it.** Twice, on the
+B10 fixture: *"I can fetch msg:27 via `handoff_lookup` if you want me to"*. Correct and
+cautious, and it costs the user a round trip for something they already asked for. Whether
+that is the tool's description, the manifest's wording, or the model, is not established.
+Worth a line in whatever Pass 10 collects about lookups, next to the count.
+
+**11. B22 has not measured near-limit behaviour in three attempts.** Above. The decision
+about narrowing the row is Dylan's.
+
+**12. Whether B23 exercises the handoff at all depends on how verbose the model is.** 5b's
+run crossed at `carried = 17,542`; this one peaked at 15,448 against a crossing point of
+16,000, on identical input, because the replies were shorter. Anyone reading a future B23
+run as evidence about handoffs should check `context_crossed` first.
