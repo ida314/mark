@@ -1100,7 +1100,15 @@ compressed  a handoff is carried forward instead, with a reason beside it:
               messages_exceed_budget    it no longer fits `resume_budget_tokens`
               outside_warm_window       nothing has happened in it for `warm_window_s`
               already_handed_off        ...and this one was not designed
+              no_conversation           a detached run: effects to reconcile, no session
 ```
+
+**Two of those four were found rather than designed, and the second is the more
+characteristic.** `no_conversation` exists because a detached run - session 3b's
+`detached:<action_id>`, a queued approval replayed long after its turn ended - has no
+session, so `conversation_tokens` is 0, so it "fits", so the reason fell through to
+`messages_exceed_budget`: a statement about a budget nothing was measured against, in the
+one field that exists to say why a lossy path was taken.
 
 **`already_handed_off` came out of a failing test and is the finding of this half.** A
 conversation crosses the threshold at `ceiling - threshold` = 16,000 estimated tokens. The
@@ -1406,7 +1414,8 @@ Handoff(frozen)                    # 5b's eleven fields and provenance, plus:
 ```python
 # agent/rehydrate.py
 LOSSLESS / COMPRESSED                          the path
-TOO_LARGE / TOO_OLD / ALREADY_COMPRESSED       why, when compressed
+TOO_LARGE / TOO_OLD / ALREADY_COMPRESSED /     why, when compressed
+NO_CONVERSATION
 FROM_CHECKPOINT / FROM_JOURNAL / NO_HANDOFF    where the handoff came from
 
 Restart(frozen)
