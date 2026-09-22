@@ -54,12 +54,15 @@ failure. Naming the files makes the tool output arrive reliably; what it costs i
 is no longer a measurement of B10's *search* half, and no grade from it belongs in the
 baseline table. It is the confabulation eval's fixture, not a baseline row.
 
-The wording of that naming matters more than it should, which is itself the finding. The
-first narrowed version said *"Read src/agentd/tools/registry.py and ..."* and the model
-answered it by calling `Read`, `Bash`, `Glob` and `Grep` - five runs out of five, none of
-those tools registered, the schemas for the three that were verifiably in the request. An
-imperative that collides with a well-known harness's tool name is apparently a stronger cue
-to this model than the tool list it was handed.
+The wording of that naming matters more than it should. The first narrowed version said
+*"Read src/agentd/tools/registry.py and ..."* and the model answered it by calling `Read`,
+`Bash`, `Glob` and `Grep` - five runs out of five, none of those tools registered, the
+schemas for the three that were verifiably in the request. The verbatim row, which contains
+no such imperative, drove `fs_read` correctly the one time it was run. **1 of 1 against 0 of
+5 is suggestive and is not a controlled result**: the A/B that would have settled it was
+attempted and timed out, because a turn spending its whole step budget on tool names that do
+not exist takes longer than the probe allowed. The wording here avoids the imperative as a
+cheap precaution, not as a fix for a proven cause.
 
 ## What it does not touch
 
