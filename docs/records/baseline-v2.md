@@ -359,13 +359,17 @@ about ten times a day; `sir` turns one caller's malformed request into an outage
 other caller on that model. Fixing either link removes the timeouts. The cheap one is ours:
 `FINAL_NUDGE` does not need to be a system message.
 
-Two corrections to what this record said before the diagnosis. The hand-sent completion
+One correction to what this record said before the diagnosis. The hand-sent completion
 that answered in 0.5s was not evidence against queueing — the backend recovers on the next
 request, in about 3ms, because `manage_lifecycle: false` means `sir` only re-adopts a vLLM
-it never stopped. And the ports are the other way round from the config comment's
-implication: `:8000` is `sir` (`owned_by: "sir"`), `:8001` is vLLM direct
-(`owned_by: "vllm"`), and the `--port 8000` in vLLM's command line is its port *inside* its
-container, published to the host on 8001.
+it never stopped.
+
+The port layout is worth stating because `ps` misleads: vLLM's command line reads
+`--port 8000`, which is its port *inside* its container, published to the host on **8001**.
+`sir` is the one on **8000**. Both configs are right about this — `~/.config/agent/config.toml`
+points at 8000 and calls it the router — but a host-level process listing says the opposite,
+and this session believed it for several minutes. `/v1/models` settles it in one call:
+`owned_by` is `"sir"` on 8000 and `"vllm"` on 8001.
 
 A third thing fell out of the same probes, unasked: **`sir` drops the usage chunk in its
 SSE renderer and only there.** `_sse` yields role, content, a finish frame and `[DONE]`,

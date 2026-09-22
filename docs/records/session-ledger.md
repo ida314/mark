@@ -489,9 +489,11 @@ cause. Two fixes, either sufficient, neither done: make `FINAL_NUDGE` not a syst
 request as a backend crash (not this repo). **Recommended: do ours before the 5c eval**,
 which runs against the real model and will otherwise inherit the same failure.
 
-Two things the record had backwards and now does not: `:8000` is `sir` and `:8001` is vLLM
-direct, not the reverse; and the 0.5s hand-sent probe was not evidence against queueing,
-because the backend re-adopts in ~3ms on the next request.
+One thing the record had backwards and now does not: the 0.5s hand-sent probe was not
+evidence against queueing, because the backend re-adopts in ~3ms on the next request. And
+one trap worth writing down: `ps` shows vLLM with `--port 8000`, which is its *in-container*
+port, published to the host on 8001. `sir` holds 8000. `/v1/models` settles it — `owned_by`
+is `"sir"` there and `"vllm"` on 8001.
 
 **Unasked, from the same probes: the dead token accounting is one missing frame.** `sir`'s
 SSE renderer emits no usage chunk at all, while its non-streaming path does carry usage.
