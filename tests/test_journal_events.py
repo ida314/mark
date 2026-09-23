@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
 from agentd.agent.stream import Answer
 from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
@@ -484,7 +485,8 @@ async def test_a_workers_events_belong_to_the_run_that_created_it(cfg, tmp_path)
         name="researcher", prompt="be useful", tool_names=["fs_read"], max_steps=3,
     )
     await run_subagent(
-        spec, "find the thing", parent_session_id=session.id, parent_turn_id=session.id,
+        spec, TaskSpec("researcher", "find the thing"), parent_session_id=session.id,
+        parent_turn_id=session.id,
         parent_autonomy="assist", approver=AutoApprover(True), registry=build_registry(),
         cfg=cfg, provider=provider, parent_run_id="run-outer", parent_step_id="s2",
         journal=writer,
@@ -527,7 +529,7 @@ async def test_a_worker_without_a_run_lands_in_its_callers_turn(cfg, tmp_path):
     session = await Session.create("test")
     await run_subagent(
         SubagentSpec(name="researcher", prompt="p", tool_names=["fs_read"], max_steps=2),
-        "task", parent_session_id=session.id, parent_turn_id=session.id,
+        TaskSpec("researcher", "task"), parent_session_id=session.id, parent_turn_id=session.id,
         parent_autonomy="assist", approver=AutoApprover(True), registry=build_registry(),
         cfg=cfg, provider=provider, journal=writer,
     )

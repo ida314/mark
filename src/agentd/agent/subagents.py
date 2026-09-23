@@ -2,6 +2,12 @@
 
 Sub-agents never write canonical memory. They return candidates with evidence, and the
 review gate decides. They also never exceed their caller's autonomy.
+
+What a worker is asked to do arrives as a `delegation.TaskSpec` and never as a bare string:
+the spec is the cache key 6c persists results under, and a second way to phrase a delegation
+is a second way to miss that cache. `SubagentSpec` here is the *role's* configuration - its
+prompt, its tools, its budget, its reporting contract - and is chosen by the durable role the
+spec names.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from ..obs import otel
 from ..policy.approvals import Approver
 from ..policy.engine import cap_autonomy
 from ..tools.registry import Registry, get_registry
+from .delegation import TaskSpec
 from .stream import Answer, Delta
 
 
@@ -49,6 +56,15 @@ class SubagentResult(BaseModel):
 
 @dataclass
 class SubagentSpec:
+    """One durable role's configuration.
+
+    `name` is the durable role a delegation names; `role` is the *LLM* role that selects
+    model parameters, and is "subagent" for all of them. `expected_output` is the role's
+    standing reporting contract, used when a delegation does not state its own - it is
+    copied into the task spec at construction, so it is part of the key rather than
+    something applied later by whoever renders the brief.
+    """
+
     name: str
     prompt: str
     tool_names: list[str] | None = None
@@ -57,6 +73,7 @@ class SubagentSpec:
     max_tokens: int = 60_000
     autonomy_cap: str = "assist"
     role: str = "subagent"
+    expected_output: str = ""
 
 
 RESEARCHER = SubagentSpec(
@@ -70,6 +87,10 @@ RESEARCHER = SubagentSpec(
     ),
     tool_names=["web_search", "web_fetch", "fs_read", "fs_list", "fs_search", "memory_search"],
     max_steps=10,
+    expected_output=(
+        "What you found, the source url or file path for every claim, the caveats that "
+        "matter, and what you looked for and could not find."
+    ),
 )
 
 CODER = SubagentSpec(
@@ -85,6 +106,10 @@ CODER = SubagentSpec(
     ],
     max_steps=15,
     autonomy_cap="act",
+    expected_output=(
+        "The files you changed, a summary of the change, and what you ran to check it with "
+        "its real result."
+    ),
 )
 
 SPECS: dict[str, SubagentSpec] = {s.name: s for s in (RESEARCHER, CODER)}
@@ -98,7 +123,7 @@ FINAL_INSTRUCTION = (
 
 async def run_subagent(
     spec: SubagentSpec,
-    task: str,
+    task: TaskSpec,
     *,
     parent_session_id: UUID,
     parent_turn_id: UUID,
@@ -114,6 +139,15 @@ async def run_subagent(
 ) -> SubagentResult:
     from .loop import AgentLoop, Session
 
+    if not isinstance(task, TaskSpec):
+        # Loud rather than coerced. A string coerced here would be a second normalization
+        # path, and the two would then be free to disagree about the key a result is cached
+        # under - which is the one disagreement 6c cannot detect.
+        raise TypeError(
+            f"run_subagent takes a delegation.TaskSpec, not a {type(task).__name__}; "
+            "build one with delegation.delegate() or TaskSpec(...)"
+        )
+    brief = task.brief
     cfg = cfg or get_config()
     registry = registry or get_registry()
     autonomy = cap_autonomy(parent_autonomy, spec.autonomy_cap)
@@ -153,15 +187,19 @@ async def run_subagent(
             {
                 "worker_id": worker_id, "name": spec.name, "role": spec.role,
                 "autonomy": autonomy, "max_steps": spec.max_steps,
-                "tools": sorted(restricted.tools), "task_chars": len(task),
-                "task_preview": jevents.preview(task),
+                "tools": sorted(restricted.tools), "task_chars": len(brief),
+                "task_preview": jevents.preview(brief),
+                # The identity of what was delegated, in the one record that survives with
+                # no Postgres and no checkpoint. `task_preview` is 200 characters and must
+                # never be re-delegated from; this is the whole spec, as a key.
+                "task_digest": task.digest,
                 "parent_step_id": parent_step_id,
             },
             worker_id=worker_id,
         )
         await repo_archive.append_event(
             RawEvent(
-                kind="subagent_message", actor=f"subagent:{spec.name}", content=task,
+                kind="subagent_message", actor=f"subagent:{spec.name}", content=brief,
                 session_id=parent_session_id, turn_id=parent_turn_id,
             )
         )
@@ -186,7 +224,7 @@ async def run_subagent(
 
         async for event in loop.run_turn(
             session,
-            task,
+            brief,
             origin=f"subagent:{spec.name}",
             autonomy=autonomy,
             record_user_message=False,
@@ -212,7 +250,7 @@ async def run_subagent(
             result = await loop.provider.complete_json(
                 [
                     {"role": "system", "content": spec.prompt},
-                    {"role": "user", "content": f"Task: {task}"},
+                    {"role": "user", "content": f"Task: {brief}"},
                     {"role": "assistant", "content": text[:20000] or "(no output)"},
                     {"role": "user", "content": FINAL_INSTRUCTION},
                 ],
@@ -272,7 +310,7 @@ async def run_subagent(
                 id=action_id, parent_id=parent_action_id or parent_turn_id,
                 actor=f"subagent:{spec.name}", kind="subagent", name=spec.name,
                 status=result.status, session_id=parent_session_id, turn_id=parent_turn_id,
-                input={"task": task},
+                input={"task": brief, "task_spec": task.as_dict()},
                 output={"summary": result.summary[:1000], "citations": result.citations},
                 policy={"autonomy": autonomy, "tainted": result.tainted},
                 tokens_in=tokens,

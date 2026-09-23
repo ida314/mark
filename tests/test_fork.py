@@ -483,7 +483,7 @@ def test_a_fork_point_inside_a_delegation_is_refused(writer) -> None:
         {
             "worker_id": "w1", "name": "researcher", "role": "researcher", "autonomy": "ask",
             "max_steps": 4, "tools": [], "task_chars": 3, "task_preview": "dig",
-            "parent_step_id": "s1",
+            "task_digest": "d" * 64, "parent_step_id": "s1",
         },
     )
     inside = _disk(writer).last_seq(PARENT)

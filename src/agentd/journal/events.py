@@ -211,6 +211,11 @@ EVENTS: dict[str, dict[str, Field]] = {
         "tools": req(list),
         "task_chars": req(int),
         "task_preview": req(str),
+        # Session 6a. sha256 of the canonical task spec: the identity of what was
+        # delegated, next to a preview that is 200 characters and must never be
+        # re-delegated from. Required, and absent from the rows written before 6a -
+        # `validate_payload` runs on the write path only, so those rows still fold.
+        "task_digest": req(str),
         "parent_step_id": opt(str, nullable=True),
     },
     "worker_finished": {

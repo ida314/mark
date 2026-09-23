@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 
+from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import Session
 from agentd.agent.subagents import SubagentResult, run_subagent
 from agentd.db import repo_agenda, repo_archive, repo_memory
@@ -42,7 +43,7 @@ async def test_a_subagent_reports_a_summary_not_a_transcript(cfg):
     )
     session = await Session.create("test")
     result = await run_subagent(
-        _spec(), "find the thing", parent_session_id=session.id,
+        _spec(), TaskSpec("researcher", "find the thing"), parent_session_id=session.id,
         parent_turn_id=session.id, parent_autonomy="assist",
         approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
     )
@@ -61,7 +62,7 @@ async def test_a_subagent_only_sees_the_tools_it_was_given(cfg):
     )
     session = await Session.create("test")
     await run_subagent(
-        _spec(tool_names=["fs_read"]), "task", parent_session_id=session.id,
+        _spec(tool_names=["fs_read"]), TaskSpec("researcher", "task"), parent_session_id=session.id,
         parent_turn_id=session.id, parent_autonomy="act",
         approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
     )
@@ -85,7 +86,8 @@ async def test_subagent_candidates_are_proposals_not_facts(cfg):
     )
     session = await Session.create("test")
     await run_subagent(
-        _spec(), "task", parent_session_id=session.id, parent_turn_id=session.id,
+        _spec(), TaskSpec("researcher", "task"), parent_session_id=session.id,
+        parent_turn_id=session.id,
         parent_autonomy="assist", approver=AutoApprover(True), registry=build_registry(),
         cfg=cfg, provider=provider,
     )
@@ -102,7 +104,8 @@ async def test_a_failed_report_does_not_lose_the_work(cfg):
     provider = Broken(turns=["I got halfway and then the model died."])
     session = await Session.create("test")
     result = await run_subagent(
-        _spec(), "task", parent_session_id=session.id, parent_turn_id=session.id,
+        _spec(), TaskSpec("researcher", "task"), parent_session_id=session.id,
+        parent_turn_id=session.id,
         parent_autonomy="assist", approver=AutoApprover(True), registry=build_registry(),
         cfg=cfg, provider=provider,
     )

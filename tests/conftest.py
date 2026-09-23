@@ -78,7 +78,12 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
         "agentd.memory.consolidate", "agentd.agent.context", "agentd.agent.loop",
         "agentd.tools.registry", "agentd.embed", "agentd.llm.roles", "agentd.cli.app",
         "agentd.journal.runtime", "agentd.journal.checkpoints", "agentd.agent.budget",
-        "agentd.agent.handoff",
+        # Session 6a. `run_subagent` falls back to `get_config()` when its caller passes no
+        # config, and the `delegate` tool is exactly that caller - it has a ToolContext and
+        # no Config. Without this entry a test that delegates through the tool writes its
+        # worker into the real `~/.local/share/agent/journal.db`, which is how this line
+        # came to be added.
+        "agentd.agent.handoff", "agentd.agent.subagents",
     ):
         import importlib
 

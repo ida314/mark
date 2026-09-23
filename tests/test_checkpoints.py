@@ -26,6 +26,7 @@ import sqlite3
 
 import pytest
 
+from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
 from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
 from agentd.journal import checkpoints as cps
@@ -254,7 +255,7 @@ def test_a_worker_in_flight_refuses_a_snapshot(on, tmp_path) -> None:
         {
             "worker_id": "w-1", "name": "researcher", "role": "subagent", "autonomy": "act",
             "max_steps": 5, "tools": [], "task_chars": 4, "task_preview": "find the thing",
-            "parent_step_id": "s1",
+            "task_digest": "d" * 64, "parent_step_id": "s1",
         },
         worker_id="w-1",
     )
@@ -295,7 +296,7 @@ async def test_a_delegating_turn_checkpoints_when_the_worker_returns_and_not_bef
     _started(RunJournal(writer, "run-1"), turn_id="caller")
     await run_subagent(
         SubagentSpec(name="researcher", prompt="be useful", tool_names=["fs_read"], max_steps=3),
-        "find the thing",
+        TaskSpec("researcher", "find the thing"),
         parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="assist",
         approver=AutoApprover(True), registry=build_registry(), cfg=on, provider=provider,
         parent_run_id="run-1", journal=writer,

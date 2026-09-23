@@ -1,4 +1,14 @@
-"""Delegation: hand a task to an ephemeral sub-agent and get back a summary."""
+"""Delegation: hand a task specification to an ephemeral sub-agent and get back a summary.
+
+This is the model's door onto `agent.delegation.delegate`, and the only thing it does on its
+own is unpack the tool call. The wire argument stays `agent` rather than becoming
+`durable_role`: `config/policy.default.yaml` matches on `args.agent.in [researcher, coder]`
+to keep a private-data turn from delegating its way around the interlock, and a rename here
+that did not land in the policy file in the same edit would open that door silently.
+
+`agent="memory"` is not a delegation at all - it packs retrieval in this process and builds
+no worker - so it is answered before a task spec is built.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +32,19 @@ from .effects import UNSAFE_WRITE
                 "type": "string",
                 "description": "A complete brief: they cannot see this conversation.",
             },
-            context={"type": "string", "description": "Extra background they need"},
+            context={
+                "type": "string",
+                "description": "Background they need and cannot see for themselves",
+            },
+            constraints={
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Limits on how they do it: what to avoid, what to prefer",
+            },
+            expected_output={
+                "type": "string",
+                "description": "What they must come back with. Defaults to the role's own.",
+            },
         ),
         "agent",
         "task",
@@ -35,16 +57,19 @@ from .effects import UNSAFE_WRITE
 )
 async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     agent_name = args["agent"]
-    task = args["task"]
-    if args.get("context"):
-        task = f"{task}\n\nBackground from the user's agent:\n{args['context']}"
 
     if agent_name == "memory":
         from ..config import get_config
         from ..memory.retrieval import pack
 
+        # Unchanged by 6a, concatenation included. This is a retrieval query and not a
+        # delegation: nothing is journaled as a worker, nothing is cached under a task spec,
+        # and rewriting the text that gets embedded would be a change to what comes back.
+        query = args["task"]
+        if args.get("context"):
+            query = f"{query}\n\nBackground from the user's agent:\n{args['context']}"
         result = await pack(
-            task, budget_tokens=get_config().retrieval.deep_budget_tokens, mode="deep",
+            query, budget_tokens=get_config().retrieval.deep_budget_tokens, mode="deep",
             session_id=ctx.session_id, turn_id=ctx.turn_id,
         )
         body = result.text or "Nothing relevant in memory."
@@ -52,11 +77,7 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
             body += "\n\nConflicts: " + "; ".join(result.conflicts)
         return ToolResult(content=body, data={"items": len(result.items)})
 
-    from ..agent.subagents import SPECS, run_subagent
-
-    spec = SPECS.get(agent_name)
-    if spec is None:
-        return ToolResult(content=f"No such sub-agent: {agent_name}", ok=False)
+    from ..agent import delegation
 
     approver = ctx.extra.get("approver")
     if approver is None:
@@ -64,17 +85,25 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
 
         approver = QueueApprover(origin=ctx.origin)
 
-    result = await run_subagent(
-        spec,
-        task,
-        parent_session_id=ctx.session_id,
-        parent_turn_id=ctx.turn_id,
-        parent_autonomy=ctx.autonomy,
-        approver=approver,
-        parent_action_id=ctx.action_id,
-        parent_run_id=ctx.run_id,
-        parent_step_id=ctx.step_id,
-    )
+    try:
+        result = await delegation.delegate(
+            agent_name,
+            args["task"],
+            relevant_context=args.get("context") or (),
+            constraints=args.get("constraints") or (),
+            expected_output=args.get("expected_output") or "",
+            parent_session_id=ctx.session_id,
+            parent_turn_id=ctx.turn_id,
+            parent_autonomy=ctx.autonomy,
+            approver=approver,
+            parent_action_id=ctx.action_id,
+            parent_run_id=ctx.run_id,
+            parent_step_id=ctx.step_id,
+        )
+    except delegation.DelegationError as exc:
+        # The model wrote a delegation that is not one. It gets the sentence, not a worker
+        # started on a guess at what it meant.
+        return ToolResult(content=str(exc), ok=False)
     payload = {
         "status": result.status,
         "summary": result.summary,

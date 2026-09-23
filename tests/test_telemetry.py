@@ -267,6 +267,7 @@ async def test_a_backend_that_reports_no_usage_says_so_instead_of_reporting_zero
 async def test_a_subagent_turn_is_recorded_under_its_own_role(cfg):
     """Sub-agents share this loop, so they are measured too. The baseline table filters on
     role; without it, a delegating turn would double-count its worker's tokens as its own."""
+    from agentd.agent.delegation import TaskSpec
     from agentd.agent.subagents import RESEARCHER, run_subagent
 
     provider = FakeProvider(
@@ -275,7 +276,7 @@ async def test_a_subagent_turn_is_recorded_under_its_own_role(cfg):
     )
     session = await Session.create("test")
     await run_subagent(
-        RESEARCHER, "look something up", parent_session_id=session.id,
+        RESEARCHER, TaskSpec("researcher", "look something up"), parent_session_id=session.id,
         parent_turn_id=session.id, parent_autonomy="assist",
         approver=AutoApprover(True), registry=_registry("fs_read"), cfg=cfg,
         provider=provider,

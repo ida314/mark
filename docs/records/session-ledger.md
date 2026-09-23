@@ -26,7 +26,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 5b | complete | 2026-09-21 | pass-05-outcome.md | `agent/handoff.py`: object, validator, generator, successor block; stored in `handoff_object` on the `turn_end` checkpoint. 806 tests green. 6 deviations, no Must not crossed. **Exit criterion partly met — 2 of the required 3 suite tasks.** |
 | 5c | complete | 2026-09-22 | pass-05-outcome.md | committed as 6113734. The manifest (with tool results in it), cold resume (`agent/rehydrate.py` + `agent journal continue`), requirement B's rerun guard, `assistant_step` archiving, `handoff_schema` 2 with a real v1 upgrade. 846 tests green. 16 mutations, all caught. A failing test found a third resume reason nobody designed - `already_handed_off`. |
 | 5d | complete | 2026-09-22 | pass-05-outcome.md | committed as ae2d6ea. `handoff_lookup`: one ref, a bounded excerpt, model-invoked only, journaled like any other tool call so Dylan's per-turn lookup count is a query and not a mechanism. 856 tests green. 8 further mutations, all caught. |
-| 6a | pending | — | — | |
+| 6a | complete | 2026-09-22 | pass-06-outcome.md | `agent/delegation.py`: `TaskSpec` (normalized in `__post_init__`, sha256 `digest`) + `delegate(...)`; `run_subagent` takes a spec and raises on a string; `worker_created` carries `task_digest`. 882 tests green. 9 deviations, no Must not crossed. **Wrote 7 events into the LIVE journal by accident** (run id `run-tool`, no effects, no checkpoints — verified); left in place, `conftest.py` monkeypatch list fixed. |
 | 6b | pending | — | — | |
 | 6c | pending | — | — | |
 | 7a | pending | — | — | **hard stop — human runs this** (harness inspection) |

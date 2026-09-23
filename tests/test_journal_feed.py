@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
 from agentd.agent.stream import STREAM_TYPES, Answer, Delta
 from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
@@ -391,7 +392,7 @@ async def test_a_workers_tool_failure_lands_in_its_transcript_where_it_happened(
     session = await Session.create("test")
     await run_subagent(
         SubagentSpec(name="researcher", prompt="be useful", tool_names=["fs_read"], max_steps=3),
-        "read the file",
+        TaskSpec("researcher", "read the file"),
         parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="assist",
         approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
         parent_run_id="run-outer", journal=writer,

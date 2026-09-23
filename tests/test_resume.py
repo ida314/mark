@@ -500,7 +500,7 @@ def test_a_process_killed_at_a_boundary_resumes_from_that_boundary(
             {
                 "worker_id": "w-1", "name": "researcher", "role": "subagent",
                 "autonomy": "act", "max_steps": 5, "tools": [], "task_chars": 4,
-                "task_preview": "find it", "parent_step_id": "s1",
+                "task_preview": "find it", "task_digest": "d" * 64, "parent_step_id": "s1",
             },
             worker_id="w-1",
         )
