@@ -42,6 +42,10 @@ packages = ["src/agentd"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# `tests/test_handoff_lookup.py` imports `tests.test_handoff_manifest`. That resolves under
+# `python -m pytest` (which puts cwd on sys.path) and not under `uv run pytest`, the command
+# CLAUDE.md documents as the gate. Pinning the path here makes the two agree.
+pythonpath = ["."]
 markers = [
     "docker: needs the docker sandbox image",
     "live: needs a reachable LLM endpoint",
