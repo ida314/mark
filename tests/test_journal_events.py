@@ -41,8 +41,10 @@ from agentd.policy.approvals import AutoApprover
 from agentd.policy.engine import engine_from_config
 from agentd.tools.registry import Registry, build_registry
 
-# The vocabulary exactly as docs/plans/pass-02-journal.md lists it. Written out rather than
-# derived, because the point of the assertion is that the code has not drifted from the pass.
+# The vocabulary exactly as docs/plans/pass-02-journal.md lists it, plus every later
+# addition, each named with the pass that added it. Written out rather than derived, because
+# the point of the assertion is that the code has not drifted from the passes: a type added
+# without a line here is a type added without anybody deciding to.
 PASS_VOCABULARY = {
     "agent_started", "agent_finished",
     "tool_requested", "tool_started", "tool_progress",
@@ -53,6 +55,10 @@ PASS_VOCABULARY = {
     "checkpoint_written",
     "effect_intended", "effect_committed",
     "run_resumed", "run_forked",
+    # Session 6c, the run-scoped result cache. The journal is where it lives, because
+    # `[checkpoints] enabled` is false in the shipped config and a cache kept only in a
+    # checkpoint would be a cache this machine has never once written.
+    "worker_result_cached", "worker_result_reused",
 }
 
 
@@ -505,15 +511,19 @@ async def test_a_workers_events_belong_to_the_run_that_created_it(cfg, tmp_path)
         "message_appended",  # its answer
         "agent_finished",
         "worker_finished",
+        # Session 6c: the result, cached for the rest of this run, tagged with the same
+        # worker so the entry can be traced back to what earned it.
+        "worker_result_cached",
     ]
     worker_id = events[0].payload["worker_id"]
     assert all(e.payload["worker_id"] == worker_id for e in events)
     assert events[0].payload["parent_step_id"] == "s2"
     assert events[0].payload["tools"] == ["fs_read"]
     assert events[1].payload["parent_turn_id"] == str(session.id)
-    assert events[-1].payload["status"] == "completed"
-    assert events[-1].payload["evidence"] == 1
-    assert events[-1].payload["report_valid"] is True
+    finished = next(e for e in events if e.type == "worker_finished")
+    assert finished.payload["status"] == "completed"
+    assert finished.payload["evidence"] == 1
+    assert finished.payload["report_valid"] is True
     # The worker's own step ids are scoped by its worker id, so step 1 of the worker and
     # step 1 of its caller are different strings in the same run.
     assert events[4].payload["step_id"] == jevents.step_id(1, worker_id=worker_id)

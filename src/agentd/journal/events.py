@@ -1,15 +1,22 @@
 """The event vocabulary: every type the journal may carry, and the shape of its payload.
 
-These seventeen types are the only vocabulary there is. Session 2c deleted the in-process
+These nineteen types are the only vocabulary there is. Session 2c deleted the in-process
 `agent/events.py` stream that used to carry the same facts under different names, so a
 frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-**Sixteen of the seventeen are emitted today** - nine wired by session 2b, the two
+Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's, and is the
+first addition to the vocabulary since it was fixed: the run-scoped result cache has to be
+foldable out of the journal, because the journal is the only durable record every run has -
+`[checkpoints] enabled` is off in the shipped config, so a cache that lived only in a
+checkpoint would be a cache that never existed on this machine.
+
+**Eighteen of the nineteen are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
 checkpointer, `run_resumed` by session 4b's `journal/resume.py`, `run_forked` by session
-4d's `journal/fork.py` and the `handoff_*` pair by session 5b's `agent/handoff.py`. The one
+4d's `journal/fork.py`, the `handoff_*` pair by session 5b's `agent/handoff.py` and the
+`worker_result_*` pair by session 6c's `agent/result_cache.py`. The one
 left is `tool_progress`, which needs a progress channel the tool surface does not have. Each
 was specified before it had a producer so that the pass which needed it filled a slot instead
 of migrating a schema, and each has a test that writes one, so none of them is a shape nobody
@@ -250,6 +257,45 @@ EVENTS: dict[str, dict[str, Field]] = {
         "duration_ms": req(int),
         "answer_preview": opt(str),
     },
+    # Session 6c. One completed worker's result, in full, under the key it is cached at.
+    # The only event type that carries a body rather than a preview of one, and the reason
+    # is that a preview cannot be served back as a result: this is the durable artifact a
+    # resume reuses instead of re-running the worker that earned it. Bounded by the final
+    # instruction's "at most 200 words".
+    #
+    # Written for `completed` results only, which is why `status` is an enum of one. An
+    # `uncertain` result is precisely the case where re-running may be the right answer, and
+    # serving one from a cache would decide that question silently and for ever.
+    "worker_result_cached": {
+        "result_key": req(str),
+        # sha256 of the canonical task spec - the same bytes as `worker_created.task_digest`,
+        # so the worker that earned a cached result is one join away.
+        "name": req(str),
+        "status": req(str, enum=("completed",)),
+        # The shape of the fields below. A stored entry written under other rules is skipped
+        # by the fold rather than read as if the rules had not moved (`worker_results.py`).
+        "entry_version": req(int),
+        "answer": req(str),
+        "evidence": req(list),
+        "actions_taken": req(list),
+        "followups": req(list),
+        "notes": req(list),
+        # Carried because reuse must not launder it: a result earned while the turn held the
+        # user's private data is still untrusted the second time it is served.
+        "tainted": req(bool),
+    },
+    # Session 6c. A delegation that was answered out of this run's cache instead of by a
+    # worker. There is no `worker_created`/`worker_finished` pair for it - nothing ran - so
+    # this is the only record that the delegation was made at all, and the only thing a
+    # `worker_results_reused` rate can be counted from.
+    "worker_result_reused": {
+        "result_key": req(str),
+        "name": req(str),
+        # The worker whose run produced what is being served. Always in this same run.
+        "source_worker_id": req(str),
+        "answer_chars": req(int),
+        "parent_step_id": opt(str, nullable=True),
+    },
     # --- conversation --------------------------------------------------------
     # One per message entering the model's message list that no other event already
     # describes: the user's message, the assembled system block, each step's assistant
@@ -413,6 +459,14 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # which happened.
         "handoff_started",
         "handoff_finished",
+        # Session 6c. Written by `agent/result_cache.py` from inside `run_subagent`:
+        # `worker_result_cached` after every completed worker, `worker_result_reused` in
+        # place of the worker a cache hit means nobody has to run. Both are reachable
+        # without any configuration - unlike `checkpoint_written`, the cache is not behind
+        # a flag, because a result that was only kept when checkpoints were on would be a
+        # result this machine never kept.
+        "worker_result_cached",
+        "worker_result_reused",
     }
 )
 

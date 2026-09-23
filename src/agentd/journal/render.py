@@ -100,6 +100,13 @@ def _worker_finished(payload: dict[str, Any]) -> Line:
     return Line(f"  {payload['name']}: {payload['status']}", "magenta")
 
 
+def _worker_result_reused(payload: dict[str, Any]) -> Line:
+    """A delegation nobody had to run. Rendered because the alternative is a silence: a
+    cache hit writes no `worker_created`, so without this line the feed would show a
+    delegation being requested and nothing happening to it."""
+    return Line(f"→ {payload['name']}: reusing this run's earlier result", "magenta")
+
+
 def _message_appended(payload: dict[str, Any]) -> Line | None:
     # Only the mid-turn system nudges, which are the ones that explain a change in the
     # agent's behaviour the user would otherwise see as inconsistency: a tool withdrawn for
@@ -158,6 +165,7 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
     "tool_failed": _tool_failed,
     "worker_created": _worker_created,
     "worker_finished": _worker_finished,
+    "worker_result_reused": _worker_result_reused,
     "message_appended": _message_appended,
     "checkpoint_written": _checkpoint_written,
     "run_resumed": _run_resumed,

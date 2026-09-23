@@ -308,8 +308,14 @@ async def test_a_delegating_turn_checkpoints_when_the_worker_returns_and_not_bef
     written = Checkpointer(writer).entries("run-1")
     assert [c.trigger for c in written] == ["worker_finished"]
     types = [e.type for e in writer.store.read("run-1")]
-    # The snapshot is announced after the worker's result, never between its events.
-    assert types.index("checkpoint_written") == types.index("worker_finished") + 1
+    # The snapshot is announced after the worker's result, never between its events. Session
+    # 6c put one event in between: the cached result, which is written *before* the boundary
+    # on purpose, so that the snapshot accounts for it rather than describing a run that had
+    # not yet earned it.
+    assert types[types.index("worker_finished") + 1 :] == [
+        "worker_result_cached", "checkpoint_written",
+    ]
+    assert written[0].worker_results[0]["answer"] == "Found it."
     writer.close()
 
 

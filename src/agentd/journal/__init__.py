@@ -110,9 +110,17 @@ from .store import (
     default_path,
     retention_from_config,
 )
+from .worker_results import (
+    CACHED,
+    ENTRY_VERSION,
+    REUSED,
+    cached_result,
+    cached_results_at,
+)
 from .writer import SYNC_PREFIXES, SYNC_TYPES, JournalWriter, is_synchronous
 
 __all__ = [
+    "CACHED",
     "CHECKPOINT_TRIGGERS",
     "CONTEXT_BASES",
     "COMPLETE",
@@ -128,6 +136,7 @@ __all__ = [
     "EFFECT_STATES",
     "EFFECT_STATUSES",
     "EMITTED_TYPES",
+    "ENTRY_VERSION",
     "EVENTS",
     "EVENT_TYPES",
     "Effect",
@@ -159,6 +168,7 @@ __all__ = [
     "POLL_INTERVAL_S",
     "PendingEvent",
     "PruneResult",
+    "REUSED",
     "RENDERED_TYPES",
     "RETRY",
     "RUN_STATUSES",
@@ -183,6 +193,8 @@ __all__ = [
     "WorkerRef",
     "announced_calls",
     "brief_args",
+    "cached_result",
+    "cached_results_at",
     "checkpoint_at",
     "close_writer",
     "default_path",

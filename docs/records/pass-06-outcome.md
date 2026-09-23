@@ -553,3 +553,265 @@ persisted with them has to be answered before it is answered by accident.
 worker (6a #2); effect events carry no `worker_id` (3b #4); `open_workers[]` has never been
 non-empty (4a #1); checkpoints are off in the shipped config; token accounting is still
 broken upstream.
+
+
+---
+
+## Session 6c — `result_key`, the run-scoped cache, and `worker_results[]`
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/agent/result_cache.py` | `result_key`, `entry_for`, `result_from_entry`, `remember`, `lookup`, `serve` | 181 |
+| `src/agentd/journal/worker_results.py` | the fold: `cached_results_at`, `cached_result`, `ENTRY_VERSION` | 90 |
+| `src/agentd/journal/events.py` | `worker_result_cached`, `worker_result_reused` | +60 −2 |
+| `src/agentd/journal/checkpoints.py` | `worker_results[]` filled from the fold at `covers_seq` | +30 −6 |
+| `src/agentd/journal/writer.py` | `worker_result_cached` is synchronous | +9 −1 |
+| `src/agentd/journal/render.py`, `journal/__init__.py` | one feed line; the new names exported | +20 |
+| `src/agentd/agent/subagents.py` | the cache is consulted before a worker starts, written after it finishes | +18 |
+| `src/agentd/agent/results.py` | `WorkerResult.reused_from` | +20 −6 |
+| `tests/test_result_cache.py` | 18 tests | 460 |
+| `tests/test_checkpoints.py`, `tests/test_journal_events.py` | the new event in three expected sequences; the vocabulary | +30 −10 |
+
+Suite **900 → 920 passing** (18 new, and the feed's per-type parametrization picks up the
+two new types). `.venv/bin/ruff check src tests scripts` clean. No tool added, removed or
+re-classified. No migration, no table, no Postgres change, no config flag: the cache is not
+behind one, because a result kept only when `[checkpoints] enabled` was on would be a result
+this machine has never once kept (0 checkpoint rows, below).
+
+**The live journal was not written to.** 1097 rows before and after, 50 runs, and the newest
+row is still 6a's `run-tool` accident.
+
+### what deviated from the plan, and why
+
+**1. The cache lives in the journal, not in the checkpoint.** The pass says "persist
+completed results keyed by `result_key`. Populate `worker_results[]` in the checkpoint" and
+does not say where the persistence is. Putting it in the checkpoint is the reading that
+fails on the shipped config: `[checkpoints] enabled` is false, and the live journal holds
+**zero checkpoint rows across all 50 runs**, so a checkpoint-only cache would have been
+inert on the one machine this runtime runs on. So `worker_result_cached` is a journal event
+and `state = fold(reduce, journal, initial)` gives the cache for free; the checkpoint's
+`worker_results[]` is a copy of that fold at `covers_seq` - an acceleration structure that
+may lag it and may never disagree with it, which is the same relationship `messages_ref` has
+with the messages.
+
+**2. Two event types were added to a vocabulary pass 2 fixed**, which
+`test_the_vocabulary_is_exactly_the_one_the_pass_specified` exists to make somebody decide
+rather than drift into. Both are named in `PASS_VOCABULARY` with the session that added them.
+`worker_result_reused` is a second type rather than a flag because a cache hit must leave no
+`worker_created` behind it - the exit criterion is read off the *absence* of that event - and
+an absence is not a record: without this event the journal would say the second delegation
+was never made, and no reuse rate could be counted from it at all.
+
+**3. `result_key(spec)` is `spec.digest` itself, not a hash of it with anything.**
+`hash(durable_role, task_spec, relevant_context_refs)` hashes three things that are all
+inside `TaskSpec.canonical()`, so any further hashing would be a second derivation over the
+same inputs, free to drift from the `task_digest` 6a already writes into `worker_created`.
+As it stands the worker that earned a cached result is one join away, on equal strings.
+
+**4. Run scope is in the query, not in the key.** Hashing `run_id` into the key was the
+other option 6a left open. It was refused: it would make cross-run reuse impossible *and*
+unobservable - the pass's *Must not* buried inside a digest where no test can check that it
+still holds, and where nothing could ever count how often two runs did identical work.
+`WHERE run_id = ?` in `worker_results.py` is a line a test reads
+(`test_a_result_cached_in_another_run_is_never_reused`), and a fork inherits nothing for the
+same reason its parent's effect ledger does not travel.
+
+**5. `worker_result_cached` is synchronous, and it is the only event type carrying a body
+rather than a preview.** Synchronous because a cache entry still in a buffer is exactly the
+entry a crash takes, and the crash is the case the cache exists for; the flush carries the
+worker's whole `worker_created ... worker_finished` bracket with it, which is one fsync for
+something that has just cost minutes. A body rather than a preview because a 200-character
+preview cannot be *served back* as a result - this is the durable artifact, not a
+description of one - and `FINAL_INSTRUCTION` already bounds an answer at 200 words.
+
+**6. The transcript is not persisted. 6b's open question 5, answered before it was answered
+by accident.** The worker's prose is already in the archive under `subagent:<role>`; a copy
+in the journal would be a second one, and every copy is another place a transcript can reach
+a prompt from. A reused result therefore has `transcript=""`, which on its own reads as a
+worker with nothing to say - so `WorkerResult.reused_from` was added, carrying the worker id
+that earned it, rendered only under `for_orchestrator(debug=True)`.
+
+**7. Candidate memories are not persisted either, and a hit proposes nothing.** The worker
+that earned the result already proposed them and the review gate already holds them.
+Re-inserting per hit is the codebase's other recurring bug - the duplicate - and it would
+let one delegation, repeated, manufacture the appearance of independent corroboration.
+
+**8. A cache hit writes no `actions` row of its own.** `repo_ops.write_action(kind="subagent")`
+describes a worker that ran, and none did. The tool call itself is still recorded by the
+executor, so the ops record of the delegation exists; what does not exist is a second
+`subagent` action claiming a worker.
+
+**9. The entry is versioned separately from the key, and a foreign version is a miss.**
+`ENTRY_VERSION` sits in the payload, not in `result_key`: the key is the identity of the
+*work* and must not move because the record of the work changed shape. An entry the fold
+cannot read is skipped - the work is done again, which is what this runtime did before the
+cache existed - rather than read as fields that may not mean what they say.
+
+### what is now true about the code that was not before
+
+- **A resumed run does not pay twice for a finished worker.** `run_subagent` consults the
+  cache before it journals anything, so a hit leaves no half-started worker to confuse the
+  measurement, and returns the same `WorkerResult` the first delegation got.
+- **Only `completed` is ever served.** `remember` refuses `blocked` (nothing happened, so
+  nothing was earned) and `uncertain` (re-running may be exactly right, and a cache would
+  decide that silently and for ever). Both refusals are tests, not comments.
+- **A reused result is still untrusted if the work that earned it was.** `tainted` is stored
+  and restored; a result earned while the turn held the user's private data does not come
+  back trusted the second time.
+- **`worker_results[]` is no longer inert.** It is the fold at `covers_seq`, and
+  `test_the_checkpoint_records_what_the_journal_has_cached` asserts the checkpoint equals
+  the fold rather than merely having something in it.
+- **The cache and the checkpoint cannot disagree**, because the checkpointer does not count
+  anything: it calls the same `cached_results_at` a delegation is served from.
+- **A delegation that was made twice is now visible and countable**, which 6a listed as the
+  thing only the digest had made observable.
+
+**Mutation-checked rather than trusted for being green.** Eleven mutations, eleven caught:
+
+- cache every status, not just `completed` → 11 failures.
+- ignore `entry_version` on read → 1.
+- cache the transcript in the entry → 15 (the journal's unknown-key rule fires first).
+- drop `run_id` from the fold's query → 2, both of them the *Must not* tests.
+- `worker_results` back to `[]` in the snapshot → 2.
+- `worker_result_cached` out of `SYNC_TYPES` → 1.
+- drop `tainted` on the way out of an entry → 2.
+- never call `remember` → 9.
+- `remember` *after* `checkpoint_at` instead of before → 2 (the checkpoint lags by a worker).
+- never emit `worker_result_reused` → 3.
+- last entry wins instead of first → 1.
+
+### the measured reuse rate
+
+`test_a_resumed_run_does_not_re_run_the_workers_it_finished` is the pass's exit criterion as
+a measurement. Three workers complete in one run; the process dies with no `agent_finished`
+and no checkpoint of its own; a second `JournalWriter` opens the same file, `resume.resume()`
+folds the run back (`state == INTERRUPTED`, `applied=True`), and the same three delegations
+are made again against a provider that raises `AssertionError` if a worker so much as starts.
+
+    delegations re-issued after the crash   3
+    workers re-run                          0
+    worker_created events, before / after   3 / 3
+    worker_result_reused events             3
+    reuse rate                              3/3 = 100%
+
+The in-run half is the same number by a different route: a redundant delegation inside one
+run is one `worker_created` and one `worker_result_reused`.
+
+**What that number is not.** It is a reuse rate on identical task specs, which is the case
+the cache is for and the only one it can serve. The live-data check says how often that case
+has occurred here so far: the journal holds **5 real `worker_created` events in 4 runs**, and
+Postgres holds **6 `kind='subagent'` actions with 6 distinct task strings** - so no run on
+this machine has ever made the same delegation twice, and no run with a completed worker has
+ever been resumed. The historical hit rate is therefore 0 of 6, and it is 0 because nothing
+has yet been repeated, not because the key missed. The first real measurement worth having is
+`worker_result_reused` counted against `worker_created` over the next weeks of use.
+
+### schemas exactly as implemented
+
+```
+result_key(spec) -> str            == TaskSpec.digest
+                                   == worker_created.task_digest, on purpose
+  = sha256 of {"spec_version", "durable_role", "task", "relevant_context",
+               "constraints", "expected_output"}, json, sort_keys, separators=(",",":")
+
+relevant_context_refs              = TaskSpec.relevant_context: normalized (NFC, whitespace),
+                                     deduplicated, sorted. Prose today, not urls and ids
+                                     (6a open question 1), which is why a *missed* hit is the
+                                     likely failure here and a false hit is not.
+scope                              the run. Enforced by `WHERE run_id = ?`, never by the key.
+```
+
+```
+agent/result_cache.py
+  result_key(spec)                         -> str
+  entry_for(spec, result)                  -> dict     the journal payload
+  result_from_entry(entry)                 -> WorkerResult   every field read by key
+  remember(rj, spec, result, *, worker_id) -> bool     False for blocked/uncertain
+  lookup(store, run_id, spec)              -> WorkerResult | None    writes nothing
+  serve(rj, spec, *, parent_step_id=None)  -> WorkerResult | None    + journals the reuse
+  ResultCacheError
+
+journal/worker_results.py
+  CACHED = "worker_result_cached"   REUSED = "worker_result_reused"   ENTRY_VERSION = 1
+  cached_results_at(store, run_id, covers_seq=None) -> tuple[dict, ...]   first entry wins
+  cached_result(store, run_id, result_key)          -> dict | None
+```
+
+The journal, two types added (no migration; the file stays at schema v3):
+
+```
+worker_result_cached   worker_id (the worker that earned it), result_key, name,
+                       status: enum ("completed",)     only completed is ever cached
+                       entry_version: int
+                       answer: str                     in full, not a preview
+                       evidence, actions_taken, followups, notes: list
+                       tainted: bool
+                       (no transcript, no report_error, no candidate_memories)
+                       synchronous - writer.SYNC_TYPES
+
+worker_result_reused   result_key, name, source_worker_id, answer_chars,
+                       parent_step_id: str|null
+                       the only record of a delegation that ran no worker
+```
+
+`WorkerResult` gained one field:
+
+```
+reused_from  str = ""   the worker whose run earned this, when it was served from the cache;
+                        "" when a worker produced it just now. In for_orchestrator(debug=True)
+                        only, and it is what explains an empty transcript on a reused result.
+```
+
+The checkpoint, one slot filled (no schema change - the column has existed since 4a):
+
+```
+checkpoint.worker_results   [ <worker_result_cached payload>, ... ]  as of covers_seq,
+                            read through worker_results.cached_results_at, never counted here
+```
+
+### deferred items, and where they went
+
+- **Cross-run reuse — barred, and not worked around.** The pass's *Must not*. Nothing here
+  knows whether the file, the repository or the web page a worker read has changed since,
+  and the fork tests pin that a rewind inherits nothing.
+- **A cache hit for `agent="memory"` — not applicable.** It builds no worker and is not a
+  delegation; Pass 8 owns that branch.
+- **Parallel workers — still not this pass's.** `open_workers[]` has never been non-empty.
+  The fold's first-entry-wins rule is written for the day it is, and is tested today.
+- **`WorkerRef.role` — still `"subagent"`, still untouched** (6a open question 2). 6c does
+  not re-delegate from a `WorkerRef`: an open worker is re-delegated by the caller re-issuing
+  its own `TaskSpec`, and only a *finished* worker's result is ever restored. So the bug did
+  not block this session and is still there.
+
+### open questions for later passes
+
+**1. The cache is keyed on prose, and the local 27B writes the prose.** 6a's open question 1,
+now with a consequence: the tool's `context` argument is a paragraph the model composes, so
+two delegations that mean the same thing miss unless it re-types them identically. The
+measurement to take before any more normalization is `worker_result_reused` against
+`worker_created` on real runs; if it is near zero while the same work is visibly being
+repeated, refs (urls, paths, fact ids) are the fix, not fuzzier matching.
+
+**2. An in-flight worker is still re-delegated from nothing.** A crash *inside* a worker
+leaves `worker_created` with no result, and the run's own record of what was asked is a
+200-character preview plus a digest - neither of which can be re-delegated from. The full
+brief is in Postgres (`subagent_message`) and in `actions.input.task_spec`, so the
+reconstruction exists but crosses a store boundary the resume path deliberately does not
+cross. Worth deciding in Pass 7 or 8, not assumed.
+
+**3. Autonomy is not part of the key, and a hit can cross a change in it.** Two delegations
+with identical specs made at different autonomy levels share a result. Nothing new *happens*
+on a hit - it is a read of this run's own history - so this is recorded rather than fixed,
+but the day a role's tool set or its cap becomes dynamic, the spec stops being the whole
+identity of the work.
+
+**4. Nothing expires.** A run that lasts hours serves a result earned in its first minute. In
+a run-scoped cache that is the definition, and it is also the staleness question the *Must
+not* deferred, one scope smaller.
+
+**5. Still open, untouched by 6c:** a worker is shown its caller's conversation while its
+brief says otherwise (6b #1); nothing requires a `completed` to cite anything (6b #2); effect
+events carry no `worker_id` (3b #4); checkpoints are off in the shipped config and have never
+been on; token accounting is still broken upstream.

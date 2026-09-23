@@ -30,10 +30,13 @@ worker; re-running an *uncertain* one re-runs whatever the worker already did to
 system before its report came back wrong. A report that cannot be read is never blocked.
 
 Transcripts: `WorkerResult.transcript` is the worker's own prose, carried for the runtime's
-use - debugging, evaluation, auditing. `for_orchestrator()` is the only function that turns
-a result into something a model is shown, and it omits the transcript and the raw decode
-error unless it is explicitly asked for them. The decode error is on that list because it is
-a pydantic `ValidationError` string, which quotes the model's own malformed output back.
+use - debugging, evaluation, auditing. It is not persisted: session 6c caches results and
+deliberately leaves the transcript out of the entry, so a result served from the cache
+carries `reused_from` and an empty transcript rather than a stale copy of one.
+`for_orchestrator()` is the only function that turns a result into something a model is
+shown, and it omits the transcript and the raw decode error unless it is asked for them.
+The decode error is on that list because it is a pydantic `ValidationError` string, which
+quotes the model's own malformed output back.
 """
 
 from __future__ import annotations
@@ -110,10 +113,16 @@ class WorkerResult:
     tainted: bool = False
     report_valid: bool = True
     notes: tuple[str, ...] = ()
-    # Runtime-only, both of them. `report_error` is a decoder's complaint and quotes the
+    # Runtime-only, all three. `report_error` is a decoder's complaint and quotes the
     # model's malformed output; `transcript` is the worker's prose in full.
     report_error: str = ""
     transcript: str = field(default="", repr=False)
+    # Session 6c. The worker whose run earned this result, when it was served from this
+    # run's result cache instead of being re-run; "" when a worker produced it just now.
+    # It exists so that an empty `transcript` on a reused result is explained rather than
+    # read as a worker that said nothing - the transcript is not cached (see
+    # `agent/result_cache.py`), and a field that says why is cheaper than a copy of it.
+    reused_from: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
@@ -141,6 +150,7 @@ class WorkerResult:
             payload["report_valid"] = self.report_valid
             payload["report_error"] = self.report_error
             payload["transcript"] = self.transcript
+            payload["reused_from"] = self.reused_from
         return payload
 
 

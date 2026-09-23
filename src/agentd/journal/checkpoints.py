@@ -46,13 +46,20 @@ enforces the *Must not*. Today it is always empty in a written checkpoint - dele
 awaited inside a step, so no worker is open at a boundary - and the day parallel workers
 exist (Pass 6) it is the field that already knows.
 
-## What is deliberately inert
+## What `worker_results[]` is, and what is still inert
 
-`worker_results[]` (Pass 6), `pending_promotions[]` and `memory_watermark` (Pass 7) are
-defined, stored and read back, and nothing writes into them. They are slots to fill, not a
-schema to migrate. The two lists are empty lists and the object is `None`, and those are
-different statements on purpose: an empty list is "there were none", a null is "this pass
-did not record one".
+Session 6c fills `worker_results[]`: every `completed` result this run has cached, as of
+`covers_seq`, read through `worker_results.cached_results_at` rather than derived here. The
+journal is the cache and this is a copy of it - the same relationship `messages_ref` has
+with the messages - so a snapshot may lag the fold and may never disagree with it, and a
+resume that ignores the checkpoint entirely still finds every result. An empty list means
+this run cached nothing, which is the truthful reading both for a run that delegated nothing
+and for one whose workers all came back `uncertain`.
+
+`pending_promotions[]` and `memory_watermark` (Pass 7) are still defined, stored and read
+back with nothing writing into them. They are slots to fill, not a schema to migrate. The
+list is an empty list and the object is `None`, and those are different statements on
+purpose: an empty list is "there were none", a null is "this pass did not record one".
 
 `handoff_object` stopped being one of them in session 5b: a `turn_end` checkpoint taken on a
 turn that generated a handoff carries it. NULL still means no handoff, and a fold tells that
@@ -75,6 +82,7 @@ from .events import CHECKPOINT_TRIGGERS
 from .ledger import INTENDED, STARTED
 from .runtime import RunJournal
 from .store import JournalError, JournalStore
+from .worker_results import cached_results_at
 from .writer import JournalWriter
 
 TRIGGERS: tuple[str, ...] = CHECKPOINT_TRIGGERS
@@ -210,7 +218,7 @@ class Checkpoint:
     effects_cursor: EffectsCursor
     # --- the slots later passes fill. Nothing here writes them; see the module docstring.
     handoff_object: dict[str, Any] | None = None   # Pass 5
-    worker_results: tuple[dict[str, Any], ...] = ()   # Pass 6
+    worker_results: tuple[dict[str, Any], ...] = ()   # Pass 6, session 6c
     pending_promotions: tuple[dict[str, Any], ...] = ()   # Pass 7
     memory_watermark: dict[str, Any] | None = None   # Pass 7
 
@@ -273,6 +281,7 @@ class _Snapshot:
     messages_ref: MessagesRef
     open_workers: tuple[WorkerRef, ...]
     effects_cursor: EffectsCursor
+    worker_results: tuple[dict[str, Any], ...] = ()
     build_ms: int = 0
 
 
@@ -372,7 +381,10 @@ class Checkpointer:
             # from "a handoff was attempted and failed" because the latter has a
             # `handoff_finished(status="failed")` in the journal in front of it.
             "handoff_object": handoff_object,
-            "worker_results": [],
+            # Session 6c. The run's completed worker results as of `covers_seq`, copied from
+            # the fold rather than accumulated here: a snapshot that counted them itself
+            # would be free to disagree with the journal about what this run has cached.
+            "worker_results": list(snap.worker_results),
             "pending_promotions": [],
             "memory_watermark": None,
         }
@@ -420,6 +432,7 @@ class Checkpointer:
             open_workers=(),
             effects_cursor=snap.effects_cursor,
             handoff_object=handoff_object,
+            worker_results=snap.worker_results,
         )
         _record_overhead(trigger, time.perf_counter() - started, size)
         return checkpoint
@@ -462,6 +475,7 @@ class Checkpointer:
             ),
             open_workers=open_workers_at(store, run_id, covers_seq),
             effects_cursor=_effects_cursor(store, run_id, covers_seq),
+            worker_results=cached_results_at(store, run_id, covers_seq),
         )
         snap.build_ms = int((time.perf_counter() - started) * 1000)
         return snap

@@ -40,6 +40,7 @@ from ..policy.approvals import Approver
 from ..policy.engine import cap_autonomy
 from ..tools.registry import Registry, get_registry
 from .delegation import TaskSpec
+from .result_cache import remember, serve
 from .results import WorkerReport, WorkerResult, unreadable_report, validate_report
 from .stream import Answer, Delta
 
@@ -162,6 +163,16 @@ async def run_subagent(
     run_id = parent_run_id or str(parent_turn_id)
     worker_id = str(action_id)
     rj = RunJournal(journal or get_writer(cfg), run_id)
+
+    # Has this run already done exactly this? A worker is the most expensive thing this
+    # runtime can do, and session 6c's cache is what stops a resume paying for one twice.
+    # Asked here, before anything is journaled or archived, because a hit must leave no
+    # worker behind it: "none of the three re-ran" is read off the absence of
+    # `worker_created`, and a half-started worker would make that unreadable. What it does
+    # leave is a `worker_result_reused` event, which is the only record a cache hit gets.
+    cached = serve(rj, task, parent_step_id=parent_step_id)
+    if cached is not None:
+        return cached
 
     restricted = Registry(tools=registry.subset(spec.tool_names, spec.tool_tags))
     loop = AgentLoop(
@@ -325,6 +336,13 @@ async def run_subagent(
             },
             worker_id=worker_id,
         )
+        # Kept for the rest of this run, if it is a `completed` result - `remember` refuses
+        # the other two, because re-running an `uncertain` worker may well be right and a
+        # cache is not the place that decision gets made. Written before the boundary below
+        # so the checkpoint this worker triggers already accounts for it: `worker_results[]`
+        # is read at `covers_seq`, and an entry written after the snapshot would be a result
+        # the checkpoint says this run had not earned.
+        remember(rj, task, result, worker_id=worker_id)
         # The worker_finished boundary, after the result is journaled and therefore after
         # this worker is closed. A nested delegation gets nothing here: the outer worker is
         # still open, and `checkpoint_at` declines a run with a worker in flight.

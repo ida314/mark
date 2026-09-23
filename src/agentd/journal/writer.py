@@ -44,8 +44,15 @@ from .store import Event, JournalStore, PendingEvent, default_path
 # until something unrelated happened, and 2c's feed would appear to stall at exactly the
 # moment the run stopped producing events. One fsync per turn buys the whole turn's tail,
 # because a synchronous append carries the buffer with it in the same transaction.
+#
+# `worker_result_cached` was added by session 6c, and it is the same bargain as
+# `agent_finished` at a much better price. A cached result that is still in a buffer is
+# exactly the result a crash loses - and the crash is the case the cache exists for - so the
+# one event that says "this worker's work need not be done twice" is written through. The
+# flush carries the worker's whole bracket (`worker_created` ... `worker_finished`) to disk
+# with it, which is one fsync for a worker that has just cost minutes.
 SYNC_PREFIXES = ("effect_",)
-SYNC_TYPES = frozenset({"checkpoint_written", "agent_finished"})
+SYNC_TYPES = frozenset({"checkpoint_written", "agent_finished", "worker_result_cached"})
 
 
 def is_synchronous(event_type: str) -> bool:
