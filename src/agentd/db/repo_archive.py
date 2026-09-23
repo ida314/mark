@@ -185,11 +185,21 @@ async def recent_messages(
     the handoff does not already state rather than re-reading what it summarised. `id` is
     the archive's own identity column and is monotonic, which is what the existing
     `ORDER BY id DESC` already relies on.
+
+    A worker's messages are excluded (session 6b). A sub-agent runs inside its caller's
+    session, so its final prose is archived here as an `assistant_message` on that session
+    like any other - and without this clause the next orchestrator turn rebuilt its history
+    from rows a worker wrote, which is "worker transcripts never enter orchestrator context"
+    broken in the one place nobody would look for it. The rows stay in the archive, which is
+    where the runtime reads them from; what changes is that nothing replays them into a
+    prompt. The actor is `subagent:<role>` (`run_subagent` sets it), and the delegating
+    model's own door to that work is the `delegate` tool's result.
     """
     rows = await fetch_all(
         """
         SELECT * FROM raw_events
         WHERE session_id = %s AND kind IN ('user_message', 'assistant_message')
+          AND actor NOT LIKE 'subagent:%%'
           AND (%s::bigint IS NULL OR id > %s::bigint)
         ORDER BY id DESC LIMIT %s
         """,
@@ -204,11 +214,16 @@ async def recent_message_sizes(session_id: UUID, limit: int = 200) -> list[tuple
     Sizes rather than bodies: choosing where a handoff's watermark goes (session 5b) needs
     to know how much each message costs and nothing about what it says, and a 42KB paste is
     not worth loading to measure.
+
+    The same set of rows `recent_messages` replays, worker exclusion included: a watermark is
+    chosen by adding these sizes up, and counting a message that will never be replayed
+    measures a conversation nobody is going to be shown.
     """
     rows = await fetch_all(
         """
         SELECT id, coalesce(length(content), 0) AS chars FROM raw_events
         WHERE session_id = %s AND kind IN ('user_message', 'assistant_message')
+          AND actor NOT LIKE 'subagent:%%'
         ORDER BY id DESC LIMIT %s
         """,
         (session_id, limit),

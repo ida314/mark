@@ -30,8 +30,9 @@ import pytest
 
 from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.results import WorkerReport
 from agentd.agent.stream import STREAM_TYPES, Answer, Delta
-from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
+from agentd.agent.subagents import SubagentSpec, run_subagent
 from agentd.ids import utcnow
 from agentd.journal import events as jevents
 from agentd.journal.feed import JournalTail, turn_ended
@@ -387,7 +388,7 @@ async def test_a_workers_tool_failure_lands_in_its_transcript_where_it_happened(
     wherever a poll happened to wake up."""
     provider = FakeProvider(
         turns=[[("fs_read", {"path": "/nope/missing.txt"})], "I could not read it."],
-        json_results=[SubagentResult(status="partial", summary="No luck.")],
+        json_results=[WorkerReport(status="blocked", answer="No luck.")],
     )
     session = await Session.create("test")
     await run_subagent(

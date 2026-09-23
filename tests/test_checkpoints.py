@@ -28,7 +28,8 @@ import pytest
 
 from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
-from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
+from agentd.agent.results import WorkerReport
+from agentd.agent.subagents import SubagentSpec, run_subagent
 from agentd.journal import checkpoints as cps
 from agentd.journal.checkpoints import (
     Checkpointer,
@@ -230,8 +231,9 @@ def test_a_workers_turn_does_not_name_itself_the_orchestrator(on, tmp_path) -> N
     worker.emit(
         "worker_finished",
         {
-            "worker_id": "w-1", "name": "researcher", "status": "ok", "summary_chars": 1,
-            "tainted": False, "artifacts": 0, "citations": 0, "candidates": 0, "tokens": 0,
+            "worker_id": "w-1", "name": "researcher", "status": "completed",
+            "answer_chars": 1, "report_valid": True, "tainted": False, "evidence": 0,
+            "actions_taken": 0, "followups": 0, "candidates": 0, "tokens": 0,
             "duration_ms": 1,
         },
     )
@@ -270,8 +272,9 @@ def test_a_worker_in_flight_refuses_a_snapshot(on, tmp_path) -> None:
     rj.emit(
         "worker_finished",
         {
-            "worker_id": "w-1", "name": "researcher", "status": "ok", "summary_chars": 1,
-            "tainted": False, "artifacts": 0, "citations": 0, "candidates": 0, "tokens": 0,
+            "worker_id": "w-1", "name": "researcher", "status": "completed",
+            "answer_chars": 1, "report_valid": True, "tainted": False, "evidence": 0,
+            "actions_taken": 0, "followups": 0, "candidates": 0, "tokens": 0,
             "duration_ms": 1,
         },
         worker_id="w-1",
@@ -290,7 +293,7 @@ async def test_a_delegating_turn_checkpoints_when_the_worker_returns_and_not_bef
     writer = _writer(tmp_path)
     provider = FakeProvider(
         turns=["I looked and found it."],
-        json_results=[SubagentResult(status="ok", summary="Found it.")],
+        json_results=[WorkerReport(status="completed", answer="Found it.")],
     )
     session = await Session.create("test")
     _started(RunJournal(writer, "run-1"), turn_id="caller")

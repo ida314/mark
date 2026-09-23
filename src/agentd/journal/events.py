@@ -95,6 +95,13 @@ EFFECT_STATUSES = ("committed", "failed", "uncertain")
 # "cancelled" is the one addition, for a consumer that stopped iterating the turn.
 RUN_STATUSES = ("completed", "abandoned", "failed", "cancelled")
 
+# A worker's terminal status (session 6b). `agent/results.py` imports this tuple rather than
+# repeating it, the way `agent/budget.py` does with CONTEXT_BASES, so the enum the journal
+# enforces and the words the runtime can produce cannot drift apart. The three are Pass 4c's
+# effect vocabulary applied to a piece of work, and the reading is the same: `blocked` means
+# it did not happen, `uncertain` means nobody can say what happened.
+WORKER_STATUSES = ("completed", "blocked", "uncertain")
+
 # How a context reading was arrived at (session 5a). "estimate" is `ids.estimate_tokens`
 # over the assembled prompt, which is what every reading says today; "provider" is reserved
 # for the day the router in front of this model stops dropping the usage chunk. "unmeasured"
@@ -221,15 +228,27 @@ EVENTS: dict[str, dict[str, Field]] = {
     "worker_finished": {
         "worker_id": req(str),
         "name": req(str),
-        "status": req(str, enum=("ok", "partial", "failed", "budget_exhausted")),
-        "summary_chars": req(int),
+        # Session 6b replaced the old ("ok", "partial", "failed", "budget_exhausted") with
+        # `agent/results.py`'s three, which are Pass 4c's words for an effect read as words
+        # for a piece of work: `blocked` is "it did not happen", `uncertain` is "something
+        # happened and nobody can say what it amounts to". Rows written before 6b carry the
+        # old four; `validate_payload` is on the write path only, so they still fold.
+        "status": req(str, enum=WORKER_STATUSES),
+        "answer_chars": req(int),
+        # Session 6b. Whether the worker returned the result schema at all, which is not
+        # readable from `status`: an unreadable report is `uncertain`, and so is a worker
+        # that reported honestly that it could not vouch for its own work.
+        "report_valid": req(bool),
         "tainted": req(bool),
-        "artifacts": req(int),
-        "citations": req(int),
+        # Counts of the result's three lists. `artifacts` and `citations` were the previous
+        # schema's and are not fields of a result any more.
+        "evidence": req(int),
+        "actions_taken": req(int),
+        "followups": req(int),
         "candidates": req(int),
         "tokens": req(int),
         "duration_ms": req(int),
-        "summary_preview": opt(str),
+        "answer_preview": opt(str),
     },
     # --- conversation --------------------------------------------------------
     # One per message entering the model's message list that no other event already

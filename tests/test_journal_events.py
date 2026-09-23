@@ -28,8 +28,9 @@ import pytest
 
 from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
+from agentd.agent.results import WorkerReport
 from agentd.agent.stream import Answer
-from agentd.agent.subagents import SubagentResult, SubagentSpec, run_subagent
+from agentd.agent.subagents import SubagentSpec, run_subagent
 from agentd.journal import events as jevents
 from agentd.journal.runtime import RunJournal
 from agentd.journal.store import JournalStore
@@ -154,8 +155,9 @@ def test_a_misspelled_field_does_not_ride_along_unvalidated(writer: JournalWrite
         rj.emit(
             "worker_finished",
             {
-                "worker_id": "w1", "name": "researcher", "status": "ok",
-                "summary_chars": 3, "tainted": False, "artifacts": 0, "citations": 0,
+                "worker_id": "w1", "name": "researcher", "status": "completed",
+                "answer_chars": 3, "report_valid": True, "tainted": False, "evidence": 0,
+                "actions_taken": 0, "followups": 0,
                 "candidate": 0, "candidates": 0, "tokens": 0, "duration_ms": 1,
             },
         )
@@ -476,7 +478,7 @@ async def test_a_workers_events_belong_to_the_run_that_created_it(cfg, tmp_path)
     their own, a fold of the caller's run would show a gap where the delegation happened."""
     provider = FakeProvider(
         turns=["I looked and found it."],
-        json_results=[SubagentResult(status="ok", summary="Found it.", citations=["file://x"])],
+        json_results=[WorkerReport(status="completed", answer="Found it.", evidence=["file://x"])],
     )
     store = JournalStore(tmp_path / "turn.db")
     writer = JournalWriter(store)
@@ -509,8 +511,9 @@ async def test_a_workers_events_belong_to_the_run_that_created_it(cfg, tmp_path)
     assert events[0].payload["parent_step_id"] == "s2"
     assert events[0].payload["tools"] == ["fs_read"]
     assert events[1].payload["parent_turn_id"] == str(session.id)
-    assert events[-1].payload["status"] == "ok"
-    assert events[-1].payload["citations"] == 1
+    assert events[-1].payload["status"] == "completed"
+    assert events[-1].payload["evidence"] == 1
+    assert events[-1].payload["report_valid"] is True
     # The worker's own step ids are scoped by its worker id, so step 1 of the worker and
     # step 1 of its caller are different strings in the same run.
     assert events[4].payload["step_id"] == jevents.step_id(1, worker_id=worker_id)
@@ -522,7 +525,7 @@ async def test_a_worker_without_a_run_lands_in_its_callers_turn(cfg, tmp_path):
     thread `parent_run_id` still writes into the run its turn opened - never into a new one
     nothing points at."""
     provider = FakeProvider(
-        turns=["done"], json_results=[SubagentResult(summary="ok")]
+        turns=["done"], json_results=[WorkerReport(status="completed", answer="ok")]
     )
     store = JournalStore(tmp_path / "turn.db")
     writer = JournalWriter(store)

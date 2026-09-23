@@ -9,7 +9,8 @@ from pydantic import ValidationError
 
 from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import Session
-from agentd.agent.subagents import SubagentResult, run_subagent
+from agentd.agent.results import WorkerReport
+from agentd.agent.subagents import run_subagent
 from agentd.db import repo_agenda, repo_archive, repo_memory
 from agentd.db.repo_archive import RawEvent
 from agentd.ids import utcnow
@@ -39,7 +40,7 @@ def _spec(**kwargs):
 async def test_a_subagent_reports_a_summary_not_a_transcript(cfg):
     provider = FakeProvider(
         turns=["I looked and found the answer."],
-        json_results=[SubagentResult(status="ok", summary="Found it.", citations=["file://x"])],
+        json_results=[WorkerReport(status="completed", answer="Found it.", evidence=["file://x"])],
     )
     session = await Session.create("test")
     result = await run_subagent(
@@ -47,8 +48,9 @@ async def test_a_subagent_reports_a_summary_not_a_transcript(cfg):
         parent_turn_id=session.id, parent_autonomy="assist",
         approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
     )
-    assert result.status == "ok"
-    assert result.summary == "Found it."
+    assert result.status == "completed"
+    assert result.answer == "Found it."
+    assert result.evidence == ("file://x",)
 
     events = await repo_archive.events_for_session(session.id)
     kinds = {e["kind"] for e in events}
@@ -58,7 +60,7 @@ async def test_a_subagent_reports_a_summary_not_a_transcript(cfg):
 
 async def test_a_subagent_only_sees_the_tools_it_was_given(cfg):
     provider = FakeProvider(
-        turns=["done"], json_results=[SubagentResult(summary="ok")]
+        turns=["done"], json_results=[WorkerReport(status="completed", answer="ok")]
     )
     session = await Session.create("test")
     await run_subagent(
@@ -75,8 +77,9 @@ async def test_subagent_candidates_are_proposals_not_facts(cfg):
     provider = FakeProvider(
         turns=["done"],
         json_results=[
-            SubagentResult(
-                summary="ok",
+            WorkerReport(
+                status="completed",
+                answer="ok",
                 candidate_memories=[
                     {"statement": "Dylan uses a DGX Spark", "confidence": 0.8,
                      "category": "biographical"}
@@ -94,23 +97,6 @@ async def test_subagent_candidates_are_proposals_not_facts(cfg):
     candidates = await repo_memory.pending_candidates()
     assert [c["proposed_by"] for c in candidates] == ["subagent:researcher"]
     assert await repo_memory.active_facts() == []  # nothing canonical yet
-
-
-async def test_a_failed_report_does_not_lose_the_work(cfg):
-    class Broken(FakeProvider):
-        async def complete_json(self, messages, schema, *, params):
-            raise RuntimeError("model went away")
-
-    provider = Broken(turns=["I got halfway and then the model died."])
-    session = await Session.create("test")
-    result = await run_subagent(
-        _spec(), TaskSpec("researcher", "task"), parent_session_id=session.id,
-        parent_turn_id=session.id,
-        parent_autonomy="assist", approver=AutoApprover(True), registry=build_registry(),
-        cfg=cfg, provider=provider,
-    )
-    assert result.status == "failed"
-    assert "halfway" in result.summary
 
 
 # --- consolidation -----------------------------------------------------------

@@ -31,7 +31,8 @@ from agentd.agent.delegation import (
     delegate,
 )
 from agentd.agent.loop import Session
-from agentd.agent.subagents import SPECS, SubagentResult, SubagentSpec, run_subagent
+from agentd.agent.results import WorkerReport
+from agentd.agent.subagents import SPECS, SubagentSpec, run_subagent
 from agentd.db import repo_archive
 from agentd.llm.fake import FakeProvider
 from agentd.llm.roles import set_provider
@@ -222,7 +223,7 @@ async def test_a_worker_cannot_be_started_from_a_bare_string(cfg):
 async def test_a_worker_is_told_the_constraints_the_delegation_put_on_it(cfg):
     provider = FakeProvider(
         turns=["I made the change."],
-        json_results=[SubagentResult(status="ok", summary="Done.")],
+        json_results=[WorkerReport(status="completed", answer="Done.")],
     )
     session = await Session.create("test")
     spec = TaskSpec(
@@ -251,7 +252,9 @@ async def test_a_worker_is_told_the_constraints_the_delegation_put_on_it(cfg):
 
 
 async def test_the_journal_says_which_specification_was_delegated(cfg, journaled):
-    provider = FakeProvider(turns=["done"], json_results=[SubagentResult(summary="ok")])
+    provider = FakeProvider(
+        turns=["done"], json_results=[WorkerReport(status="completed", answer="ok")]
+    )
     session = await Session.create("test")
     spec = TaskSpec("researcher", "compare the proposals", constraints=["primary sources only"])
     await run_subagent(
@@ -272,7 +275,10 @@ async def test_the_delegate_tool_and_a_direct_delegation_produce_the_same_spec(c
 
     provider = FakeProvider(
         turns=["done", "done"],
-        json_results=[SubagentResult(summary="ok"), SubagentResult(summary="ok")],
+        json_results=[
+            WorkerReport(status="completed", answer="ok"),
+            WorkerReport(status="completed", answer="ok"),
+        ],
     )
     set_provider(provider)
     session = await Session.create("test")
@@ -300,7 +306,7 @@ async def test_the_delegate_tool_and_a_direct_delegation_produce_the_same_spec(c
         approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
         parent_run_id="run-direct",
     )
-    assert direct.status == "ok"
+    assert direct.status == "completed"
 
     digests = [e.payload["task_digest"] for e in journaled("worker_created")]
     assert len(digests) == 2
@@ -313,7 +319,9 @@ async def test_the_delegate_tool_refuses_an_unknown_role_instead_of_starting_a_w
 
     # A provider that would notice: if the refusal ever stops happening, this test fails on
     # a scripted model rather than reaching for the real one over the network.
-    set_provider(FakeProvider(turns=["done"], json_results=[SubagentResult(summary="ok")]))
+    set_provider(
+        FakeProvider(turns=["done"], json_results=[WorkerReport(status="completed", answer="ok")])
+    )
     session = await Session.create("test")
     ctx = ToolContext(
         session_id=session.id, turn_id=session.id, autonomy="assist",

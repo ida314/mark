@@ -70,6 +70,12 @@ context_budget_tokens = 2000
 tool_result_max_chars = 8000
 autonomy = "assist"
 
+# Pass 6. Off is the shipped mode: a worker's transcript is archived and stays in the
+# runtime. Turning this on puts it in the delegating model's context along with the result,
+# which is a debugging tool and not a way to run.
+[delegation]
+debug_transcripts = false
+
 [retrieval]
 fast_budget_tokens = 2000
 deep_budget_tokens = 4000

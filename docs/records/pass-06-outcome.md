@@ -1,6 +1,6 @@
 # Pass 6 — Delegation Interface & Standardized Results — outcome
 
-Sessions completed: **6a**. 6b (result schema) and 6c (result cache) are untouched.
+Sessions completed: **6a**, **6b**. 6c (result cache) is untouched.
 
 ---
 
@@ -290,3 +290,266 @@ turns that from an observation into a saved worker.
 reconciliation still cannot say whether the orchestrator or a worker made a call (4b #6);
 `open_workers[]` has never been non-empty (4a #1); checkpoints are off in the shipped config;
 token accounting is still broken upstream.
+
+
+---
+
+## Session 6b — The result schema, validated on return
+
+### what shipped
+
+| file | what it is | lines |
+|---|---|---|
+| `src/agentd/agent/results.py` | `WorkerReport`, `WorkerResult`, `validate_report`, `unreadable_report` | 237 |
+| `src/agentd/agent/subagents.py` | the final report is decoded, validated and reconciled; new `worker_finished` payload | +60 −56 |
+| `src/agentd/tools/builtin_delegate.py` | the payload is `for_orchestrator(debug=...)`; `ok` is `completed` only | +15 −9 |
+| `src/agentd/journal/events.py` | `WORKER_STATUSES`; `worker_finished` re-keyed | +23 −6 |
+| `src/agentd/db/repo_archive.py` | `recent_messages` / `recent_message_sizes` exclude `subagent:*` actors | +15 |
+| `src/agentd/config.py`, `config/default.toml` | `[delegation] debug_transcripts` | +21 |
+| `src/agentd/agent/delegation.py`, `agent/loop.py` | return type and one stale comment | +11 −2 |
+| `tests/test_worker_results.py` | 17 tests (19 cases) | 315 |
+| six existing test modules | `WorkerReport` in place of `SubagentResult`; re-keyed journal payloads | +64 −56 |
+
+Suite **882 → 900 passing** (one test moved into the new module and was rewritten there).
+`.venv/bin/ruff check src tests scripts` clean. No tool added, removed or re-classified;
+`delegate` is still `unsafe_write`, `always_on`, and the only delegation tool. No migration,
+no table, no new archive kind. Nothing here writes memory, and no result is cached yet.
+
+**The live journal was not written to.** 1097 rows before and after, 50 runs, and the newest
+row is still 6a's `run-tool` accident from 02:59 UTC. The `agentd.agent.subagents` conftest
+entry 6a added is what makes that true for the tool-driven tests in this session.
+
+### what deviated from the plan, and why
+
+**1. Two objects, not one: `WorkerReport` (pydantic) and `WorkerResult` (frozen dataclass).**
+The pass names one schema. The split is the difference between what a worker *claims* and
+what the runtime *concluded*, and it is what makes "validate on return" mean something: the
+only way to get a `WorkerResult` is through `validate_report` or `unreadable_report`, and
+nothing decodes into one. `WorkerResult.__post_init__` refuses a status outside the three.
+
+**2. Reconciliation is after the decode, and there is no cross-field validator.** A
+`model_validator` on `WorkerReport` would raise inside `complete_json`, which gets exactly one
+repair attempt and then raises `LLMError` — so an honest "I ran out of steps" report would be
+destroyed by the schema rather than recorded as the unfinished work it is. The two rules that
+can move a status live in `validate_report`, and both of them only ever move it *towards*
+`uncertain`. Nothing there can turn a worker's bad news into good news
+(`test_the_runtime_never_upgrades_a_worker_that_reported_honestly`).
+
+**3. An unreadable report is `uncertain`, never `blocked` — this is the reconciliation with
+4c the 6a record asked for.** 4c fixed the words: `blocked` means the work did not happen and
+`paths_for(BLOCKED)` puts `retry` first; `uncertain` means nobody can say what happened and
+never offers retry for an `unsafe_write`. A worker whose report came back unreadable may
+already have run `fs_write` and the shell, so `blocked` would authorise re-running whatever it
+did. Same argument forces `budget_exhausted → uncertain` *regardless of what the worker said*,
+including when the worker said `blocked`. The old vocabulary (`ok`, `partial`, `failed`,
+`budget_exhausted`) is gone rather than mapped: `partial` had no reading in the new three that
+was not already `completed`-with-followups or `uncertain`.
+
+**4. The failure path no longer borrows the transcript for an answer.** The shipped code was
+`summary=f"Sub-agent could not produce a structured report: {exc}. Raw output: {text[:1000]}"`
+— the house bug and a transcript leak in one line: it reads to the orchestrator as a report,
+in the one case where nothing was reported. It is now a sentence this runtime wrote, with
+`report_valid=False` beside it. The decode error is kept (on the result and in the archive)
+and is **not** in what a model is shown, because a `ValidationError` string quotes the
+model's own malformed output back.
+
+**5. `worker_finished` was re-keyed, not extended.** `artifacts` and `citations` are not
+fields of a result any more, so counting them was not an option; the payload now carries
+`evidence`, `actions_taken`, `followups`, `answer_chars`, `answer_preview` and a required
+`report_valid`. The status enum changed with it. Pre-6b rows carry the old four words and the
+old keys; `validate_payload` is write-path only, nothing in `src` folds either field
+(`journal/render.py` prints `status` and `name`), and all 50 live runs still fold.
+
+**6. A leak this session found and closed, which the pass did not ask for.** A worker runs
+inside its caller's *session*, so `agent/loop.py` archives its final prose as
+`kind='assistant_message', actor='subagent:<role>'` on that session — and
+`repo_archive.recent_messages` selected by `session_id` and `kind` only. The orchestrator's
+**next turn rebuilt its history out of rows a worker wrote**: "worker transcripts never enter
+orchestrator context" broken in the place nobody would look, with no tool call involved.
+`AND actor NOT LIKE 'subagent:%'` now excludes them, and `recent_message_sizes` (the handoff
+watermark's size query) gets the same clause so the two queries measure the same set of rows.
+The rows stay in the archive; what changed is that nothing replays them into a prompt.
+
+**7. No `subagent_transcript` archive kind, after writing one and taking it out again.** The
+transcript is already retained by the runtime — the worker's own `assistant_step` rows (one
+per step) and its joined `assistant_message`, both under `subagent:<role>`. A third copy would
+have entered every `post_session` consolidation prompt, which reads *all* kinds through
+`events_for_session`, and paid tokens to extract facts from the same prose twice.
+
+**8. One new config section rather than a flag on `[agent]`.** `[delegation]
+debug_transcripts = false`. The architecture's rule names an "explicit debug mode", so the
+mode has to exist and has to do something; `test_debug_mode_is_the_one_way_a_transcript_reaches_the_delegating_model`
+fails if the flag is ignored. It switches who is *shown* the transcript, never whether it is
+kept.
+
+**9. The `delegate` tool's description changed, and `FINAL_INSTRUCTION` was rewritten field
+by field.** The tool now advertises what comes back ("a status (completed, blocked or
+uncertain), an answer, its evidence and what was done"); the final prompt names each field and
+says an empty answer is not allowed. This is the one prompt whose output is rejected rather
+than repaired, so telling the model the shape is the cheapest thing available. Pass 5's eval
+baselines were taken against the old wording.
+
+### what is now true about the code that was not before
+
+- **A worker that returns prose is a failure with a name.** `status="uncertain"`,
+  `report_valid=False`, no evidence, no actions — and the caller can tell without reading the
+  answer. Both exception shapes land there: `LLMError` after the provider's repair attempt,
+  and a `ValidationError` from a provider that validates locally.
+- **A report that decoded but says nothing is also a failure.** `answer` is required by the
+  schema *and* checked after the decode, because a model can satisfy a required string with
+  `"   "`. That is the only substantive check; nothing here fails a `completed` for having no
+  evidence (see open question 2).
+- **The journal says whether the worker reported at all.** `status` cannot carry it: an
+  unreadable report is `uncertain` and so is a worker that honestly could not vouch for its
+  own work. `report_valid` is the field that separates them, and it is required.
+- **`blocked` and `uncertain` are both `ok=False` at the tool boundary.** The executor writes
+  that as `effect.failed(...)`, and `agent/observations.py` reads a failed effect as
+  *uncertain* rather than as blocked (3b's ruling, restated at the 4/5 boundary) — so a
+  delegation that may have changed files is never offered for a silent retry.
+- **One door renders a result for a model.** `WorkerResult.for_orchestrator(debug=False)`.
+  The transcript and the decode error ride on the result for the archive and the debug path
+  without being one `json.dumps` away from a prompt.
+- **The orchestrator's history contains no worker prose**, by the query rather than by
+  convention.
+
+**Mutation-checked rather than trusted for being green.** Ten mutations, ten caught:
+
+- drop the `subagent:` clause from `recent_messages` → 1 failure.
+- the unreadable answer borrows the transcript again → 2.
+- accept an empty answer → 1.
+- ignore `budget_exhausted` → 2.
+- `for_orchestrator` always includes the transcript → 2.
+- `debug=False` hard-coded in the tool → 1.
+- `blocked` counts as a successful tool call → 1.
+- an unreadable report reads as `blocked` → 5.
+- `report_valid=True` on an unreadable report → 4.
+- (and the suite was run clean between each.)
+
+**Live-data check (the house rule: read the real rows).** This machine has **six** real
+delegations, in Postgres rather than in the journal: `raw_events` holds 6 `subagent_message`
+and 6 `subagent_result`, every one of them `payload->>'status' = 'ok'`, and `actions` holds 6
+rows with `kind='subagent'`, all `ok`, all with a non-null `output->'summary'`. So the old
+vocabulary is in the archive on six rows, nothing re-reads them, and no row anywhere has ever
+carried a null where a result field belonged.
+
+### schemas exactly as implemented
+
+```
+WorkerReport (pydantic; what the model is asked for, sent to complete_json)
+  status            Literal["completed","blocked","uncertain"]   required, no default
+  answer            str                                          required, no default
+  evidence          list[str] = []
+  actions_taken     list[str] = []
+  followups         list[str] = []
+  candidate_memories list[CandidateIn] = []        (moved here from subagents.py)
+
+WorkerResult (frozen dataclass; what the runtime concluded)
+  status            str        one of STATUSES, else ValueError at construction
+  answer            str
+  evidence          tuple[str, ...] = ()
+  actions_taken     tuple[str, ...] = ()
+  followups         tuple[str, ...] = ()
+  candidate_memories tuple[CandidateIn, ...] = ()
+  tainted           bool = False
+  report_valid      bool = True
+  notes             tuple[str, ...] = ()    runtime-authored sentences only
+  report_error      str = ""                runtime-only: quotes the model's bad output
+  transcript        str = ""                runtime-only
+  .for_orchestrator(debug=False) -> dict
+      always: status, answer, evidence, actions_taken, followups, + notes if any
+      debug:  + report_valid, report_error, transcript
+
+STATUSES = journal.events.WORKER_STATUSES = ("completed", "blocked", "uncertain")
+
+validate_report(report, *, budget_exhausted=False, tainted=False, transcript="")
+  - answer stripped; list entries stripped and blanks dropped
+  - empty answer      -> uncertain, report_valid=False, NOTE_NO_ANSWER
+  - budget_exhausted  -> uncertain (from any other status), NOTE_BUDGET
+  - nothing else. No rule promotes a status.
+
+unreadable_report(error, *, tainted=False, transcript="", budget_exhausted=False)
+  -> uncertain, report_valid=False, a runtime-written answer, NOTE_UNREADABLE
+```
+
+The journal, one existing type re-keyed (no migration; the file stays at schema v3):
+
+```
+worker_finished  worker_id, name
+                 status: enum WORKER_STATUSES          (was ok|partial|failed|budget_exhausted)
+                 answer_chars: int                     (was summary_chars)
+                 answer_preview: str|absent            (was summary_preview)
+                 report_valid: bool                    (6b, required)
+                 tainted: bool
+                 evidence: int, actions_taken: int, followups: int   (were artifacts, citations)
+                 candidates: int, tokens: int, duration_ms: int
+```
+
+Config, and the archive query:
+
+```
+[delegation]
+debug_transcripts = false     # on: the transcript rides back with the result
+
+repo_archive.recent_messages / recent_message_sizes
+  ... AND actor NOT LIKE 'subagent:%'
+```
+
+The tool, as the model now sees it (arguments unchanged from 6a):
+
+```
+delegate(agent ∈ {researcher, coder, memory}, task, context?, constraints?, expected_output?)
+  -> {"status", "answer", "evidence", "actions_taken", "followups"[, "notes"]}
+     ok = (status == "completed")
+```
+
+### deferred items, and where they went
+
+- **`result_key`, persistence and `worker_results[]` — 6c**, unchanged from 6a's note. What
+  6c caches is now a `WorkerResult`; it should cache `completed` only, because an
+  `uncertain` result is precisely the case where re-running may be the right answer and
+  serving it from a cache decides that question silently.
+- **`agent="memory"` — still untouched.** It returns retrieval text and not a result schema;
+  it builds no worker. Pass 8 owns the tool surface.
+- **Whether a `completed` must cite anything — not enforced.** See open question 2.
+- **Parallel workers — still not this session's.** `open_workers[]` has never been non-empty.
+
+### open questions for later passes
+
+**1. A worker is shown the caller's conversation, and its brief says it cannot see it.**
+Probed, not inferred: `run_subagent` builds `Session(id=parent_session_id, ...)` and
+`loop.run_turn` calls `history_messages(session.id)`, so a worker's prompt contains the
+user's earlier messages in that session. A scratch probe (a `user_message` containing "MY
+SECRET PLAN", then a delegation) found it in the worker's first prompt — while `TaskSpec.brief`
+tells the worker "you cannot see the conversation this came from". 6b closed the leak in the
+other direction (worker prose → orchestrator history) because that is the rule the pass
+states. This one is the private-data interlock's business as much as delegation's, and it is
+bigger than a query clause: giving a worker its own session id changes what
+`repo_archive.events_for_session` groups and what consolidation reads.
+
+**2. Nothing requires a `completed` result to have evidence.** The researcher's contract says
+"the source url or file path for every claim", and the schema now has a field for it, but a
+`completed` with `evidence=[]` is accepted. Mechanically enforcing it would convert the local
+27B's most common sloppiness into `uncertain` on most real runs, which is how a rule gets
+ignored. The counts are in `worker_finished.evidence` now, so the first thing to do is
+measure — how many real `completed` results cite nothing — rather than legislate.
+
+**3. `partial` had no successor and one test changed meaning.**
+`test_a_workers_tool_failure_lands_in_its_transcript_where_it_happened` scripted
+`status="partial"` and now scripts `blocked`. Nothing in the runtime produced `partial` on
+its own; it was only ever a word the model could choose. If a real worker wants to say "I did
+some of it", the shape available is `completed` with `followups`.
+
+**4. `FINAL_INSTRUCTION` and the tool description changed, so the Pass 5 eval baselines are
+not comparable across this session** for anything that measures delegation. The v2 baseline
+was taken against the old wording.
+
+**5. The transcript is a field on a dataclass that is returned to callers.** `for_orchestrator`
+is the only renderer today and the tests pin it, but nothing *structurally* stops a future
+caller from formatting `result.transcript` into a prompt — the guard is a convention plus two
+tests, not a type. If 6c starts persisting results, the question of whether the transcript is
+persisted with them has to be answered before it is answered by accident.
+
+**6. Still open, untouched by 6b:** `WorkerRef.role` is `"subagent"` for every checkpointed
+worker (6a #2); effect events carry no `worker_id` (3b #4); `open_workers[]` has never been
+non-empty (4a #1); checkpoints are off in the shipped config; token accounting is still
+broken upstream.

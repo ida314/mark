@@ -791,7 +791,7 @@ class AgentLoop:
             # "abandoned" is the step budget running out with the model still calling tools:
             # the last step is forced tool-free and carries FINAL_NUDGE, so what comes back
             # is a summary of unfinished work, not an answer. Same reading as a sub-agent's
-            # `budget_exhausted`.
+            # `uncertain` with the runtime's note on it (`agent/results.py`).
             status = "abandoned" if steps >= self.cfg.agent.max_steps else "completed"
             tele.finish(
                 status=status, steps=steps, usage=usage_total, answer=answer,

@@ -39,7 +39,8 @@ if TYPE_CHECKING:  # pragma: no cover - imports for annotations only
     from ..llm.base import LLMProvider
     from ..policy.approvals import Approver
     from ..tools.registry import Registry
-    from .subagents import SubagentResult, SubagentSpec
+    from .results import WorkerResult
+    from .subagents import SubagentSpec
 
 # Bumped when the normalization rules below change. It is inside the canonical form, so a
 # spec normalized under one set of rules can never hash to the same key as a spec
@@ -251,12 +252,16 @@ async def delegate(
     parent_step_id: str | None = None,
     journal: JournalWriter | None = None,
     provider: LLMProvider | None = None,
-) -> SubagentResult:
+) -> WorkerResult:
     """Start one durable-role worker on one task specification, and wait for its report.
 
     The five leading parameters are the delegation. Everything after them is the plumbing of
     the run the delegation is made inside, and none of it is part of the spec or of the key:
     a delegation is the same delegation whichever step of whichever turn made it.
+
+    What comes back is a `results.WorkerResult`: validated on return, and `uncertain` with
+    `report_valid=False` if the worker did not produce the result schema at all. A worker
+    that returns prose is a failure here, never a degraded success.
 
     The worker runs its whole workflow before this returns. There is no mechanism for it to
     hand control back after a tool call, which is the architecture's "subagents complete an

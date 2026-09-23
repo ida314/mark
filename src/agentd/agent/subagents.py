@@ -1,7 +1,15 @@
-"""Ephemeral workers. They do the legwork and report a summary; the main agent keeps the thread.
+"""Ephemeral workers. They do the legwork and report a result; the main agent keeps the thread.
 
 Sub-agents never write canonical memory. They return candidates with evidence, and the
 review gate decides. They also never exceed their caller's autonomy.
+
+What comes back is `results.WorkerResult` and never prose. The worker is asked for the
+result schema with no tools left to call, the answer is validated on return, and a worker
+that did not return the schema gets `uncertain` with `report_valid=False` - not a status of
+convenience with its transcript pasted into the answer, which is what this module used to
+do. The transcript is retained the way it always was - the worker's own `assistant_step`
+and `assistant_message` rows in the archive, under actor `subagent:<role>` - and the only
+thing that renders it for a model is `WorkerResult.for_orchestrator(debug=True)`.
 
 What a worker is asked to do arrives as a `delegation.TaskSpec` and never as a bare string:
 the spec is the cache key 6c persists results under, and a second way to phrase a delegation
@@ -14,10 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 from uuid import UUID
-
-from pydantic import BaseModel, Field
 
 from ..config import Config, get_config
 from ..db import repo_archive, repo_memory, repo_ops
@@ -35,23 +40,8 @@ from ..policy.approvals import Approver
 from ..policy.engine import cap_autonomy
 from ..tools.registry import Registry, get_registry
 from .delegation import TaskSpec
+from .results import WorkerReport, WorkerResult, unreadable_report, validate_report
 from .stream import Answer, Delta
-
-
-class CandidateIn(BaseModel):
-    statement: str
-    confidence: float = 0.6
-    category: str = "other"
-    evidence: list[dict] = Field(default_factory=list)
-
-
-class SubagentResult(BaseModel):
-    status: Literal["ok", "partial", "failed", "budget_exhausted"] = "ok"
-    summary: str = ""
-    artifacts: list[str] = Field(default_factory=list)
-    citations: list[str] = Field(default_factory=list)
-    candidate_memories: list[CandidateIn] = Field(default_factory=list)
-    tainted: bool = False
 
 
 @dataclass
@@ -114,10 +104,20 @@ CODER = SubagentSpec(
 
 SPECS: dict[str, SubagentSpec] = {s.name: s for s in (RESEARCHER, CODER)}
 
+# The words are the schema's, field by field, because this is the one prompt whose output is
+# rejected rather than repaired: a worker that answers this in prose has failed, and telling
+# it what shape to answer in is the cheapest thing the runtime can do about that.
 FINAL_INSTRUCTION = (
-    "Stop working now and report. Return JSON matching the schema: a summary of at most "
-    "200 words written for another agent, the artifacts you produced, your citations, and any "
-    "durable facts about the user worth remembering (with evidence). Be honest about failures."
+    "Stop working now and report. Return JSON matching the schema and nothing else.\n"
+    "status: 'completed' if you did the work, 'blocked' if you could not and can say why, "
+    "'uncertain' if you did something and cannot vouch for what it amounts to.\n"
+    "answer: what you found or did, at most 200 words, written for another agent. It may "
+    "not be empty.\n"
+    "evidence: the url, file path or identifier behind each claim.\n"
+    "actions_taken: what you changed outside yourself, one line each.\n"
+    "followups: what is still open, one line each.\n"
+    "candidate_memories: durable facts about the user worth remembering, with evidence.\n"
+    "Be honest about failures: a blocked report is worth more than an invented one."
 )
 
 
@@ -136,7 +136,7 @@ async def run_subagent(
     parent_step_id: str | None = None,
     journal: JournalWriter | None = None,
     provider=None,
-) -> SubagentResult:
+) -> WorkerResult:
     from .loop import AgentLoop, Session
 
     if not isinstance(task, TaskSpec):
@@ -179,7 +179,7 @@ async def run_subagent(
     transcript: list[str] = []
     tainted = False
     tokens = 0
-    status: str = "ok"
+    budget_exhausted = False
 
     with otel.span("subagent.run", {"subagent.name": spec.name}):
         rj.emit(
@@ -210,7 +210,7 @@ async def run_subagent(
         tail = JournalTail.on(rj.writer, run_id=run_id, worker_id=worker_id)
 
         def absorb() -> None:
-            nonlocal tokens, status
+            nonlocal tokens, budget_exhausted
             for je in tail.drain():
                 if je.type == "tool_failed":
                     transcript.append(f"\n[tool {je.payload['name']} failed]\n")
@@ -220,7 +220,7 @@ async def run_subagent(
                     # "abandoned" is the loop's word for the step budget running out with
                     # the model still calling tools, and this loop's budget is spec.max_steps.
                     if je.payload["status"] == "abandoned":
-                        status = "budget_exhausted"
+                        budget_exhausted = True
 
         async for event in loop.run_turn(
             session,
@@ -244,37 +244,56 @@ async def run_subagent(
         absorb()
         tainted = session.tainted
 
-        # Final structured report, with no tools available.
+        # Final structured report, with no tools available. Validated on return: the report
+        # is either the schema or it is a failure, and the second case never borrows the
+        # transcript to look like the first.
         text = "".join(transcript).strip()
         try:
-            result = await loop.provider.complete_json(
+            report = await loop.provider.complete_json(
                 [
                     {"role": "system", "content": spec.prompt},
                     {"role": "user", "content": f"Task: {brief}"},
                     {"role": "assistant", "content": text[:20000] or "(no output)"},
                     {"role": "user", "content": FINAL_INSTRUCTION},
                 ],
-                SubagentResult,
+                WorkerReport,
                 params=params_for(spec.role, cfg),
             )
         except Exception as exc:
-            result = SubagentResult(
-                status="failed",
-                summary=f"Sub-agent could not produce a structured report: {exc}. "
-                f"Raw output: {text[:1000]}",
+            # Everything the provider can raise: `LLMError` after its one repair attempt, a
+            # `ValidationError` from a provider that validates locally, a transport error.
+            # All of them mean the same thing here - there is no result - and none of them
+            # may be turned into one.
+            result = unreadable_report(
+                f"{type(exc).__name__}: {exc}", tainted=tainted, transcript=text,
+                budget_exhausted=budget_exhausted,
             )
-        if status == "budget_exhausted" and result.status == "ok":
-            result.status = "budget_exhausted"
-        result.tainted = result.tainted or tainted
+        else:
+            result = validate_report(
+                report, budget_exhausted=budget_exhausted, tainted=tainted, transcript=text
+            )
 
         await repo_archive.append_event(
             RawEvent(
                 kind="subagent_result", actor=f"subagent:{spec.name}",
-                content=result.summary, trust="untrusted" if result.tainted else "trusted",
+                content=result.answer, trust="untrusted" if result.tainted else "trusted",
                 session_id=parent_session_id, turn_id=parent_turn_id,
-                payload={"status": result.status, "citations": result.citations},
+                payload={
+                    "status": result.status, "evidence": list(result.evidence),
+                    "actions_taken": list(result.actions_taken),
+                    "followups": list(result.followups),
+                    "report_valid": result.report_valid,
+                    # Kept where the failure is diagnosable and out of every path that
+                    # renders a result for a model: it quotes the malformed output back.
+                    "report_error": result.report_error,
+                },
             )
         )
+        # No separate transcript row. The worker's prose is already in the archive: its own
+        # turn wrote `assistant_step` per step and `assistant_message` at the end, under
+        # actor `subagent:<role>`, and `recent_messages` is what keeps those out of the
+        # orchestrator's history. A third copy here would be the same text a third time in
+        # every consolidation prompt.
         for candidate in result.candidate_memories:
             await repo_memory.insert_candidate(
                 statement=candidate.statement,
@@ -290,11 +309,16 @@ async def run_subagent(
             "worker_finished",
             {
                 "worker_id": worker_id, "name": spec.name, "status": result.status,
-                "summary_chars": len(result.summary),
-                "summary_preview": jevents.preview(result.summary),
+                "answer_chars": len(result.answer),
+                "answer_preview": jevents.preview(result.answer),
+                # Session 6b. Whether the worker returned the result schema at all. A
+                # `worker_finished` that does not say cannot tell an uncertain result from
+                # a worker whose report was never readable.
+                "report_valid": result.report_valid,
                 "tainted": bool(result.tainted),
-                "artifacts": len(result.artifacts),
-                "citations": len(result.citations),
+                "evidence": len(result.evidence),
+                "actions_taken": len(result.actions_taken),
+                "followups": len(result.followups),
                 "candidates": len(result.candidate_memories),
                 "tokens": tokens,
                 "duration_ms": int((time.perf_counter() - started) * 1000),
@@ -311,7 +335,11 @@ async def run_subagent(
                 actor=f"subagent:{spec.name}", kind="subagent", name=spec.name,
                 status=result.status, session_id=parent_session_id, turn_id=parent_turn_id,
                 input={"task": brief, "task_spec": task.as_dict()},
-                output={"summary": result.summary[:1000], "citations": result.citations},
+                output={
+                    "answer": result.answer[:1000], "evidence": list(result.evidence),
+                    "actions_taken": list(result.actions_taken),
+                    "report_valid": result.report_valid,
+                },
                 policy={"autonomy": autonomy, "tainted": result.tainted},
                 tokens_in=tokens,
                 **otel.current_ids(),

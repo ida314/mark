@@ -70,6 +70,20 @@ class AgentConfig(BaseModel):
     autonomy: Autonomy = "assist"
 
 
+class DelegationConfig(BaseModel):
+    """Delegation (Pass 6). What a worker hands back, and who may see the rest of it.
+
+    `debug_transcripts` is the "explicit debug mode" the architecture's rule names: worker
+    transcripts never enter orchestrator context outside one. Off means the delegating model
+    is shown the result schema and nothing else; on means the worker's whole prose comes back
+    with it, which is for looking at a delegation that went wrong and is not a way to run.
+    The transcript is archived either way - this switches who is shown it, never whether it
+    is kept.
+    """
+
+    debug_transcripts: bool = False
+
+
 class RetrievalConfig(BaseModel):
     fast_budget_tokens: int = 2000
     deep_budget_tokens: int = 4000
@@ -534,6 +548,7 @@ class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embed: EmbedConfig = Field(default_factory=EmbedConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    delegation: DelegationConfig = Field(default_factory=DelegationConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

@@ -23,7 +23,8 @@ from .effects import UNSAFE_WRITE
     (
         "Hand a self-contained task to a sub-agent: 'researcher' for web or document research, "
         "'coder' for multi-file code work, 'memory' for a deep search of what you know. "
-        "You get a summary back, not their whole transcript."
+        "You get back a status (completed, blocked or uncertain), an answer, its evidence and "
+        "what was done - not their whole transcript."
     ),
     required(
         obj(
@@ -104,17 +105,22 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
         # The model wrote a delegation that is not one. It gets the sentence, not a worker
         # started on a guess at what it meant.
         return ToolResult(content=str(exc), ok=False)
-    payload = {
-        "status": result.status,
-        "summary": result.summary,
-        "artifacts": result.artifacts,
-        "citations": result.citations,
-    }
+    from ..config import get_config
+
+    # `for_orchestrator` is the only thing that renders a result for a model, and the flag is
+    # read here rather than threaded through the worker so that the switch and the render sit
+    # in one place. Off, the transcript stays in the archive.
+    payload = result.for_orchestrator(debug=get_config().delegation.debug_transcripts)
     return ToolResult(
         content=json.dumps(payload, indent=2),
-        ok=result.status in ("ok", "partial"),
+        # Only `completed` is a tool call that did what it was asked. `blocked` and
+        # `uncertain` are both `ok=False`, which the executor records as a failed effect -
+        # and `agent/observations.py` reads a failed effect as *uncertain*, never as
+        # blocked, so a delegation that may have changed files is never offered for a
+        # silent retry.
+        ok=result.status == "completed",
         trust="untrusted" if result.tainted else "trusted",
-        data={"status": result.status},
+        data={"status": result.status, "report_valid": result.report_valid},
     )
 
 
