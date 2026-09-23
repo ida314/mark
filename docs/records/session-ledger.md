@@ -608,3 +608,95 @@ its tool, at the cost of no longer measuring tool selection.
 - **`[checkpoints] enabled` is still false by default**, so `Session.resume` has nothing to
   read back and a handoff survives a process only when it is switched on. 5b's open question
   5, unchanged; turning it on is a Pass 4 decision.
+
+---
+
+## Pass 6 complete in code — and one exit criterion is recorded **not met**
+
+6a–6c are committed (`b12599f`, `abba052`, `84fc671`), 920 tests green, ruff clean, no
+*Must not* crossed in any session. The **pass-level** exit criteria are met: one delegation
+interface, a result schema validated on return, and resume reusing completed worker results
+at 3/3.
+
+**The 6b session criterion is not met, and it is not rounded up.** The pass file asks that
+*every durable role returns valid results across the Pass 1 task suite*. No session in this
+pass ran the suite, or any live model at all — every result is unit-tested and
+mutation-checked against scripted providers. `baseline-v2.md` records delegation as dead on
+this machine (three sub-agent turns, all under 110 ms, `llm_ms: 0`), and **nothing in Pass 6
+checked whether that is still true**, so the schema has never decoded a report a real 27B
+wrote. That is the first thing to do with this material, and it is cheap: the digest makes a
+repeated delegation observable for the first time.
+
+**The vocabulary grew 17 → 19** (`worker_result_cached`, `worker_result_reused`), the first
+addition since Pass 2 fixed it. Both are named in the drift guard with the pass that added
+them, so it is a decision rather than drift — but 3b treated the 17 as a line it would not
+cross (it declined to add `effect_started` and accepted a ledger-only transition instead),
+and this is the precedent moving.
+
+**The cache is in the journal, not the checkpoint.** 6c found the live journal holds **zero
+checkpoint rows across all 50 runs**, so the `worker_results[]` slot Pass 4 left inert would
+have stayed inert. `checkpoint.worker_results[]` is filled from the same fold, so the
+checkpoint still agrees with the journal — the governing invariant holds — but the working
+path does not depend on a feature that has never been switched on.
+
+**Session 6a wrote seven events into the live journal** (`run-tool`: `worker_created`,
+`agent_started`, three `message_appended`, `agent_finished`, `worker_finished`; no effect
+rows, no checkpoints, nothing in Postgres — verified directly, not taken on report).
+`run_subagent` resolves config at call time via `cfg or get_config()` and the `delegate` tool
+is exactly the caller that has none. Left in place, because the journal is append-only and a
+synthetic run sitting in it is better than a deletion from the source of truth.
+`tests/conftest.py` now monkeypatches `agentd.agent.subagents`; the underlying shape is
+unchanged and is the same shape as every other name on that list.
+
+**`uv run pytest` had not collected since `ae2d6ea`.** `tests/test_handoff_lookup.py` (5d)
+imports `tests.test_handoff_manifest`, which resolves under `python -m pytest` and not under
+the command `CLAUDE.md` names as the gate. Fixed in `817b7bf` as its own commit before any
+Pass 6 work was dispatched. **The gate command and the green suite were two different things
+for the whole of 5d**, which is worth knowing when reading 5d's test counts.
+
+## Carried forward from Pass 6
+
+- **For Dylan, the one thing in this pass that is a privacy question rather than a design
+  one:** a worker is shown its caller's conversation while `TaskSpec.brief` tells it it
+  cannot see it. Probed rather than inferred — `run_subagent` builds
+  `Session(id=parent_session_id, ...)`, so `history_messages` returns the user's earlier
+  messages, and a scratch probe found a planted secret in the worker's first prompt. 6b closed
+  the leak in the *other* direction (worker prose rebuilt into orchestrator history, via
+  `repo_archive.recent_messages`, which no delegation-path check would have caught). This one
+  is the private-data interlock's business as much as delegation's, and fixing it means giving
+  a worker its own session id — which changes what `events_for_session` groups and what
+  consolidation reads. Nobody should fix it inside a session that is doing something else.
+- **→ Pass 7, and it is now answered twice the same way:** 5a's precedent question — may a
+  pass add a *required* field to an existing event type? 6a added `task_digest` to
+  `worker_created` and 6c added two event types; all 50 live runs still fold, because
+  `validate_payload` is called on the write path only. Pass 7 faces it a third time with
+  `memory_watermark`. Three sessions have now taken the same option without anybody ruling on
+  it.
+- **→ Pass 8, measure before normalizing:** the cache is keyed on prose the local 27B
+  composes, so two delegations that mean the same thing miss unless it re-types them
+  identically. The measurement is `worker_result_reused` against `worker_created` on real
+  runs. If it is near zero while the same work is visibly repeated, the fix is refs (urls,
+  paths, fact ids), not fuzzier matching. Historical live data: 6 delegations, 6 distinct
+  task strings — nothing has ever been repeated here, so there is no rate to read yet.
+- **→ Pass 7/8, deliberately not crossed:** a crash *inside* a worker leaves `worker_created`
+  with no result, and the run's own record of what was asked is a 200-character preview plus a
+  digest. The full brief exists in Postgres (`subagent_message`, `actions.input.task_spec`),
+  but reading it crosses a store boundary the resume path does not cross.
+- **Not fixed, and left deliberately:** `checkpoints.WorkerRef.role` is `"subagent"` for every
+  worker ever checkpointed — it reads the LLM role, while the durable role is
+  `payload["name"]`. 6c does not depend on it (only a *finished* worker's result is restored;
+  an open one is re-delegated from the caller's own `TaskSpec`), and reading a key pre-6a rows
+  do not have would crash a fold.
+- **Nothing expires, and that is the definition of a run-scoped cache** — a run lasting hours
+  serves a result earned in its first minute. It is the staleness question the *Must not*
+  deferred, one scope smaller.
+- **`FINAL_INSTRUCTION` and the `delegate` tool description both changed in 6b**, so
+  `baseline-v2` is not comparable across this pass for anything that measures delegation.
+  Passes 8, 9 and 10 still compare against v2 for everything else.
+- **Unchanged by this pass:** effect events carry no `worker_id` (3b #4), so a reconciliation
+  cannot say whether the orchestrator or a worker made a call; `open_workers[]` has never been
+  non-empty; `[checkpoints] enabled` is still false; token accounting is still broken upstream
+  (`sir`'s SSE renderer sends no usage frame).
+- **Still owed before 8a, unchanged:** B11, B12, B13 and B21 under `chat`, and B23. And the
+  Pass 5 exit is still **not met** — B22 is the missing task, with the open question of
+  whether it may name its tool at the cost of no longer measuring tool selection.
