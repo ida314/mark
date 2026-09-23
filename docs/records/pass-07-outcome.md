@@ -649,3 +649,417 @@ config at call time, so there is no new path by which a test could reach the liv
   `brightspace.assignment` and `gmail-nyu.message` written by the daemon's connectors during
   this session, not by anything run here.
 - **Markdown repo**: not opened.
+
+---
+
+## Session 7c — Transactional promotion
+
+`.venv/bin/ruff check src tests scripts` clean. `.venv/bin/python -m pytest -q`: **966 passed**
+(7b's baseline was 937; +26 new tests in `tests/test_promotion.py`, +3 from the existing
+`test_journal_feed.py` parametrization over `EVENT_TYPES`). Nothing was written to the live
+stores and **migration 0010 is deliberately not applied to the live database** — counts at the
+end of this section.
+
+### what shipped
+
+| file | what it is |
+|---|---|
+| `src/agentd/memory/promotion.py` | **new.** Classification, the promotion key, the ledgered write, `complete_pending` (the resume path). The only module that writes durable memory from a run. |
+| `src/agentd/journal/promotions.py` | **new.** The fold: `classified_at`, `committed_at`, `pending_at`, `pending_summary`, `watermark_at`. |
+| `migrations/0010_promotion.sql` | **new.** One partial unique index: `candidate_promotion_key_idx` on `(structured->>'promotion_key')`. |
+| `src/agentd/db/repo_memory.py` | `insert_candidate_once(promotion_key=…) -> (id, inserted)`. |
+| `src/agentd/journal/events.py` | `promotion_classified`, `promotion_committed`, `promotion_batch` in `EVENTS` and `EMITTED_TYPES`; the docstring's counts (21→24, 20→23). |
+| `src/agentd/journal/writer.py` | the two durable promotion types added to `SYNC_TYPES`. |
+| `src/agentd/journal/checkpoints.py` | `pending_promotions[]` and `memory_watermark` filled, in the row, in the returned object and in `checkpoint_written`. |
+| `src/agentd/agent/loop.py` | `AgentLoop._promote`, called before `rec.finish` on both ways a turn ends. |
+| `src/agentd/agent/subagents.py` | the task boundary: `promote_scope` after `worker_finished`, before the worker's discard. |
+| `src/agentd/cli/app.py` | `agent journal resume` reports pending promotions and, with `--apply`, finishes them. |
+| `tests/conftest.py` | `agentd.memory.promotion` added to the call-time-config monkeypatch list. |
+| `tests/test_promotion.py` | **new**, 26 tests. |
+| `tests/test_journal_events.py` | `PASS_VOCABULARY` + the three new types. |
+
+`docs/records/effect-classification.md` is **unchanged**, on purpose: its test asserts the table
+is exactly the tool registry, and `memory_promote` is not a tool (see deviation 3).
+
+### promotion batching points
+
+Two, and there is no third. Both sit immediately in front of the discard 7b put there, so the
+last thing that reads a scope is the thing that decides what to keep from it.
+
+```
+task boundary   agent/subagents.py:~356   after worker_finished and remember(), before
+                                          discard_for_turn(worker) and before checkpoint_at
+run boundary    agent/loop.py  _promote   immediately before rec.finish, on both exits
+                                          (the normal one and the LLMError one), so ahead of
+                                          agent_finished, the discard in __exit__ and the
+                                          turn_end checkpoint
+```
+
+A worker's own `run_turn` does **not** promote: `_promote` returns early when
+`rj.worker_id is not None`. That guard is load-bearing rather than tidy, and the mutation table
+below is how that was found out — `_promote` always promotes the literal `ORCHESTRATOR` scope,
+so without the guard a worker's turn reaches into **its caller's** bucket, classifies notes it
+is not allowed to read, and writes them while the caller's turn is still running. That is the
+pass file's second *Must not* and 7b's isolation boundary broken in one statement.
+
+`promote_scope` also finishes anything an earlier boundary of the same run left pending before
+it classifies anything new, so a run cannot accumulate unwritten promotions while making more.
+
+### idempotency key derivation, and the hazard in the default shape
+
+```
+promotion_key = idempotency_key(
+    run_id   = <the run>,
+    step_id  = "promote:<scope>",          # the BOUNDARY, never the step that wrote the note
+    tool_name= "memory_promote",
+    args     = {"scope", "key", "target", "text_sha256"},
+)
+```
+
+4c's recorded hazard is the whole of this pass's bug: `step_id` is in the key shape, so *the
+same logical call made again in a later step does not collide with the row already open*. A
+resume runs in a different step from the boundary that classified the note. Under the default
+derivation the retry would get a fresh key, a fresh ledger row and — because this key is also
+the store's dedup key — a fresh row in postgres. The duplicate would arrive **through the
+mechanism meant to prevent it**, and every test in the file would still be green.
+
+So the step is the boundary. A scope has exactly one promotion boundary, so `promote:<scope>`
+is the same string in the process that classified the note and in the process that finishes
+the write afterwards. The content digest is in the args, so re-stating the same note key with a
+different sentence is a different promotion rather than a silent overwrite of something already
+durable; the target is in the args, so episodic and semantic are two promotions and not one.
+
+`_write_one` refuses to proceed if the key the ledger derives is not byte-identical to the key
+in the journal (`RuntimeError`, not a warning): the idempotency key and the dedup key must be
+one string, and the failure of that is silent in every other direction.
+
+**The ledger is not what prevents the duplicate.** `journal/ledger.py` says so itself — "It does
+not prevent anything" — and a second `intend()` under one key bumps `attempt` and lets the call
+run. The suppression is the unique index in each store, because that is the only guard still
+standing after the process holding the ledger handle has died. The ledger's job here is the one
+it has everywhere: a row, before the write, saying the write was about to happen.
+
+### results of the crash-between-classify-and-write test
+
+Both orderings, as the pass file asks. In both, the crash is a `BaseException` injected inside
+the promotion (not an `Exception` — the handled-write-failure path is a different test), the
+journal is then **re-opened off disk in a fresh `JournalWriter`** so nothing from the dead
+process survives, and the recovery is the same `complete_pending` the boundary itself calls.
+
+| ordering | injected | journal after the crash | after `complete_pending` |
+|---|---|---|---|
+| **classify, then write** — killed between the decision and the store | `_store` raises before touching postgres | 1 `promotion_classified`, 0 `promotion_committed`; `pending_at` = 1, carrying the note **in full** | 1 candidate row, `inserted=True`, `pending_at` = () — **nothing lost** |
+| **write, then record** — killed after the store and before the journal heard | `_store` runs for real, then raises | 1 candidate already in postgres; the journal still shows the promotion pending, because it cannot know | still **1** candidate row; the second attempt records `inserted=False` — **no duplicate** |
+
+The same pair for the episodic branch (`test_the_episodic_half_survives_the_same_crash_without_
+duplicating`), because the two halves dedup through different mechanisms and one of them being
+idempotent is not the property.
+
+Why the second row cannot be written twice: `raw_events_connector_dedup_idx` (migration 0007,
+already live) for the archive, and `candidate_promotion_key_idx` (migration 0010, new) for the
+candidate queue. Both are partial unique indexes over a key inside a JSON column, and
+`insert_candidate_once` mirrors `append_event_once` statement for statement — one `INSERT …
+ON CONFLICT … DO NOTHING RETURNING id`, never a `SELECT` followed by an `INSERT`, so a resume
+overlapping the process it is resuming cannot have both find it missing. `DO NOTHING` and not
+`DO UPDATE`: the review gate may already have decided about the row, and walking a decided
+candidate back to `pending` would make the gate's answer something a crash can undo.
+
+### green tests are not the evidence; these mutations are
+
+Each mutation was applied to the shipped source, the suite run, and the source restored
+(verified by `diff` against a pre-mutation copy).
+
+| mutation | tests that failed |
+|---|---|
+| `insert_candidate_once` loses its `ON CONFLICT … DO NOTHING` | 2 — including the write-then-record crash test |
+| the episodic write uses `append_event` instead of `append_event_once` | 1 — the episodic crash test |
+| the key is derived per attempt instead of per boundary (the 4c hazard, made real) | 18 — including **both** crash tests |
+| `_runtime_authored` prefilter deleted | 2 — the synthetic test and the counting identity |
+| `contains_secret` prefilter deleted | 2 — the secret test and the counting identity |
+| an unclassified note falls back to `semantic` | 3 |
+| `pending_at` stops subtracting what has already committed | 2 |
+| **the `worker_id` guard in `AgentLoop._promote` deleted** | **0, on the first run** |
+
+That last row is this session's real finding, and it is the same shape 7b's first mutation
+found. Deleting the guard broke nothing, because the scope a worker's turn would have promoted
+is empty in every other test in the file — so the test suite was agreeing with a version of the
+code in which a worker classifies and writes its caller's scratch state mid-turn.
+`test_a_workers_turn_never_promotes_its_callers_working_memory` puts a note in the caller's
+scope and scripts a classifier that would happily promote it; with the guard gone it now fails,
+and it is the only test that does.
+
+### how 7c satisfies "messages with synthetic=True are never promoted as fact"
+
+**By a check, not by the shape of the pipeline**, and this is the session where that had to
+change. 7a's finding was that today's promotion path reads `raw_events`, which has no
+`synthetic` column, so the rule held structurally — and that the protection is an accident of
+the input. This path's input is not the archive; it is a note an agent wrote through
+`working_memory_note`, so the accident does not carry over.
+
+So `memory/promotion._runtime_authored` refuses any note whose text begins with one of
+`observations.RUNTIME_MARKERS` — the same tuple `agent/handoff.py:source()` refuses on, imported
+rather than re-listed, so a third marker added there cannot be forgotten here. The refusal
+happens **before the classifier prompt is built**, so runtime text is not even shown to the
+model, and it is **counted into `promotion_batch.synthetic`** rather than filtered quietly:
+Pass 5's handoff generator counts each excluded class into the stored object for exactly this
+reason, and "none were excluded" and "nobody looked" have to be different observations.
+
+What keeps it true after this session: `promotion_batch` enforces
+`notes == synthetic + secret + discarded + unclassified + episodic + semantic` — asserted in
+`promote_scope` (a `RuntimeError`, not a log line) and again in a test — so a later filter that
+forgets to count itself breaks a test rather than a note. `ClosingMessage.synthetic` itself is
+still not reachable from anything that writes working memory: the only producer of a note is the
+tool, and the tool writes what the model passed it.
+
+### the precedent question — it did not arise, and that is the answer
+
+**No required field was added to any existing event or record type.** The third instance never
+materialised: `checkpoint_written.memory_watermark` was already `req(dict, nullable=True)` and
+`Checkpoint.pending_promotions` / `.memory_watermark` were already fields — 4a cut them, 7c only
+started writing them. What 7c added is three *new* event types, which is the additive path the
+vocabulary is designed around and which no existing row can fail.
+
+Consequently 7a's warning about readers applies and was obeyed: nothing reads
+`payload["memory_watermark"]`. The fold uses `.get` on `entry_version` and skips an entry
+written under other rules, `_loads_or_none` still turns a NULL watermark into `None`, and no
+code was added anywhere that re-validates a payload on read.
+
+### what is now true about the code that was not before
+
+- Working memory can become durable memory, and the path is crash-safe in both directions. Before
+  this session `pending_promotions` was `[]` and `memory_watermark` was `None` in every
+  checkpoint the code could write.
+- Those two slots are filled from `journal/promotions.py`, the same fold the resume acts on, so a
+  snapshot cannot claim a promotion is outstanding that the journal says landed.
+- The journal vocabulary is 24 types, 23 of them emitted. `tool_progress` is still the only one
+  with no producer.
+- `candidate_memories` has a dedup mechanism for the first time, and it is the same one the
+  archive has had since 0007.
+- There is a second live caller of the effect ledger besides `tools/executor.py`, and it is not
+  a tool. Memory writes are effects with a class, a key and a row.
+- A classification decision is a durable artifact. "Why is this in my memory" is answerable from
+  `promotion_classified.decided_by` and `.reason` without re-deriving anything.
+
+### schemas exactly as implemented
+
+```python
+# journal/events.py
+"promotion_classified": {
+    "promotion_key": req(str),   # hash(run_id, "promote:<scope>", "memory_promote", args)
+    "scope":         req(str),
+    "key":           req(str),
+    "target":        req(str, enum=("episodic", "semantic")),
+    "text":          req(str),   # in full: the scope is tombstoned at this same boundary
+    "chars":         req(int),
+    "text_sha256":   req(str),
+    "decided_by":    req(str),   # "model" | "rule:tainted" | "rule:private"
+    "reason":        req(str),
+    "session_id":    req(str),   # required, not nullable - see below
+    "tainted":       req(bool),
+    "private":       req(bool),
+    "entry_version": req(int),
+},
+"promotion_committed": {
+    "promotion_key": req(str),
+    "target":        req(str, enum=("episodic", "semantic")),
+    "ref":           req(str),              # "archive:<event_id>" | "candidate:<id>"
+    "sequence":      req(int, nullable=True),  # raw_events.id; NULL for semantic
+    "inserted":      req(bool),             # False = the dedup key said it was already there
+    "entry_version": req(int),
+},
+"promotion_batch": {
+    "scope":        req(str),
+    "boundary":     req(str, enum=("task", "run")),
+    "notes":        req(int),
+    "episodic":     req(int),
+    "semantic":     req(int),
+    "discarded":    req(int),
+    "unclassified": req(int),
+    "synthetic":    req(int),
+    "secret":       req(int),
+    "downgraded":   req(int),   # a sub-count of `episodic`, not a seventh bucket
+    "classifier":   req(str, enum=("model", "rules", "failed")),
+    "error":        req(str, nullable=True),
+},
+```
+
+`session_id` is required and not nullable because both writes need it and both degrade to a
+plausible NULL without it: an archive row with no session is in no session's event range and is
+therefore invisible to consolidation, and a candidate with no session cannot be traced to the
+conversation that produced it. It is carried on the classification event rather than
+reconstructed at write time, because the process that knew it may be gone.
+
+```python
+# journal/promotions.py                    # memory/promotion.py
+CLASSIFIED/COMMITTED/BATCH                 PROMOTION_TOOL   = "memory_promote"
+ENTRY_VERSION = 1                          PROMOTION_EFFECT_CLASS = "idempotent_write"
+PENDING_FIELDS = (promotion_key, scope,    PROPOSED_BY      = "promotion"
+  key, target, chars, text_sha256,         CONFIDENCE       = 0.6
+  session_id, entry_version)               ARCHIVE_KIND     = "working_note"
+classified_at / committed_at / pending_at  TARGETS = ("discard","episodic","semantic")
+pending_summary / watermark_at             promotion_step_id(scope) -> "promote:<scope>"
+```
+
+```python
+# the checkpoint fields, as they are now written
+Checkpoint.pending_promotions : tuple[dict, ...]   # pending_summary() per pending promotion:
+                                                   # the digest, never the body
+Checkpoint.memory_watermark   : dict | None = {
+    "entry_version": 1,
+    "pending":  int,                # a count, labelled as one, beside the positions
+    "last_seq": int,                # journal seq of the last promotion_committed
+    "episodic": {"committed": int, "last_ref": str|None, "last_sequence": int|None},
+    "semantic": {"committed": int, "last_ref": str|None, "last_sequence": None},
+}
+```
+
+`memory_watermark` answers 7a's open question 3 by saying what each store can actually support
+rather than by inventing a common shape. `raw_events` has a bigint identity column, so episodic
+gets a real monotonic `last_sequence`. `candidate_memories` has no sequence of any kind; its ids
+are uuid7 and therefore time-ordered, so semantic gets a high-water `last_ref` and an explicit
+null sequence. A count is not a position and is not used as one — `committed` sits beside the
+position, never instead of it. The watermark is still `None` for a run with no promotion events
+at all, which is 4a's distinction unchanged: an object of zeros would read as a measurement.
+
+```sql
+-- migrations/0010_promotion.sql
+CREATE UNIQUE INDEX candidate_promotion_key_idx
+  ON candidate_memories ((structured->>'promotion_key'))
+  WHERE (structured->>'promotion_key') IS NOT NULL;
+```
+
+### what deviated from the plan, and why
+
+**1. There is a migration, and the *Must not* about migrating the store does not cover it.**
+The third *Must not* is "do not migrate the physical store if a logical distinction achieves the
+same thing", and it is about bucket separation — which 7b satisfied with no DDL at all and which
+7c did not touch. This index is not a bucket, a column or a table: it is the constraint that
+makes the semantic write idempotent across processes, and no logical distinction can do that
+job, because the guard has to still be standing after the process holding every in-memory
+structure has died. Recorded rather than assumed: if Dylan reads the *Must not* more broadly,
+the alternative is a deterministic uuid5 candidate id, which needs no DDL and costs the uuid7
+time-ordering that the semantic half of the watermark depends on.
+
+**2. The classifier is a model call with deterministic pre-filters and post-hoc reconciliation.**
+The pre-filters (synthetic, secret) run before the prompt; the model answers `discard` /
+`episodic` / `semantic` per note key; the answer is decoded permissively and reconciled
+afterwards. No required fields on the response schema and no cross-field validator, deliberately:
+`complete_json` gets one repair attempt and then raises, and an `LLMError` at a turn-end boundary
+is an aborted turn. A note with no usable decision is `unclassified` and is neither promoted nor
+discarded. A classifier that raises promotes nothing and records `classifier="failed"` with the
+message.
+
+**3. `memory_promote` is an effect but not a tool, so it has no registration and no row in
+`effect-classification.md`.** The brief asked for "an effect_class declared at registration";
+there is no registration for a runtime action, and `test_every_tool_in_the_classification_table_
+declares_what_the_table_says` asserts that table is *exactly* the registry, so adding a row would
+break it. The class is declared once at the call site with the argument attached. Making it a
+registered tool would put a durable memory write on the model-facing surface, which is the door
+this pass is supposed to be closing.
+
+**4. A worker's notes are promoted at `worker_finished`, not at the worker's own `run_turn` end.**
+Both are "the task boundary" and only one of them may fire, or one note is classified twice. The
+chosen one is after the result is journaled, which matches where 7b put the discard and keeps
+`promote → discard → checkpoint` in one order at both sites.
+
+**5. Tainted and private notes are downgraded, not dropped.** 7b left both flags without a
+consumer; this is the consumer. A note classified `semantic` that was written while untrusted
+content or the user's own private data was in context is written **episodic** instead, and the
+downgrade is counted. Dropping it would lose real work; promoting it would assert a standing
+fact about the user from material nobody has reviewed. Note this is *stricter* than the existing
+consolidator, which extracts facts from private sessions — see open question 3.
+
+**6. Found and fixed en route: `classify` reached the real model endpoint from the test suite.**
+The first version called `get_provider(cfg)` (the process-global provider) instead of the
+boundary's own. Tests that end a turn with a note in working memory therefore made live
+inference calls against the local endpoint — they passed, which is exactly why it was only
+visible in a debug print. The provider is now threaded from `AgentLoop.provider` and
+`loop.provider` in `run_subagent`, which is also the correct behaviour: a worker's notes are
+classified by the model that role was given, not by whatever the process last set globally.
+
+**7. `agent journal resume` is the live caller of the recovery path.** Without one,
+`complete_pending` would be a recovery path only a test ever runs — the "green tests over a dead
+path" shape this repo keeps finding. It reports pending promotions on a dry run and finishes them
+under `--apply`, beside the orphan reconciliation that is already there. `journal/resume.py`
+itself was **not** touched: `plan()` and `resume()` are synchronous and journal-only, and putting
+a postgres write inside them would change what `--dry-run` means.
+
+### deferred items, and where they went
+
+- **`agent db migrate` has not been run.** The live database is at `0009_telegram_channel`;
+  `0010_promotion` is applied only to `agent_test`, which conftest rebuilds from the migrations
+  each session. Until Dylan runs it, a semantic promotion on the live system raises inside
+  `_store`, which `_write_one` records as a failed effect and leaves **pending** — recoverable by
+  `agent journal resume --apply` once the migration lands, and not a lost note. **This is the one
+  thing that must happen before the next live turn that keeps a note.**
+- **Nothing sweeps pending promotions across runs.** `complete_pending` is per run, and its
+  callers are the next boundary of the same run and `agent journal resume <run>`. A run that
+  crashed and is never resumed keeps its pending promotion in the journal indefinitely. A daemon
+  sweep would need a cross-run query over `promotion_classified` and belongs with whoever owns
+  the daemon's schedule.
+- **`episodes` is still empty and still unassigned.** 7a's open question 1, unchanged. The
+  episodic branch writes to `raw_events`, not to `episodes`, which is deliberate — the archive is
+  the episodic record this system actually has, and it is the half with a real position — but it
+  means the `episodes` table is still the dead bucket 7a found.
+- **`review.process_pending` is not run over promoted candidates.** They sit `pending` until
+  consolidation's next pass, like every other candidate.
+- **The `nightly` second writer of `facts`** (`consolidate.py:311-315`) — found by 7a, not
+  touched here either.
+
+### open questions for later passes
+
+**1. Promotion only runs when the model kept a note, which is almost never.** 7b's open question
+1 stands and is now load-bearing: the only producer of a note is a tool that is not `always_on`,
+so on the overwhelming majority of runs the boundary finds an empty scope and writes nothing at
+all. Every test in `tests/test_promotion.py` scripts the note by hand — deliberately, and it
+should not be read as evidence that the live path fires. **Zero promotions exist on the live
+system**, and the first real one will happen the day the model is offered the tool and uses it.
+
+**2. The classifier costs a model call at every boundary that has notes.** One per turn and one
+per worker, on the turn's critical path, with `params_for("consolidate")`. It is cheap today only
+because the bucket is almost always empty. If working memory ever fills routinely, this is a
+latency question and the answer is probably to batch at the run boundary only.
+
+**3. Promotion is stricter about private data than consolidation is.** A private note cannot
+become a semantic candidate here, while `post_session` extracts facts from private sessions
+today. One of the two is wrong and it is not this session's call. The conservative direction was
+chosen because promotion is new and the cost of being wrong is a missed candidate.
+
+**4. `CONFIDENCE = 0.6` is a guess with an argument, not a measurement.** It puts every promoted
+candidate in the gate's `needs_review` band. If that band fills with scratch notes the number
+should move, but the number that must *not* move is the one that would put promotion above
+`ACCEPT_CONFIDENCE` and make a model's note a fact unattended.
+
+**5. Two `promotion_committed` rows under one key are impossible today and unnoticed if they
+happen.** The fold keeps the first and says nothing. The store's unique index is what makes the
+case unreachable, so the day somebody writes a second promotion path without one, the journal
+will quietly agree with it.
+
+**6. `working_note` is a new archive kind, and nothing else knows about it.** It is in
+`events_for_session` (so consolidation reads it, which is the point) and out of
+`recent_messages` (so it never replays into a prompt, which is also the point). Anything else
+that switches on `kind` — the manifest, the trace CLI — has not been told.
+
+### live-data check
+
+Same protocol as 7a and 7b: the journal read from a copy taken **with its 4.1 MB `-wal`**,
+postgres through read-only `SELECT`s over `docker exec`, the markdown repo not written.
+
+- **Journal** (`~/.local/share/agent/journal.db`, via a copy): **1160 events, 53 run ids**, 24
+  effect rows, **0 checkpoints**. That is +20 events and +1 run against 7b's 1140/52, and the
+  delta is entirely one run of Dylan's own daemon: `run_id 01a0cf07-…`, `actor
+  daemon:heartbeat`, `channel daemon`, 16:09:36→16:10:02 UTC, `coursework_due` and friends.
+  Nothing from this session is in it — `working_memory%` events: **0**; `promotion%` events:
+  **0**.
+- **Postgres**: facts **47**, candidate_memories **116**, episodes **0** — all identical to 7a
+  and 7b. `candidate_memories WHERE proposed_by='promotion'`: **0**. `raw_events WHERE
+  kind='working_note'`: **0**. `raw_events` is **1482** against 7b's 1475 and `sessions` **112**
+  against 111, both from the daemon heartbeat run and the connectors, not from anything here.
+  `schema_migrations` holds **9** rows, ending at `0009_telegram_channel`: **0010 is not
+  applied**, as intended.
+- **Markdown repo**: not opened. Head is still `039033f memory: promote 6 facts, 1 goals, 0
+  procedures` and `git status --porcelain` is empty.
+- **One thing did leave this machine**, and it is deviation 6: before the provider bug was
+  found, test runs of the working-memory and promotion suites called the local model endpoint
+  for real. No store was touched and no data left the host, but the calls were made. After the
+  fix the promotion suite runs in ~2s with no network at all.

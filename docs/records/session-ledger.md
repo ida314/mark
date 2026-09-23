@@ -31,7 +31,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 6c | complete | 2026-09-22 | pass-06-outcome.md | `result_key` = `TaskSpec.digest`; the run-scoped cache is folded from two new journal events (`worker_result_cached`, `worker_result_reused`) rather than from the checkpoint, because the live journal holds 0 checkpoint rows across 50 runs. `checkpoint.worker_results[]` filled from the same fold. 920 tests green. 9 deviations. **Vocabulary 17 → 19**, both named in the drift guard. Reuse rate 3/3. No Must not crossed; cross-run reuse pinned by two tests. |
 | 7a | complete | 2026-09-23 | pass-07-outcome.md | **hard stop — human runs this** (harness inspection). Ran autonomously under the standing policy ("Harness inspection (7a): dispatch it. It writes a finding and changes no code."); the marker stands and **the finding is still Dylan's to read at the pass boundary.** No code touched, 920 tests green (baseline, unchanged), ruff clean. 1 deviation, no Must not crossed. One physical store, four record types, **no scope dimension — no task-local memory exists today**. Live-data proof: 1140 events / 52 run ids before and after, run-id lists diff empty. |
 | 7b | complete | 2026-09-23 | pass-07-outcome.md | three declared buckets (`memory/scopes.py`) + a run+agent-scoped working bucket folded out of the journal (`journal/working_memory.py`, `agent/working_memory.py`, `tools/builtin_working.py`), isolated on `(run_id, scope)` in the query — **not** on the session id, which a worker shares with its caller. Discarded at worker finish and at run end. 937 tests green. 5 deviations, no Must not crossed: no migration in either store, no new column, no checkpoint schema change. **Vocabulary 19 → 21** (`working_memory_noted`, `working_memory_discarded`), both named in the drift guard with their pass. 5 mutations, all caught — the first found a real hole, the two-worker test passed with the scope filter deleted until each worker used a distinct note key. |
-| 7c | pending | — | — | |
+| 7c | complete | 2026-09-23 | pass-07-outcome.md | promotion as journaled effects (`promotion_classified`/`promotion_committed`/`promotion_batch`), keyed on **the boundary, not the step**, batched at task (`subagents.py`, after `worker_finished`) and run (`loop.py::_promote`) boundaries; `pending_promotions[]` + `memory_watermark` filled from the same fold (`journal/promotions.py`). Both crash orderings fault-injected and green. 966 tests green. 7 deviations. Must not not crossed, **but one needs Dylan's confirmation**: there IS a migration, `migrations/0010_promotion.sql`. **Mutation finding: deleting the `worker_id` guard in `_promote` broke zero tests** — a worker's turn would have classified and written its *caller's* scope mid-turn; now killed by a named test. **Fixed en route: `classify` used the process-global `get_provider()`, so the test suite was making real calls to the live model endpoint.** |
 | 8a | pending | — | — | approval-wall question from 1c is a prerequisite here |
 | 8b | pending | — | — | |
 | 8c | pending | — | — | |
@@ -700,3 +700,99 @@ for the whole of 5d**, which is worth knowing when reading 5d's test counts.
 - **Still owed before 8a, unchanged:** B11, B12, B13 and B21 under `chat`, and B23. And the
   Pass 5 exit is still **not met** — B22 is the missing task, with the open question of
   whether it may name its tool at the cost of no longer measuring tool selection.
+
+---
+
+## Pass 7 complete — the exit criteria are met, and nothing live has ever exercised them
+
+7a–7c are committed, 966 tests green, ruff clean, no *Must not* crossed in any session.
+The three pass-level exit criteria are met: three logical memory types, worker working
+memory that is isolated, and crash-safe promotion verified by fault injection in both
+orderings rather than by inspection.
+
+**Stated rather than folded in, under the rule that a partial result is never rounded up:**
+the criteria are met *in code and under fault injection*. The live journal holds **0
+`working_memory%` events and 0 `promotion%` events** across all 53 runs. No live model has
+ever classified a promotion here, and the working bucket only fills when the model calls
+the tool. This is the same gap Pass 6 recorded against its own schema — the machinery is
+mutation-checked against scripted providers, not against a 27B that has to decide to call
+something.
+
+**The storage stayed shared, as the third *Must not* requires.** Three buckets are a logical
+distinction (`memory/scopes.py`), the working bucket is folded out of the journal like 6c's
+result cache one scope further out, and no store was migrated for bucket separation.
+
+**Two mutation findings, and both name a bug rather than a missing test.** 7b: the
+two-worker isolation test passed with the scope filter deleted, until each worker used a
+distinct note key. 7c: deleting the `worker_id` guard in `_promote` broke **zero** tests — a
+worker's turn would have classified and written its *caller's* working scope, mid-turn,
+which is two of this pass's three *Must not* lines at once. Both now have a test that dies
+when the guard goes.
+
+**The whole test suite has been calling the live model endpoint.** 7c found `classify`
+reaching for the process-global `get_provider()`, fixed it by threading the provider from
+`AgentLoop.provider`, and added `agentd.memory.promotion` to the `conftest.py` monkeypatch
+list. Worth knowing when reading any earlier pass's timings.
+
+## Owed to Dylan at the Pass 7 boundary
+
+1. **7a's finding itself.** It is the pass's `**hard stop — human runs this**` session, run
+   autonomously under the standing policy. The marker stands and the reading is still his.
+
+2. **The migration, and whether it crosses the third *Must not*.** `migrations/0010_promotion.sql`
+   adds one partial unique index on `candidate_memories.structured->>'promotion_key'`. 7c's
+   argument, which reads as sound and is his to confirm: the *Must not* forbids migrating the
+   physical store when a **logical** distinction achieves the same thing, and no logical
+   distinction can deduplicate a write across a dead process — if postgres commits and the
+   process dies before the journal hears about it, the resume writes the row again, and that
+   duplicate is exactly the silent retrieval decay the pass exists to prevent. Same shape and
+   the same partial-index trick as `raw_events_connector_dedup_idx` in `0007_connectors.sql`.
+   The 116 existing candidates carry no promotion key and are unconstrained.
+
+3. **The required-field precedent, now at its third instance and still unruled.** 5a added
+   required fields to `agent_finished`, 6a added `task_digest` to `worker_created`, 7c adds
+   `memory_watermark`. It works only because `validate_payload` runs on the write path alone
+   (one caller, `journal/runtime.py:123`) — 7a re-verified that and also found the live journal
+   **already** holds rows violating today's spec: 4/5 `worker_created` without `task_digest`,
+   5/52 `agent_finished` without the 5a context fields, and 5/5 `worker_finished` carrying
+   `status="ok"`, outside the current enum. Three sessions have now taken the same option
+   without anybody ruling on it. Nothing re-validates on read, by design.
+
+4. **`agent db migrate` has not been run; the live DB is at 0009.** Deliberately left to him
+   rather than run autonomously, because it changes his real database. Until it is run, a
+   semantic promotion on the live system **fails and stays pending** — recoverable via
+   `agent journal resume --apply`, not lost. This is the one action owed before the new path
+   works live.
+
+## Carried forward from Pass 7
+
+- **Nothing sweeps pending promotions across runs.** `complete_pending` is called only by the
+  next boundary of the *same* run and by the resume CLI. A run that dies at its last boundary
+  leaves a promotion pending until someone resumes that specific run.
+- **`episodes` is empty and has always been** — 0 rows after 111 ok `post_session` runs,
+  because `ExtractedEpisode` has no required fields and the stats dict never counts the
+  omission. So the three buckets are one live, one dead and one new. 7a found it, 7b was told
+  not to fix it, and it is a consolidation behaviour change that belongs to whoever owns that
+  path. **The episodic third of this pass is untested against real data because there is no
+  real data.**
+- **The `synthetic=True` rule still holds structurally rather than by a check.** The promotion
+  path reads `raw_events`, which has no `synthetic` column, so nothing can promote a runtime
+  message today — and nothing stops a future session archiving a message list and breaking it
+  silently. The guard Dylan asked for is an invariant of the current data flow, not an
+  assertion.
+- **`memory_promote` is an effect, not a registered tool**, so it is deliberately absent from
+  `effect-classification.md`, whose test asserts the table equals the registry.
+- **Vocabulary 21 → 24** across this pass (`working_memory_noted`, `working_memory_discarded`,
+  `promotion_classified`, `promotion_committed`, `promotion_batch` — 19 → 24 counting 7b's
+  two). Pass 2 fixed it at 17 and 3b declined to add an 18th; that line has now moved three
+  times, each time named in the drift guard with its pass.
+- **`[checkpoints] enabled` is still false**, so `pending_promotions[]` and `memory_watermark`
+  are filled from the fold and the checkpoint agrees with the journal by construction — but on
+  this machine the checkpoint copy has still never been written. Unchanged since Pass 4.
+- **Still owed before 8a, unchanged by this pass:** B11, B12, B13 and B21 under `chat`, and
+  B23. Passes 8, 9 and 10 compare against `baseline-v2`, not v1. **The Pass 5 exit is still
+  not met** — B22 is the missing task, with the open question of whether it may name its tool
+  at the cost of no longer measuring tool selection.
+- **Pass 8 reverts to supervised mode** by the note at the foot of `orchestrator-prompt-auto.md`:
+  each 8x session moves a capability family, and a regression is easier to catch at the session
+  boundary than four sessions later.

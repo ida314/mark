@@ -357,6 +357,75 @@ async def insert_candidate(
     return cid
 
 
+async def insert_candidate_once(
+    *,
+    promotion_key: str,
+    statement: str,
+    proposed_by: str,
+    kind: str = "fact",
+    confidence: float = 0.6,
+    structured: dict[str, Any] | None = None,
+    evidence: list[dict] | None = None,
+    source_trust: str = "trusted",
+    session_id: UUID | None = None,
+    turn_id: UUID | None = None,
+    embedding: list[float] | None = None,
+) -> tuple[UUID, bool]:
+    """Propose a candidate, unless this promotion already proposed one.
+
+    Returns `(candidate_id, inserted)`. `inserted=False` means the row was already there
+    under this promotion key, which is the answer a resume needs: the write it could not
+    prove had happened did happen, so there is nothing to do and nothing to duplicate.
+
+    The same shape as `repo_archive.append_event_once` and for the same reason - one
+    statement rather than a SELECT and then an INSERT, so that two attempts racing (a resume
+    overlapping the process it is resuming) cannot both find it missing. `DO NOTHING` rather
+    than `DO UPDATE`: a promotion that already landed is not re-stated, because the review
+    gate may already have decided about it and walking a decided row back to `pending` would
+    make the gate's answer a thing a crash can undo.
+
+    `promotion_key` is written into `structured`, where `candidate_promotion_key_idx`
+    (migration 0010) constrains it. It is put there by this function rather than trusted
+    from the caller's `structured` dict, so the constrained value and the argument cannot
+    be two different strings.
+    """
+    cid = uuid7()
+    body = dict(structured or {})
+    body["promotion_key"] = promotion_key
+    async with connection() as conn:
+        cur = await conn.execute(
+            """
+            INSERT INTO candidate_memories
+              (id, proposed_by, session_id, turn_id, kind, statement, structured, confidence,
+               evidence, source_trust, embedding)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT ((structured->>'promotion_key'))
+              WHERE (structured->>'promotion_key') IS NOT NULL
+            DO NOTHING
+            RETURNING id
+            """,
+            (
+                cid, proposed_by, session_id, turn_id, kind, statement,
+                json.dumps(body, default=str), confidence,
+                json.dumps(evidence or [], default=str), source_trust, embedding,
+            ),
+        )
+        row = await cur.fetchone()
+        if row is not None:
+            return cid, True
+        found = await conn.execute(
+            "SELECT id FROM candidate_memories WHERE structured->>'promotion_key' = %s",
+            (promotion_key,),
+        )
+        existing = await found.fetchone()
+    if existing is None:  # pragma: no cover - only reachable if the index is missing
+        raise RuntimeError(
+            f"candidate for promotion {promotion_key[:12]} was neither inserted nor found; "
+            "migration 0010 (candidate_promotion_key_idx) is probably not applied"
+        )
+    return existing["id"], False
+
+
 async def pending_candidates(limit: int = 200) -> list[dict]:
     return await fetch_all(
         "SELECT * FROM candidate_memories WHERE status = 'pending' ORDER BY created_at LIMIT %s",

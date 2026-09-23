@@ -35,6 +35,7 @@ from ..journal.feed import JournalTail
 from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
 from ..llm.roles import get_provider, params_for
+from ..memory.promotion import promote_scope
 from ..obs import otel
 from ..policy.approvals import Approver
 from ..policy.engine import cap_autonomy
@@ -350,6 +351,28 @@ async def run_subagent(
         # state it used to get there is not the caller's to read. After `worker_finished`
         # and before the checkpoint below, so a snapshot of this boundary already says this
         # worker left nothing behind.
+        #
+        # Session 7c. The task boundary the pass file names, and the last thing that reads
+        # this scope before it is emptied: classify what the worker kept and write what is
+        # worth keeping. Before the discard rather than after it - a boundary that promoted
+        # from a tombstoned scope would find nothing and report success - and before the
+        # checkpoint, so the snapshot of this boundary carries the promotion the worker
+        # earned rather than one the very next event makes.
+        #
+        # A worker's own `run_turn` does not promote (`agent/loop.py` checks `worker_id`),
+        # so this is the only batch a worker's notes go through and there is no path on
+        # which one note is classified twice.
+        await promote_scope(
+            rj.for_worker(worker_id),
+            scope=worker_id,
+            session_id=session.id,
+            boundary="task",
+            cfg=cfg,
+            # The worker's own provider - `loop.provider`, which is the one `run_subagent`
+            # resolved for this role - so a worker's notes are classified by the model that
+            # wrote them rather than by whatever the process last set globally.
+            provider=loop.provider,
+        )
         discard_for_turn(rj.for_worker(worker_id), "worker_finished")
         # The worker_finished boundary, after the result is journaled and therefore after
         # this worker is closed. A nested delegation gets nothing here: the outer worker is

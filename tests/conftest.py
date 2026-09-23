@@ -84,6 +84,12 @@ async def cfg(pg_dsn: str, base_config: Config, tmp_path: Path) -> Config:
         # worker into the real `~/.local/share/agent/journal.db`, which is how this line
         # came to be added.
         "agentd.agent.handoff", "agentd.agent.subagents",
+        # Session 7c. `memory/promotion.py` resolves config at call time the same way -
+        # `promote_scope` and `complete_pending` both take `cfg: Config | None = None` and
+        # fall back to `get_config()`, and the run boundary in `agent/loop.py` is one of the
+        # callers that passes one. Without this entry a test that ends a turn with a note in
+        # working memory reaches the real provider and the real memory store.
+        "agentd.memory.promotion",
     ):
         import importlib
 

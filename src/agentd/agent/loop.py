@@ -27,6 +27,7 @@ from ..journal.runtime import RunJournal, get_writer
 from ..journal.writer import JournalWriter
 from ..llm.base import Finish, LLMError, ReasoningDelta, TextDelta, ToolCallDone
 from ..llm.roles import get_provider, params_for
+from ..memory.promotion import promote_scope
 from ..obs import otel, telemetry
 from ..policy.approvals import Approver, AutoApprover
 from ..policy.engine import PolicyEngine, engine_from_config
@@ -39,7 +40,7 @@ from . import context as ctxmod
 from . import handoff as handoff_mod
 from .observations import RUNTIME_NOTE
 from .stream import Answer, Delta, Notice, TurnStream
-from .working_memory import WorkingMemory, discard_for_turn
+from .working_memory import ORCHESTRATOR, WorkingMemory, discard_for_turn
 
 # The runtime's two mid-turn notes to the model, and why they are `user` messages carrying
 # a marker rather than `system` messages.
@@ -588,6 +589,10 @@ class AgentLoop:
                         status="failed", steps=steps, usage=usage_total, answer="",
                         error=str(exc), trace_ids=trace_ids,
                     )
+                    # The run boundary fires on a failed turn too. The notes are real
+                    # work whatever the model call did at the end, and the scope is
+                    # discarded either way as this record unwinds.
+                    await self._promote(rj, session)
                     rec.finish(
                         status="failed", steps=steps, answer="", usage=usage_total,
                         usage_reported=tele.usage_reported, error=str(exc),
@@ -840,11 +845,51 @@ class AgentLoop:
                 if handoff is not None:
                     rec.handoff_object = handoff.as_dict()
                     session.handoff = handoff
+            # Session 7c. The run boundary: the pass file's "task or run boundaries, never
+            # opportunistically mid-task", at the only place in a turn where the work is
+            # over and the scope still exists.
+            await self._promote(rj, session)
             rec.finish(
                 status=status, steps=steps, answer=answer, usage=usage_total,
                 usage_reported=tele.usage_reported,
             )
             yield Answer(turn_id=str(turn_id), text=answer)
+
+    async def _promote(self, rj: RunJournal, session: Session) -> None:
+        """The run boundary: classify this turn's working memory and write what it keeps.
+
+        Session 7c. Called immediately before `rec.finish` on both ways a turn ends, so it
+        is inside the turn's own unwind and ahead of `agent_finished`, the discard in
+        `_TurnRecord.__exit__` and the `turn_end` checkpoint. That ordering is the point:
+        the scope is still readable, and the snapshot that follows accounts for what the
+        promotion wrote.
+
+        Only for a turn that is not a worker's. A worker's notes are promoted at its own
+        task boundary in `agent/subagents.py`, after its result is journaled; promoting them
+        here as well would classify one note twice, and the second batch would be writing
+        from a scope its own caller is about to discard.
+
+        The two failures this can actually have are both handled inside `promote_scope` and
+        both leave a record: a classifier that will not answer is `promotion_batch` with
+        `classifier="failed"` and the message, and a store that will not take the write is a
+        ledger row at `failed` with the promotion left *pending* in the journal for a later
+        boundary or a resume to finish. Neither loses a note. What is deliberately not
+        wrapped here is the journal itself - an append that fails is the one failure this
+        codebase makes loud, and a promotion nothing recorded is exactly the state the rest
+        of this file exists to make impossible.
+        """
+        if rj.worker_id is not None:
+            return
+        await promote_scope(
+            rj,
+            scope=ORCHESTRATOR,
+            session_id=session.id,
+            boundary="run",
+            cfg=self.cfg,
+            # This turn's provider, not the process's. A loop built around a scripted or a
+            # role-specific model must classify its own notes with it.
+            provider=self.provider,
+        )
 
     def _with_lookup(
         self, tools: list[Any], handoff: handoff_mod.Handoff | None

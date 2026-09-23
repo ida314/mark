@@ -56,10 +56,15 @@ resume that ignores the checkpoint entirely still finds every result. An empty l
 this run cached nothing, which is the truthful reading both for a run that delegated nothing
 and for one whose workers all came back `uncertain`.
 
-`pending_promotions[]` and `memory_watermark` (Pass 7) are still defined, stored and read
-back with nothing writing into them. They are slots to fill, not a schema to migrate. The
-list is an empty list and the object is `None`, and those are different statements on
-purpose: an empty list is "there were none", a null is "this pass did not record one".
+Session 7c fills `pending_promotions[]` and `memory_watermark`, the two slots 4a cut and
+left inert. Both come out of `journal/promotions.py` - the same fold `memory/promotion.py`
+acts on - so a snapshot cannot claim a promotion is outstanding that the journal says
+landed. `pending_promotions[]` is every promotion this run classified and has not yet
+written, which is exactly what a crash between the decision and the write leaves behind;
+the watermark is where its committed episodic and semantic writes reached. An empty list
+still means "there were none" and a null watermark still means "this run recorded none",
+which are different statements and stay so: a run that promoted nothing has no positions to
+report, and an object of zeros would read as a measurement of two that are actually absent.
 
 `handoff_object` stopped being one of them in session 5b: a `turn_end` checkpoint taken on a
 turn that generated a handoff carries it. NULL still means no handoff, and a fold tells that
@@ -80,6 +85,7 @@ from ..config import Config, get_config
 from ..ids import utcnow, uuid7
 from .events import CHECKPOINT_TRIGGERS
 from .ledger import INTENDED, STARTED
+from .promotions import pending_at, pending_summary, watermark_at
 from .runtime import RunJournal
 from .store import JournalError, JournalStore
 from .worker_results import cached_results_at
@@ -216,11 +222,11 @@ class Checkpoint:
     messages_ref: MessagesRef
     open_workers: tuple[WorkerRef, ...]
     effects_cursor: EffectsCursor
-    # --- the slots later passes fill. Nothing here writes them; see the module docstring.
+    # --- filled by the passes named beside them; see the module docstring.
     handoff_object: dict[str, Any] | None = None   # Pass 5
     worker_results: tuple[dict[str, Any], ...] = ()   # Pass 6, session 6c
-    pending_promotions: tuple[dict[str, Any], ...] = ()   # Pass 7
-    memory_watermark: dict[str, Any] | None = None   # Pass 7
+    pending_promotions: tuple[dict[str, Any], ...] = ()   # Pass 7, session 7c
+    memory_watermark: dict[str, Any] | None = None   # Pass 7, session 7c
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -282,6 +288,8 @@ class _Snapshot:
     open_workers: tuple[WorkerRef, ...]
     effects_cursor: EffectsCursor
     worker_results: tuple[dict[str, Any], ...] = ()
+    pending_promotions: tuple[dict[str, Any], ...] = ()
+    memory_watermark: dict[str, Any] | None = None
     build_ms: int = 0
 
 
@@ -385,8 +393,13 @@ class Checkpointer:
             # the fold rather than accumulated here: a snapshot that counted them itself
             # would be free to disagree with the journal about what this run has cached.
             "worker_results": list(snap.worker_results),
-            "pending_promotions": [],
-            "memory_watermark": None,
+            # Session 7c, filling the two slots 4a cut and left inert. `pending_promotions`
+            # is every promotion this run classified and has not yet written; the watermark
+            # is where its committed episodic and semantic writes reached. The watermark is
+            # still null on a run that promoted nothing, which is the statement 4a wanted:
+            # an object of zeros would read as a measurement.
+            "pending_promotions": list(snap.pending_promotions),
+            "memory_watermark": snap.memory_watermark,
         }
         # The stored size of this snapshot, which is the storage half of "checkpoint write
         # overhead". `event_seq` is not in it yet - it is one small integer, assigned by the
@@ -399,8 +412,11 @@ class Checkpointer:
                 "checkpoint_id": checkpoint_id,
                 "trigger": trigger,
                 "covers_seq": snap.covers_seq,
-                # Pass 7's. Null rather than {} - see the field's comment in `events.py`.
-                "memory_watermark": None,
+                # Session 7c. The same object the row carries, from the same fold, so the
+                # announcement and the snapshot cannot say different things about where
+                # memory got to. Still null - not {} - for a run that promoted nothing; see
+                # the field's comment in `events.py`.
+                "memory_watermark": snap.memory_watermark,
                 # Message *events*, not messages: a tool result is a `tool_finished`, not a
                 # `message_appended` (session 2b).
                 "messages": snap.messages_ref.message_events,
@@ -433,6 +449,8 @@ class Checkpointer:
             effects_cursor=snap.effects_cursor,
             handoff_object=handoff_object,
             worker_results=snap.worker_results,
+            pending_promotions=snap.pending_promotions,
+            memory_watermark=snap.memory_watermark,
         )
         _record_overhead(trigger, time.perf_counter() - started, size)
         return checkpoint
@@ -476,6 +494,15 @@ class Checkpointer:
             open_workers=open_workers_at(store, run_id, covers_seq),
             effects_cursor=_effects_cursor(store, run_id, covers_seq),
             worker_results=cached_results_at(store, run_id, covers_seq),
+            # Session 7c. Both read from `journal/promotions.py` rather than derived here,
+            # for 6c's reason one bucket further out: a snapshot that worked out for itself
+            # what this run had promoted would be free to disagree with the journal about
+            # it, and the journal is the source of truth. The two are two views of one fold,
+            # so a checkpoint can never say a promotion is pending that the fold says landed.
+            pending_promotions=tuple(
+                pending_summary(e) for e in pending_at(store, run_id, covers_seq)
+            ),
+            memory_watermark=watermark_at(store, run_id, covers_seq),
         )
         snap.build_ms = int((time.perf_counter() - started) * 1000)
         return snap

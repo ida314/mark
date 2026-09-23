@@ -1,23 +1,25 @@
 """The event vocabulary: every type the journal may carry, and the shape of its payload.
 
-These twenty-one types are the only vocabulary there is. Session 2c deleted the in-process
+These twenty-four types are the only vocabulary there is. Session 2c deleted the in-process
 `agent/events.py` stream that used to carry the same facts under different names, so a
 frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's and the
-`working_memory_*` pair is session 7b's, and both are here for one reason: run-scoped state
-that is discarded with its run has to be foldable out of the journal, because the journal is
-the only durable record every run has - `[checkpoints] enabled` is off in the shipped config,
-so state that lived only in a checkpoint would be state that never existed on this machine.
+Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's, the
+`working_memory_*` pair is session 7b's and the three `promotion_*` types are session 7c's,
+and all of them are here for one reason: run-scoped state that is discarded with its run has
+to be foldable out of the journal, because the journal is the only durable record every run
+has - `[checkpoints] enabled` is off in the shipped config, so state that lived only in a
+checkpoint would be state that never existed on this machine.
 
-**Twenty of the twenty-one are emitted today** - nine wired by session 2b, the two
+**Twenty-three of the twenty-four are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
 checkpointer, `run_resumed` by session 4b's `journal/resume.py`, `run_forked` by session
 4d's `journal/fork.py`, the `handoff_*` pair by session 5b's `agent/handoff.py`, the
-`worker_result_*` pair by session 6c's `agent/result_cache.py` and the `working_memory_*`
-pair by session 7b's `agent/working_memory.py`. The one
+`worker_result_*` pair by session 6c's `agent/result_cache.py`, the `working_memory_*`
+pair by session 7b's `agent/working_memory.py` and the three `promotion_*` types by session
+7c's `memory/promotion.py`. The one
 left is `tool_progress`, which needs a progress channel the tool surface does not have. Each
 was specified before it had a producer so that the pass which needed it filled a slot instead
 of migrating a schema, and each has a test that writes one, so none of them is a shape nobody
@@ -332,6 +334,87 @@ EVENTS: dict[str, dict[str, Field]] = {
         # that something existed and was thrown away, and never a per-turn "nothing here".
         "notes": req(int),
     },
+    # Session 7c. One working-memory note that a classification decided is worth keeping,
+    # recorded *before* anything durable is written. This is the event that makes a
+    # promotion recoverable: a process killed between here and the write leaves this row
+    # with no `promotion_committed` after it, and the next resume finishes the job. It
+    # carries the note in full for the same reason `worker_result_cached` does - the scope
+    # it came from is tombstoned at the boundary, so a resume that only had a pointer would
+    # be pointing at a bucket that has been emptied.
+    "promotion_classified": {
+        # hash(run_id, "promote:<scope>", "memory_promote", canonical args). The step is the
+        # *boundary*, not the step that wrote the note, so a second attempt in a later step
+        # derives the same key - see `memory/promotion.py` on why the default key shape
+        # would not.
+        "promotion_key": req(str),
+        "scope": req(str),
+        "key": req(str),
+        "target": req(str, enum=("episodic", "semantic")),
+        "text": req(str),
+        "chars": req(int),
+        "text_sha256": req(str),
+        # Which rule or judgement sent it here, and the sentence that goes with it. Kept so
+        # that "why is this in my memory" has an answer that is not a re-derivation.
+        "decided_by": req(str),
+        "reason": req(str),
+        # The session the scope belonged to. Required, not nullable: the episodic write is
+        # an archive row, and an archive row with no session is invisible to consolidation -
+        # a promotion that lands and never reaches anything, which is this codebase's
+        # characteristic failure wearing the one field that would hide it.
+        "session_id": req(str),
+        "tainted": req(bool),
+        "private": req(bool),
+        "entry_version": req(int),
+    },
+    # Session 7c. The durable write landed. Until this event exists the promotion is
+    # pending, and `pending_promotions[]` in a checkpoint is exactly the classified rows
+    # this event has not caught up with.
+    "promotion_committed": {
+        "promotion_key": req(str),
+        "target": req(str, enum=("episodic", "semantic")),
+        # Where it landed: `archive:<event_id>` or `candidate:<id>`.
+        "ref": req(str),
+        # The store's own monotonic position, where the store has one. `raw_events.id` is a
+        # bigint identity column; `candidate_memories` has no sequence at all, so a semantic
+        # write records NULL here rather than a number nobody measured. The semantic
+        # high-water mark is the uuid7 in `ref`, which is time-ordered.
+        "sequence": req(int, nullable=True),
+        # False when the dedup key said this promotion was already durable - a resume
+        # finishing work a crash interrupted, rather than a second fact. The only place the
+        # duplicate this session exists to prevent is countable.
+        "inserted": req(bool),
+        "entry_version": req(int),
+    },
+    # Session 7c. One classification pass over one scope, as counts. Every note the boundary
+    # saw is in exactly one of them, which is what makes "nothing was quietly filtered out"
+    # a check rather than a claim: `notes == synthetic + secret + discarded + unclassified +
+    # episodic + semantic`. Pass 5's handoff generator counts its exclusions into the stored
+    # object for the same reason.
+    "promotion_batch": {
+        "scope": req(str),
+        # Which boundary fired. A worker finishing is a task boundary, a turn ending is the
+        # run's. There is no third value, because promoting anywhere else is the pass file's
+        # second *Must not*.
+        "boundary": req(str, enum=("task", "run")),
+        "notes": req(int),
+        "episodic": req(int),
+        "semantic": req(int),
+        "discarded": req(int),
+        # Asked about and not answered, or answered with something that is not a bucket.
+        # Never promoted and never discarded: it stays in the journal as a note nobody
+        # classified, because a default here is a claim the classifier did not make.
+        "unclassified": req(int),
+        # Refused before the classifier was asked: runtime-authored text, which may never
+        # become a fact the user never said (the Pass 4/5 rule), and text carrying something
+        # that looks like a secret.
+        "synthetic": req(int),
+        "secret": req(int),
+        # Classified semantic and written episodic instead, because the note was tainted or
+        # private. A sub-count of `episodic`, not a seventh bucket.
+        "downgraded": req(int),
+        "classifier": req(str, enum=("model", "rules", "failed")),
+        "error": req(str, nullable=True),
+    },
     # --- conversation --------------------------------------------------------
     # One per message entering the model's message list that no other event already
     # describes: the user's message, the assembled system block, each step's assistant
@@ -510,6 +593,14 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # existed when checkpoints were on would be a bucket this machine has never had.
         "working_memory_noted",
         "working_memory_discarded",
+        # Session 7c. Written by `memory/promotion.py` at a task or run boundary:
+        # `promotion_batch` once per boundary that saw a note, `promotion_classified` per
+        # note kept, `promotion_committed` per durable write. Same reasoning again - a
+        # promotion that only existed in a checkpoint could not be recovered on a machine
+        # that has never written one.
+        "promotion_classified",
+        "promotion_committed",
+        "promotion_batch",
     }
 )
 

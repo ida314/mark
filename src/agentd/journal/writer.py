@@ -52,7 +52,20 @@ from .store import Event, JournalStore, PendingEvent, default_path
 # flush carries the worker's whole bracket (`worker_created` ... `worker_finished`) to disk
 # with it, which is one fsync for a worker that has just cost minutes.
 SYNC_PREFIXES = ("effect_",)
-SYNC_TYPES = frozenset({"checkpoint_written", "agent_finished", "worker_result_cached"})
+SYNC_TYPES = frozenset(
+    {
+        "checkpoint_written",
+        "agent_finished",
+        "worker_result_cached",
+        # Session 7c. The two halves of a promotion, and both are synchronous for the same
+        # reason `effect_intended` is: the record has to be on disk *before* the durable
+        # write it describes, or a process killed in between leaves a memory write nothing
+        # announced. `promotion_classified` buffered would be a promotion a crash loses;
+        # `promotion_committed` buffered would be a promotion a resume writes twice.
+        "promotion_classified",
+        "promotion_committed",
+    }
+)
 
 
 def is_synchronous(event_type: str) -> bool:

@@ -1439,9 +1439,11 @@ def journal_resume(
     from ..agent import observations as obs
     from ..journal import resume as resume_mod
     from ..journal.writer import JournalWriter
+    from ..memory import promotion as promotion_mod
 
     cfg = get_config()
     writer = JournalWriter.open(cfg)
+    promoted: promotion_mod.Promoted | None = None
     try:
         if apply:
             done = resume_mod.resume(run_id, writer=writer, reason=reason)
@@ -1449,6 +1451,16 @@ def journal_resume(
         else:
             writer.flush()
             plan, applied = resume_mod.plan(run_id, store=writer.store), False
+        # Session 7c. A promotion the crash caught between the decision and the write is
+        # outstanding memory work, and it is the one thing a resume can finish rather than
+        # only report: the note is in the journal in full and both stores refuse a second
+        # write under the same key, so completing it can lose nothing and duplicate nothing.
+        # Behind `--apply` like every other write this command makes.
+        pending = promotion_mod.pending_for(run_id, store=writer.store)
+        if apply and pending:
+            promoted = asyncio.run(
+                promotion_mod.complete_pending(run_id, writer=writer, cfg=cfg)
+            )
     except resume_mod.ResumeError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -1484,6 +1496,15 @@ def journal_resume(
         block = obs.notice(plan)
         console.print(block or "[dim]nothing interrupted; the notice would be empty[/dim]",
                       markup=not block, highlight=False)
+    if pending:
+        console.print(
+            f"[dim]{len(pending)} memory promotion(s) classified and never written[/dim]"
+        )
+    if promoted is not None:
+        console.print(
+            f"promotions: {len(promoted.committed)} written, "
+            f"{len(promoted.reused)} already durable, {len(promoted.failed)} failed"
+        )
     if applied:
         console.print(f"resumed at seq {plan.from_seq}; {len(plan.reconciliation.orphans)} closed")
     elif plan.needs_resume:

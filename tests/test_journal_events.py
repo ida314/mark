@@ -63,6 +63,11 @@ PASS_VOCABULARY = {
     # out: working memory is discarded with its run, so the journal is the only place it can
     # live and still be recoverable by re-folding.
     "working_memory_noted", "working_memory_discarded",
+    # Session 7c, transactional promotion. The classified record is what makes a promotion
+    # survive the process that decided on it, so it has to be in the journal for the same
+    # reason the two above do - and the committed record is what stops the resume writing
+    # the same fact a second time.
+    "promotion_classified", "promotion_committed", "promotion_batch",
 }
 
 
