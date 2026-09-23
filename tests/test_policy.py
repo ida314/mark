@@ -432,6 +432,14 @@ PRIVATE_SAFE = {
     "goals_list", "memory_history", "memory_remember", "memory_search", "notify_user",
     "open_loop_add", "open_loop_close", "open_loops_list", "profile_read", "reminder_set",
     "time_now", "tool_search",
+    # Session 7b's scratchpad. The interlock shuts the *egress* door once the user's private
+    # data is in context, and these two open none: a note is journaled under this one run and
+    # this one agent's scope, is readable only by the agent that wrote it, and is discarded
+    # when the task ends. Denying them would break the workflow the interlock exists to
+    # preserve - read the mail, then reason about it - by taking away the place the reasoning
+    # is kept. The note carries `private=True` when it was written under the interlock, which
+    # is what a later promotion pass has to check before any of it becomes durable.
+    "working_memory_note", "working_memory_list",
     # `delegate` is here only because this probe passes no arguments, and the rules that
     # stop it are keyed on `agent`, which the schema makes required. The real denials are
     # asserted by name above; nothing can call delegate without saying which sub-agent.

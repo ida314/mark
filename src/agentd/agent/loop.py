@@ -39,6 +39,7 @@ from . import context as ctxmod
 from . import handoff as handoff_mod
 from .observations import RUNTIME_NOTE
 from .stream import Answer, Delta, Notice, TurnStream
+from .working_memory import WorkingMemory, discard_for_turn
 
 # The runtime's two mid-turn notes to the model, and why they are `user` messages carrying
 # a marker rather than `system` messages.
@@ -248,6 +249,18 @@ class _TurnRecord:
                 "error": error,
             },
         )
+        # Session 7b. The working bucket is execution state, and this is where the task
+        # scope it belongs to ends. Only for a turn that is not a worker's: a worker's own
+        # scope is discarded by `agent/subagents.py` once its result is journaled, which is
+        # after its turn has already unwound through here.
+        #
+        # Before the checkpoint rather than after it, so that the snapshot of a finished run
+        # says the true thing - the run kept nothing - instead of carrying scratch state
+        # that the very next event throws away. A crash between the two leaves notes a
+        # resume can still fold, which is the safe direction: the alternative loses them
+        # first and discovers the run was not over.
+        if self.rj.worker_id is None:
+            discard_for_turn(self.rj, "run_completed")
         # The turn_end boundary, after the turn's last event and inside the same unwind, so
         # that the four ways out of a turn all reach it - including the consumer that walked
         # away. It covers `agent_finished` because that event is already on disk by now.
@@ -482,6 +495,12 @@ class AgentLoop:
                 # is the turn an injected instruction would actually use.
                 autonomy=autonomy, tainted=session.tainted, private=session.private,
             )
+            # Session 7b. This turn's working-memory handle, built from the run journal so
+            # that its scope is fixed by the run and the worker - a worker's `AgentLoop`
+            # builds its own and has no argument with which to name its caller's. Handed
+            # through `extra` for the reason the handoff object is: it belongs to this turn,
+            # and a tool that held one across turns would be writing into a scope that ended.
+            tctx.extra["working_memory"] = WorkingMemory.for_turn(rj)
             if carried_over is not None:
                 # The lookup's whole authorisation check: a ref is fetchable only if the
                 # handoff in force lists it. Handed through the context rather than bound

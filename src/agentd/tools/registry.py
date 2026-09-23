@@ -140,6 +140,7 @@ def build_registry() -> Registry:
         builtin_memory,
         builtin_shell,
         builtin_web,
+        builtin_working,
     )
 
     reg = Registry()
@@ -152,6 +153,12 @@ def build_registry() -> Registry:
     reg.add(*builtin_web.TOOLS)
     reg.add(*builtin_agenda.TOOLS)
     reg.add(*builtin_delegate.TOOLS)
+    # Session 7b. The working bucket's only model-facing door. Registered like anything
+    # else and not `always_on`: the scratchpad is offered to a turn that sounds like it
+    # needs one, and a worker's spec names it when that role's work is worth keeping notes
+    # on. Making it always_on would spend a line of every prompt on a tool most turns
+    # never call.
+    reg.add(*builtin_working.TOOLS)
     # Registered like anything else, and offered on a turn only when a handoff is actually
     # in force - `agent/loop.py` takes it back out otherwise. `always_on` is what makes
     # "offered whenever there is a manifest" reliable rather than dependent on whether the

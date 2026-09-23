@@ -43,6 +43,7 @@ from .delegation import TaskSpec
 from .result_cache import remember, serve
 from .results import WorkerReport, WorkerResult, unreadable_report, validate_report
 from .stream import Answer, Delta
+from .working_memory import discard_for_turn
 
 
 @dataclass
@@ -343,6 +344,13 @@ async def run_subagent(
         # is read at `covers_seq`, and an entry written after the snapshot would be a result
         # the checkpoint says this run had not earned.
         remember(rj, task, result, worker_id=worker_id)
+        # Session 7b. This worker's task scope ends here, so its working memory does too.
+        # Everything the worker learned that was worth keeping is in the result it just
+        # returned - that is the boundary crossing the pass file allows - and the scratch
+        # state it used to get there is not the caller's to read. After `worker_finished`
+        # and before the checkpoint below, so a snapshot of this boundary already says this
+        # worker left nothing behind.
+        discard_for_turn(rj.for_worker(worker_id), "worker_finished")
         # The worker_finished boundary, after the result is journaled and therefore after
         # this worker is closed. A nested delegation gets nothing here: the outer worker is
         # still open, and `checkpoint_at` declines a run with a worker in flight.

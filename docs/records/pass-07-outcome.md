@@ -1,6 +1,6 @@
 # Pass 7 — Memory Scopes & Transactional Promotion — outcome
 
-Sessions completed: **7a**. 7b and 7c are untouched and append to this file.
+Sessions completed: **7a**, **7b**. 7c is untouched and appends to this file.
 
 7a is an inspection session. **No code, test, migration or config changed**, and nothing was
 written to the live stores — see the live-data section at the end for the counts that prove
@@ -340,3 +340,312 @@ moment working memory renders anything unreviewed.
 **6. Still open, untouched by 7a:** everything in 4a-4d's lists, plus `short_id` collisions on
 uuid7 handles (every `[F:...]` ref rendered from the live table shares a prefix), which
 `retrieval._render` and `memory_remember`'s `supersedes_ref` both depend on.
+
+---
+
+## Session 7b — Logical separation and isolation
+
+`.venv/bin/ruff check src tests scripts` clean. `.venv/bin/python -m pytest -q`: **937 passed**
+(7a's baseline was 920; +15 new tests in `tests/test_working_memory.py`, +2 from the existing
+`test_journal_feed.py` parametrization over `EVENT_TYPES`). Nothing was written to the live
+stores — counts at the end of this section.
+
+### what shipped
+
+| file | what it is |
+|---|---|
+| `src/agentd/memory/scopes.py` | **new.** The three buckets as data: `store`, `scope`, `ends_with`, `retrieval`, `writer`, `live`. Plus `RETRIEVAL_KINDS` and `EXECUTION_STATE`. |
+| `src/agentd/journal/working_memory.py` | **new.** The fold: `notes_at` (scoped), `note_at`, `scopes_with_notes` (the unscoped audit view), `ORCHESTRATOR`, `NOTE_MAX_CHARS`, `ENTRY_VERSION`. |
+| `src/agentd/agent/working_memory.py` | **new.** `WorkingMemory` (a handle bound to a `RunJournal`), `Note`, `discard_for_turn`. |
+| `src/agentd/tools/builtin_working.py` | **new.** `working_memory_note`, `working_memory_list`. The only model-facing door. |
+| `src/agentd/journal/events.py` | `working_memory_noted` + `working_memory_discarded` in `EVENTS` and in `EMITTED_TYPES`; the docstring's counts (19→21, 18→20). |
+| `src/agentd/tools/registry.py` | registers the two tools. |
+| `src/agentd/agent/loop.py` | builds the turn's handle into `tctx.extra["working_memory"]`; discards the orchestrator's scope in `_TurnRecord.__exit__`. |
+| `src/agentd/agent/subagents.py` | discards the worker's scope after `worker_finished`, before the checkpoint. |
+| `docs/records/effect-classification.md` | one row per new tool, as the audit's test requires. |
+| `tests/test_working_memory.py` | **new**, 15 tests. |
+| `tests/test_journal_events.py` | `PASS_VOCABULARY` + the two new types. |
+| `tests/test_policy.py` | `PRIVATE_SAFE` + the two new tools, with the reason. |
+
+**No migration, in either store.** No Postgres migration, no journal `SCHEMA_V4`, no new column
+on `checkpoint`, no new table. `tests/conftest.py` is **unchanged**: the new modules are
+additive to no table (nothing to add to `TABLES`) and none of them resolves config at call
+time — the working-memory handle is constructed by the turn from the `RunJournal` it already
+has and handed to the tool through `ctx.extra`, so no `cfg or get_config()` was added anywhere.
+
+### the three buckets as implemented, and whether storage is shared
+
+```
+working    journal    run + agent scope   ends with its task scope    not retrieved
+episodic   postgres   user                never                       retrieved by pack()
+semantic   postgres   user                never                       retrieved by pack()
+```
+
+**Episodic and semantic share the store they already shared** and nothing about them changed:
+`episodes` and `facts` in `migrations/0003_memory.sql`, one `pack()`, one rendered block. The
+pass file's third *Must not* — do not migrate the physical store if a logical distinction
+achieves the same thing — was satisfied by making the distinction the only artifact:
+`memory/scopes.py` is importable, its fields are the semantics, and `test_the_three_buckets_
+differ_in_store_scope_and_lifetime` fails if two buckets stop differing.
+
+**Working memory is in the run journal, and that is not a second store for memory — it is the
+store execution state was already in.** It could not go in Postgres: everything in that schema
+is user-scoped, durable and append-only by trigger, and this bucket has to be captured by a
+checkpoint and discarded when the run completes. Putting it there would have been the
+migration the *Must not* forbids. Putting it in the journal cost no schema change at all: two
+event types in a vocabulary that is deliberately extended by slot, folded by a module that
+mirrors `journal/worker_results.py`. Three logical buckets, two physical stores, zero DDL.
+
+### isolation mechanism
+
+The key is **`(run_id, scope)`**, and both are equalities in the WHERE clause of
+`journal/working_memory.notes_at` — the same shape as 6c's run scoping, and for the same
+reason: a scope hashed into a key is a rule nothing can check and nothing can count.
+
+`scope` is a non-empty string, always. A worker's is its `worker_id`; a turn that is not a
+worker's writes under the literal `"orchestrator"`. Two things it deliberately is **not**:
+
+* **Not an absent `worker_id`.** `worker_id IS NULL` as the orchestrator's bucket is this
+  codebase's recurring bug in its other shape — an absent value becoming a shared grouping key
+  that unrelated writers collide in. The literal costs nothing and cannot collide.
+* **Not the session id, and this is the load-bearing one.** `run_subagent` builds
+  `Session(id=parent_session_id, ...)`: a worker and its caller share one session id, carried
+  forward from Pass 6 as a known privacy defect that nobody should fix inside a session doing
+  something else. It is not fixed here. If a later pass "simplifies" the scope to the session
+  id, **worker A, worker B and the orchestrator become one bucket** — they would read and
+  overwrite each other's scratch state, a worker sent to read a stranger's web page would be
+  writing into the same scratchpad as the worker reading the user's mail, and the bucket would
+  look full and healthy from every angle. Mutation-checked below: it is the change that breaks
+  the most tests, which is the point of spending four assertions on it.
+
+A second, weaker guarantee sits on top: the handle is constructed by the turn
+(`WorkingMemory.for_turn(rj)`) and carries its scope, so a worker's `AgentLoop` has no argument
+with which to name its caller's. That is isolation by construction and is deliberately not the
+only thing holding the boundary up — a construction-only guarantee is one refactor away from
+being nothing, and nothing in the source would show it had gone. The unscoped view
+(`scopes_with_notes`) lives in the journal module, is reachable from no tool, and is what the
+tests use to ask "did that run leave anything behind".
+
+Crossing the boundary is unchanged from what the pass file allows: a `WorkerResult`. No fourth
+door was added.
+
+### the decision 7a's handoff asked for: working memory does not go through `pack()`
+
+Decided explicitly, recorded here, and pinned by
+`test_working_memory_is_not_one_of_the_kinds_retrieval_renders` so that changing it takes
+changing the decision rather than adding one dict entry. Three reasons, in order of weight:
+
+1. **The boundary would end up inside a scoring formula.** `pack()` has no run and no worker in
+   its signature. Isolation expressed as a filter inside RRF fusion is isolation no test can
+   read, and the natural fallback for an unknown scope is "show it".
+2. **`_render`'s `KeyError` is silent and total.** A fifth `Item.kind` has to be in `TYPE_PRIOR`,
+   `CHANNEL_WEIGHTS`, `SECTION_SHARE` and `_render`'s section map at once; the existing `"raw"`
+   kind is in two of the four and in neither of the others, which is the standing proof that
+   nothing enforces it. An item that reaches `_render` without all four raises inside
+   `agent/loop.py`'s broad `except`, which degrades to "(memory retrieval unavailable)" and
+   costs the prompt *every* piece of memory.
+3. **Different semantics, one budget.** Scratch state would compete with facts for shares tuned
+   for durable knowledge, and would inherit the one failure mode that makes a memory failure
+   invisible — for state the agent is actively using.
+
+So the read path is `WorkingMemory.notes()`, by the agent that wrote it, and `pack()` never sees
+a working item. Consequence worth stating for 7c: the `contains_secret` gap in 7a's open
+question 5 is **not** inherited — nothing unreviewed is rendered into anyone else's prompt,
+because a note is rendered only back to the scope that wrote it.
+
+### "captured by checkpoints", on a machine that has never written one
+
+The pass file says working memory is captured by checkpoints. As implemented it is captured **by
+position, not by copy**: every function in `journal/working_memory.py` takes a `covers_seq`, so
+`notes_at(store, run, scope, checkpoint.covers_seq)` *is* what that scope held at that boundary.
+That is exactly the relationship `messages_ref` already has with the messages — a pointer, with
+the content left in the journal where re-folding finds it — and it is why no column was added.
+
+Said plainly, as asked: **`[checkpoints] enabled` is false in the shipped config and the live
+journal holds 0 checkpoint rows across 52 runs.** A bucket stored *in* the checkpoint would
+therefore be a bucket that has never once existed on this machine. Stored as journal events it
+works today, with checkpoints off, and a checkpoint taken tomorrow accounts for it without any
+further code. `test_a_checkpoint_accounts_for_the_working_memory_of_its_own_position` turns
+checkpoints on in a copy of the config and shows the fold at `covers_seq` seeing the note
+written before the boundary and not the one written after.
+
+`Checkpoint.pending_promotions` and `Checkpoint.memory_watermark` are still `[]` and `None`.
+7b wrote neither; they are 7c's.
+
+### the dead episodic bucket, and what it does to the three-bucket claim
+
+Inherited, not fixed, per the brief: `episodes` is still **0 rows** after 111 `ok`
+`post_session` runs. The claim this session can honestly make is therefore *"three declared
+buckets, two of which have ever been written"*, and that distinction is carried as data rather
+than prose — `Bucket.live` is `False` for episodic, and a test asserts it. The effect on the
+work is smaller than it looks: nothing 7b built reads or writes `episodes`, and the separation
+the pass wanted is between *working* and the durable pair, which is real either way. The effect
+on 7c is larger: the classifier's `episodic` branch will have no live precedent to match, and a
+promotion test that asserts on episodic memory is asserting over a table the live system never
+fills. 7a's open question 1 stands unchanged and unassigned.
+
+### what deviated from the plan, and why
+
+**1. A scope that holds nothing gets no tombstone.** The plan reads as though a task scope
+always ends with a discard. As implemented, `WorkingMemory.discard` returns 0 and writes nothing
+when the fold is empty. This is called at the end of *every* turn and *every* worker, and the
+alternative puts one "nothing happened" event per turn into Dylan's live feed forever.
+`working_memory_discarded` therefore always records a real discard and its `notes` count is
+always positive — which also makes it usable as evidence rather than as noise.
+
+**2. Two tools, not one.** A single `working_memory` tool with an `action` argument would have
+had to carry one effect class covering its worst argument, making a pure read (`list`) a
+ledgered `idempotent_write`. Split, each says the truth: `working_memory_list` is `read`,
+`working_memory_note` is `idempotent_write` with `risk="read"` — the note is journaled and
+survives a crash within its run, so `read` would lie to the resume path, but nothing leaves the
+process, so prompting the user about a scratch note would be a prompt about a danger that is
+not there.
+
+**3. A note carries `private` as well as `tainted`.** Not in the plan. Both flags can only be
+observed at the moment the note is written; a promotion pass a week later cannot recover them,
+and an absent flag reads as a clean one. Adding the field later would have been a vocabulary
+change; adding it now is free. The two tools are on `PRIVATE_SAFE` in `tests/test_policy.py`
+because they open no egress door — with the reasoning written at the list.
+
+**4. Neither tool is `always_on`.** The other core memory tools are. Making a scratchpad
+always-offered spends a line of every prompt on a tool most turns never call, and would perturb
+every existing turn's tool set. It is selected like any other tool, and a worker's spec names it
+when that role's work is worth keeping notes on. Flagged as reversible in the open questions.
+
+**5. The shipped `RESEARCHER` and `CODER` specs were not given the tools.** Changing the live
+roles' tool surface is a behaviour change to delegation, not to memory scoping. The isolation
+tests build their own `SubagentSpec`, the way `test_worker_results.py` already does.
+
+### what is now true about the code that was not before
+
+- There is a task-local memory bucket. Before this session the word "working" did not appear in
+  the codebase and the only run-scoped, discarded-with-the-run state was the worker result
+  cache, which is not memory.
+- Two agents in one run have scratch state the other cannot read, enforced in a query rather
+  than by construction alone, and the boundary holds across a shared `run_id`, a shared
+  `JournalWriter` and a shared `session_id`.
+- A completed run leaves no working memory behind, and "leaves none" is a fold over the journal
+  rather than a flag: `scopes_with_notes(store, run_id) == {}`.
+- The journal vocabulary is 21 types, 20 of them emitted. `tool_progress` is still the only one
+  with no producer.
+- `memory/scopes.py` exists, so "which bucket is this" is answerable in code.
+
+### green tests are not the evidence; these mutations are
+
+Each mutation was applied to the shipped source, the suite run, and the source restored.
+
+| mutation | tests that failed |
+|---|---|
+| drop `json_extract(payload,'$.scope') = ?` from `notes_at` | 3 — including the two-concurrent-workers test |
+| drop `run_id = ?` from `notes_at` | 1 — `test_working_memory_never_crosses_a_run` |
+| `for_turn` returns a constant scope (the "simplify it to one key" change) | 4 |
+| remove the discard in `subagents.py` | 2 |
+| remove the discard in `loop.py` | 1 |
+
+The first mutation found a real hole on its first run: the two-worker test passed with the scope
+filter gone, because both workers were filing under the key `"finding"` and last-write-wins
+collapsed a shared bucket into one note that still read as isolation. The fixture now gives each
+worker a distinct key, and the test fails as it should. That is the one thing in this session
+that a green suite would not have told anyone.
+
+### schemas exactly as implemented
+
+```python
+# journal/events.py
+"working_memory_noted": {
+    "scope":         req(str),   # worker_id, or the literal "orchestrator". Never absent.
+    "key":           req(str),
+    "text":          req(str),   # in full; a preview cannot be handed back as scratch state
+    "chars":         req(int),
+    "entry_version": req(int),   # == 1; an entry under other rules is skipped by the fold
+    "tainted":       req(bool),  # untrusted text was in context when this was written
+    "private":       req(bool),  # the user's own private data was
+},
+"working_memory_discarded": {
+    "scope":  req(str),
+    "reason": req(str, enum=("worker_finished", "run_completed", "manual")),
+    "notes":  req(int),          # always > 0; an empty scope gets no tombstone
+},
+```
+
+```python
+# memory/scopes.py
+Bucket(name, holds, store, scope, ends_with, retrieval: bool, writer, live: bool)
+BUCKETS          = {"working": ..., "episodic": ..., "semantic": ...}
+RETRIEVAL_KINDS  = {"fact", "claim", "procedure", "episode"}     # no "working"
+EXECUTION_STATE  = {"working"}
+```
+
+```python
+# agent/working_memory.py
+Note(key, text, tainted, private)
+WorkingMemory(rj: RunJournal, scope: str)
+  .for_turn(rj)         -> scope = rj.worker_id or ORCHESTRATOR
+  .note(key, text, *, tainted=False, private=False) -> Note   # refuses empty / >4000 chars
+  .notes() / .get(key)  -> flushes the writer, then folds
+  .discard(reason)      -> int, the number discarded; no event when 0
+discard_for_turn(rj, reason)
+```
+
+`NOTE_MAX_CHARS = 4000`, enforced as a refusal with the reason in the message. `ENTRY_VERSION = 1`.
+
+### deferred items, and where they went
+
+- **Promotion, classification, `pending_promotions[]`, `memory_watermark`** — 7c, untouched.
+  Both checkpoint slots are still `[]` and `None`.
+- **The empty-episode bug** — still unassigned. 7a's open question 1, unchanged.
+- **The shared `session_id` between a worker and its caller** — deliberately not fixed, per the
+  ledger. Nothing built here depends on it, and `journal/working_memory.py`'s docstring says
+  what breaks if somebody keys on it later.
+- **The `"raw"` kind in `TYPE_PRIOR`/`CHANNEL_WEIGHTS` with no `_render` case** — found again,
+  not fixed; it is retrieval's bug, and 7b's answer was to stay out of retrieval entirely.
+- **`RESEARCHER`/`CODER` tool surfaces** — not changed. See deviation 5.
+
+### open questions for later passes
+
+**1. Nothing fills working memory unless the model chooses to.** The only producer is a tool the
+model calls, and the tool is not `always_on`. If 7c's classifier finds an empty bucket on most
+runs, the question is not the classifier — it is whether the runtime should be writing notes
+itself (a worker's findings, a tool result worth keeping) and whether the tools should be
+offered every turn. Both are one-line changes and both change what every prompt looks like, so
+neither was made here.
+
+**2. A note's `private` flag has no consumer yet.** It is recorded and tested and nothing reads
+it. 7c is where it has to matter: a note written while the user's mail was in context must not
+become a durable fact without the interlock being consulted, and `tainted` must not reach
+`IDENTITY_CATEGORIES` at all. The fields are there; the rule is not.
+
+**3. `working_memory_discarded` is buffered, not synchronous.** A SIGKILL between the discard
+and the next flush leaves a journal whose fold still shows the notes. That is the safe
+direction — a crashed run is not a completed one — but it means "a completed run leaves none
+behind" is a statement about runs that ended, not about processes that died. If 7c's resume path
+starts asking "did this run finish cleanly", this is one of the signals it must not trust alone.
+
+**4. Nothing prunes the events.** The notes stay in the journal forever, as tombstoned history.
+That is deliberate (append-only, auditable) and it is also unbounded growth of a kind the run
+journal has not had before — a chatty agent's scratchpad is bigger than its previews. Retention
+is Pass 10's; this is the first event type that makes it a size question rather than a tidiness
+one.
+
+**5. Two concurrent workers are now tested, and checkpoints still refuse them.** The isolation
+test runs two workers at once in one run; `Checkpointer.write` raises `MidWorkerCheckpoint` for
+exactly that state. With checkpoints off by default nothing collides today, but the day parallel
+delegation ships with checkpoints on, "workers are the unit of atomicity" and "two workers at
+once" have to be reconciled. Not new to this session, but this session is the first to exercise
+the combination.
+
+### live-data check
+
+Same protocol as 7a: the journal read from a copy taken **with its 4.1 MB `-wal`**, Postgres
+through read-only `SELECT`s, the markdown repo not touched at all. The test suite runs against
+the `agent_test` database and a `tmp_path` data dir, and no module added this session resolves
+config at call time, so there is no new path by which a test could reach the live stores.
+
+- **Journal** (`~/.local/share/agent/journal.db`, via a copy): **1140 events, 52 run ids**,
+  24 effect rows, **0 checkpoints** — identical to 7a's start and end figures.
+  `working_memory%` events in the live journal: **0**.
+- **Postgres**: facts **47**, candidate_memories **116**, episodes **0**, sessions **111** —
+  all identical to 7a. `raw_events` is **1475** against 7a's 1474; the newest rows are
+  `brightspace.assignment` and `gmail-nyu.message` written by the daemon's connectors during
+  this session, not by anything run here.
+- **Markdown repo**: not opened.

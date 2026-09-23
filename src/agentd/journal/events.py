@@ -1,22 +1,23 @@
 """The event vocabulary: every type the journal may carry, and the shape of its payload.
 
-These nineteen types are the only vocabulary there is. Session 2c deleted the in-process
+These twenty-one types are the only vocabulary there is. Session 2c deleted the in-process
 `agent/events.py` stream that used to carry the same facts under different names, so a
 frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
-Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's, and is the
-first addition to the vocabulary since it was fixed: the run-scoped result cache has to be
-foldable out of the journal, because the journal is the only durable record every run has -
-`[checkpoints] enabled` is off in the shipped config, so a cache that lived only in a
-checkpoint would be a cache that never existed on this machine.
+Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's and the
+`working_memory_*` pair is session 7b's, and both are here for one reason: run-scoped state
+that is discarded with its run has to be foldable out of the journal, because the journal is
+the only durable record every run has - `[checkpoints] enabled` is off in the shipped config,
+so state that lived only in a checkpoint would be state that never existed on this machine.
 
-**Eighteen of the nineteen are emitted today** - nine wired by session 2b, the two
+**Twenty of the twenty-one are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
 checkpointer, `run_resumed` by session 4b's `journal/resume.py`, `run_forked` by session
-4d's `journal/fork.py`, the `handoff_*` pair by session 5b's `agent/handoff.py` and the
-`worker_result_*` pair by session 6c's `agent/result_cache.py`. The one
+4d's `journal/fork.py`, the `handoff_*` pair by session 5b's `agent/handoff.py`, the
+`worker_result_*` pair by session 6c's `agent/result_cache.py` and the `working_memory_*`
+pair by session 7b's `agent/working_memory.py`. The one
 left is `tool_progress`, which needs a progress channel the tool surface does not have. Each
 was specified before it had a producer so that the pass which needed it filled a slot instead
 of migrating a schema, and each has a test that writes one, so none of them is a shape nobody
@@ -296,6 +297,41 @@ EVENTS: dict[str, dict[str, Field]] = {
         "answer_chars": req(int),
         "parent_step_id": opt(str, nullable=True),
     },
+    # Session 7b. One note in the working bucket - task-local, agent-local scratch state.
+    # Like `worker_result_cached` and unlike everything else here it carries a body rather
+    # than a preview of one, for the same reason: a preview cannot be handed back as the
+    # thing itself, and the journal is where this bucket lives. `journal/working_memory.py`
+    # folds the pair below into what a scope currently holds.
+    "working_memory_noted": {
+        # The isolation key, alongside `run_id`. Always a non-empty string: a worker's id
+        # for a worker, the literal "orchestrator" otherwise. Not the *absence* of a worker
+        # id, because an absent value used as a bucket is where unrelated writers collide,
+        # and emphatically not the session id, which a worker shares with its caller.
+        "scope": req(str),
+        "key": req(str),
+        "text": req(str),
+        "chars": req(int),
+        "entry_version": req(int),
+        # The two provenance flags of the turn that wrote it, carried so that reading a note
+        # back cannot launder it and so that a later promotion pass can tell a note the model
+        # copied off a web page from one the user said. `tainted` is "untrusted text was in
+        # context", `private` is "the user's own private data was" - two different doors
+        # (`agent/loop.py`), and collapsing them here would lose the one that shuts egress.
+        "tainted": req(bool),
+        "private": req(bool),
+    },
+    # Session 7b. A scope emptied: a worker's task scope ending, a run completing, or a
+    # caller throwing its own scratch away. A tombstone the fold honours, never a delete -
+    # the notes stay in the journal, so what a run held at an earlier position is still
+    # readable, and the live view of that scope is empty from here on.
+    "working_memory_discarded": {
+        "scope": req(str),
+        "reason": req(str, enum=("worker_finished", "run_completed", "manual")),
+        # How many notes were discarded. Always positive: a scope that held nothing gets no
+        # tombstone at all (`agent/working_memory.py` says why), so this event is evidence
+        # that something existed and was thrown away, and never a per-turn "nothing here".
+        "notes": req(int),
+    },
     # --- conversation --------------------------------------------------------
     # One per message entering the model's message list that no other event already
     # describes: the user's message, the assembled system block, each step's assistant
@@ -467,6 +503,13 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # result this machine never kept.
         "worker_result_cached",
         "worker_result_reused",
+        # Session 7b. Written by `agent/working_memory.py`: `working_memory_noted` from the
+        # `working_memory_note` tool, `working_memory_discarded` from the two places a task
+        # scope ends - `agent/subagents.py` when a worker finishes and `agent/loop.py` when
+        # the run's turn unwinds. Behind no flag, for the cache's reason: a bucket that only
+        # existed when checkpoints were on would be a bucket this machine has never had.
+        "working_memory_noted",
+        "working_memory_discarded",
     }
 )
 

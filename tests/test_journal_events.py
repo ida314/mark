@@ -59,6 +59,10 @@ PASS_VOCABULARY = {
     # `[checkpoints] enabled` is false in the shipped config and a cache kept only in a
     # checkpoint would be a cache this machine has never once written.
     "worker_result_cached", "worker_result_reused",
+    # Session 7b, the working bucket. Same reasoning as the cache above, one bucket further
+    # out: working memory is discarded with its run, so the journal is the only place it can
+    # live and still be recoverable by re-folding.
+    "working_memory_noted", "working_memory_discarded",
 }
 
 
