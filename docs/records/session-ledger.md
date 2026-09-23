@@ -32,7 +32,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 7a | complete | 2026-09-23 | pass-07-outcome.md | **hard stop — human runs this** (harness inspection). Ran autonomously under the standing policy ("Harness inspection (7a): dispatch it. It writes a finding and changes no code."); the marker stands and **the finding is still Dylan's to read at the pass boundary.** No code touched, 920 tests green (baseline, unchanged), ruff clean. 1 deviation, no Must not crossed. One physical store, four record types, **no scope dimension — no task-local memory exists today**. Live-data proof: 1140 events / 52 run ids before and after, run-id lists diff empty. |
 | 7b | complete | 2026-09-23 | pass-07-outcome.md | three declared buckets (`memory/scopes.py`) + a run+agent-scoped working bucket folded out of the journal (`journal/working_memory.py`, `agent/working_memory.py`, `tools/builtin_working.py`), isolated on `(run_id, scope)` in the query — **not** on the session id, which a worker shares with its caller. Discarded at worker finish and at run end. 937 tests green. 5 deviations, no Must not crossed: no migration in either store, no new column, no checkpoint schema change. **Vocabulary 19 → 21** (`working_memory_noted`, `working_memory_discarded`), both named in the drift guard with their pass. 5 mutations, all caught — the first found a real hole, the two-worker test passed with the scope filter deleted until each worker used a distinct note key. |
 | 7c | complete | 2026-09-23 | pass-07-outcome.md | promotion as journaled effects (`promotion_classified`/`promotion_committed`/`promotion_batch`), keyed on **the boundary, not the step**, batched at task (`subagents.py`, after `worker_finished`) and run (`loop.py::_promote`) boundaries; `pending_promotions[]` + `memory_watermark` filled from the same fold (`journal/promotions.py`). Both crash orderings fault-injected and green. 966 tests green. 7 deviations. Must not not crossed, **but one needs Dylan's confirmation**: there IS a migration, `migrations/0010_promotion.sql`. **Mutation finding: deleting the `worker_id` guard in `_promote` broke zero tests** — a worker's turn would have classified and written its *caller's* scope mid-turn; now killed by a named test. **Fixed en route: `classify` used the process-global `get_provider()`, so the test suite was making real calls to the live model endpoint.** |
-| 8a | pending | — | — | approval-wall question from 1c is a prerequisite here |
+| 8a | awaiting-human | — | — | **not dispatched.** Two gates put to Dylan 2026-09-23: (1) the coding-family comparison is not meaningful without B11/B12/B13 under `chat`; (2) the 1c approval-wall question, now answered by the code — a delegated worker always gets `QueueApprover`. |
 | 8b | pending | — | — | |
 | 8c | pending | — | — | |
 | 8d | pending | — | — | |
@@ -749,7 +749,7 @@ list. Worth knowing when reading any earlier pass's timings.
    the same partial-index trick as `raw_events_connector_dedup_idx` in `0007_connectors.sql`.
    The 116 existing candidates carry no promotion key and are unconstrained.
 
-3. **The required-field precedent, now at its third instance and still unruled.** 5a added
+3. **The required-field precedent — CORRECTED 2026-09-23 by Dylan: two instances (5a, 6a) plus the 6b reshape, not three. 7c added nothing.** Ruled at the Pass 7/8 boundary; see below. 5a added
    required fields to `agent_finished`, 6a added `task_digest` to `worker_created`, 7c adds
    `memory_watermark`. It works only because `validate_payload` runs on the write path alone
    (one caller, `journal/runtime.py:123`) — 7a re-verified that and also found the live journal
@@ -796,3 +796,212 @@ list. Worth knowing when reading any earlier pass's timings.
 - **Pass 8 reverts to supervised mode** by the note at the foot of `orchestrator-prompt-auto.md`:
   each 8x session moves a capability family, and a regression is easier to catch at the session
   boundary than four sessions later.
+
+---
+
+## Pass 8 opens — supervised. 8a held at step 5, two gates, 2026-09-23
+
+Prerequisites for 8a all exist: `pass-08-tool-surface.md`, `pass-01-outcome.md`,
+`pass-06-outcome.md`. Working tree carries no tracked modifications; five untracked paths
+(`CLAUDE.md`, the three `docs/plans` prompt files, `repo-drop(1).zip`) are pre-existing and
+were not written by a session.
+
+**Gate 1 — the comparison 8a ends with is not meaningful today, and the reason is not the
+count of missing rows but which rows they are.** The coding family is B02, B10, B11, B12,
+B13. 8a moves `fs_write` and `shell_exec`. The only rows that exercise those two tools are
+B11, B12 and B13, and the only variant that can exercise them is `chat`, because under `ask`
+the `QueueApprover` denies both — which is the same defect gate 2 is about. Those three
+`chat` rows are three of the five still owed. What is left with a recorded v2 value is B02
+(needs no repository access, cannot see a coder-role regression) and B10 (read-only
+comprehension, already `fail` at 12/12 steps). The v2 `ask` rows for B10/B11/B12/B13 are all
+`fail`, and three of the four failures are environmental — the 400 chain at 12/12 steps, a
+655 s router timeout on B12, and B13 stopping at the approval wall in words. **A comparison
+against an all-fail floor cannot show a regression at all**, and an improvement in it is not
+distinguishable from the router having a better day.
+
+Minimum before 8a: **B11, B12, B13 under `chat`.** Strongly advisable: **B21 under `chat`** —
+it is not a coding row, but it is the only baseline evidence of whether this model chooses to
+delegate, and after 8a every coding row becomes a delegation row. **B23 is not needed for
+8a.**
+
+**Gate 2 — the 1c approval-wall question, and the code now answers it the bad way.**
+`pass-01-outcome.md:346` asks which approver is in force inside a delegated role and whether
+it can prompt. Pass 6 threaded an `approver` parameter into `run_subagent`
+(`agent/subagents.py:134,183`), and `tools/builtin_delegate.py:83` reads it from
+`ctx.extra["approver"]` — but **nothing in `src/` ever writes that key**, so the fallback at
+`builtin_delegate.py:85-87` always fires and every delegated worker is built with
+`QueueApprover(origin=ctx.origin)`, including under `agent chat` where the caller holds a
+`CliApprover` that can prompt. A coder role given `fs_write` and `shell_exec` therefore gets
+a queued denial on every write and every test run. 8a's exit criteria are unreachable until
+this is decided.
+
+Put to Dylan, undecided: inherit the caller's approver (one line, but it lets a worker prompt
+the terminal mid-delegation); an autonomy contract making the coder's writes `allow` under a
+scoped root; or queue-and-resume on Pass 3/4 machinery. And whether the fix is inside 8a or
+its own commit before it — it touches Pass 6's files, which is a stop-and-ask condition.
+
+**Carried into Pass 8 unanswered from the Pass 7 boundary, none of them blocking 8a:**
+`migrations/0010_promotion.sql` unconfirmed; the required-field precedent at its third
+instance, still unruled; `agent db migrate` not run, live DB at 0009, so a semantic promotion
+on the live system fails and stays pending.
+
+## Boundary actions taken 2026-09-23, on Dylan's instruction
+
+**1. Gate 2 ruled: a delegated worker inherits the caller's approver.** Option one of three.
+The cost accepted with it, stated in the option and not re-raised: **a worker can prompt the
+terminal mid-delegation.** Not yet implemented — `ctx.extra["approver"]` is still written by
+nothing, so `tools/builtin_delegate.py:85-87` still falls through to
+`QueueApprover(origin=ctx.origin)` on every delegation. Open: whether the fix is its own
+commit before 8a or inside 8a. It touches Pass 6 files, which is a stop-and-ask condition,
+so the recommendation on the table is its own commit first — the shape of the `FINAL_NUDGE`
+fix before the 5c eval.
+
+**2. `agent db migrate` run. The live DB is at 0010.** Precondition verified before applying
+rather than taken from 7c's record: `candidate_memories` held **116 rows, 0 with a
+`promotion_key`, 0 duplicate keys** — so the partial unique index could not fail and
+constrains nothing that already existed. `agent backup` taken first:
+`~/.local/share/agent/backups/20260923T204418Z` (db 1.4 MB, repo 7 kB). After: `applied: 10,
+pending: none`, `candidate_promotion_key_idx` present with the definition `0010` specifies,
+116 rows unchanged.
+
+**This resolves Pass 7 boundary item 4, and it resolves item 2 by action rather than by
+ruling** — `agent db migrate` *is* the application of `0010_promotion.sql`, the migration
+that was awaiting confirmation. Nothing has written a `promotion_key` yet, so nothing depends
+on the index; it is one `DROP INDEX candidate_promotion_key_idx;` from gone if the answer
+would have been no.
+
+**Still owed, and 8a is still held on the first of them:**
+- **Gate 1 is unanswered.** B11, B12, B13 under `chat` before 8a, or dispatch 8a knowing its
+  closing comparison reads an all-fail floor and cannot show a regression.
+- **The required-field precedent, third instance, still unruled** (Pass 7 boundary item 3).
+- 7a's finding is still Dylan's to read (Pass 7 boundary item 1).
+
+## Pass 7/8 boundary — Dylan's three rulings, 2026-09-23
+
+### 1. The required-field precedent: ratified, with four conditions, and Pass 9 pre-decided
+
+**The premise the orchestrator put was wrong and the correction is the substance.** There are
+**two** instances, 5a (`agent_finished`) and 6a (`worker_created`) — **7c added nothing.**
+And there is a larger one nobody recorded: **6b renamed and replaced fields on
+`worker_finished`, and every live row now fails ten clauses.**
+
+**The invariant does not hold because the reducer is forgiving. It holds because no fold
+reads any of the drifted fields.** That is a different and much weaker guarantee than the one
+5a, 6a and 7c each relied on, and it is the reason this was rulable at all. The only visible
+symptom today is `journal/render.py::_worker_finished`, which prints `payload['status']`
+verbatim — `researcher: ok`, an off-vocabulary value, with nothing marking it as a legacy row.
+
+**Ruled: required means required-going-forward, as a written rule rather than an accident.**
+Rejected: demoting to `opt()`, which would give up the absent-versus-null distinction 5a
+exists to enforce on every *future* write merely to make old rows legal; and versioning
+everything, because nothing reads these fields. **Four conditions, all binding:**
+
+1. **Reading a drifted field requires a version guard.** The first time a fold or reader needs
+   a field that pre-existing rows lack, that type gets a payload version and the reader
+   follows the `handoff_schema` pattern: known versions listed, unknown ones refused, absence
+   **stated rather than defaulted**. Adding a field is cheap only while nothing reads it.
+2. **Renames and removals on a type with live rows are a stop-and-ask.** 6b set that precedent
+   without anyone noticing; it is recorded here as the precedent it actually is.
+3. **Land the 14 real drifted rows as a fixture test** that folds, summarises and renders them.
+   All 966 tests pass whichever way this is ruled — *which is why it was never ruled.*
+4. **Legacy rows get marked on render.** `render.py` shows an off-vocabulary status as a legacy
+   value instead of printing it verbatim.
+
+**Pre-decided for Pass 9, and it decides what 9a builds:** the routing record is a **new event
+type, not a field on `worker_created`.** Additive, no existing row can fail it, and it avoids a
+third instance. **Rule stands before 9a is planned.**
+
+### 2. Gate 1: do not dispatch against the current floor — and running the rows today would not fix it
+
+**The all-fail floor carries no capability signal**: three of the four v2 coding results were
+harness or environment failures and the fourth (B13) was by design. **The daemon is still
+running pre-fix code from the v2 run**, 400-ing on every heartbeat and cancelling concurrent
+requests, so running B11–B13 under `chat` today would mostly re-measure that.
+
+**The approved order, and 8a does not move until it is done:**
+
+1. Land the two fix commits (§3).
+2. `systemctl --user restart agent-daemon.service`, and confirm the next heartbeat completes.
+3. Run **B11, B12, B13 under `chat`**, attended, on the tree 8a will branch from. ~1 hour.
+4. Record them as an **addendum to `baseline-v2.md` §2**, and **that addendum is 8a's
+   comparand** — the coder family has never had a measured baseline and the tree has moved 13
+   `src` commits since v2.
+5. Dispatch 8a.
+
+**Caveat to carry into 8a:** B21, and every coder row after 8a, is a **delegation** row, and
+delegation has never executed against this model. **8a's comparison is only meaningful if fix
+commit 1 actually makes a worker turn complete — verify with a live probe before dispatching,
+not with tests.**
+
+### 3. Packaging: two standalone commits before 8a, in the `3015aa0` shape
+
+**Commit 1 — prompt shape. First, because without it no worker runs at all.** Fold
+`extra_system` into the single leading system message at `loop.py:472`, the way
+`build_messages` already handles `handoff_block`. Test asserting **exactly one leading system
+message**, mutation-checked by restoring `insert(1, …)` and confirming the test fails. Verify
+against vLLM on **:8001** both ways.
+
+*Verified at the boundary before dispatch:* `loop.py:471-472` is the `insert(1, …)`, and
+`subagents.py:244` passes `extra_system=spec.prompt` — so **every worker has always been sent
+a second system message at index 1**, the same shape Qwen3's template rejects with the 400
+that `baseline-v2.md` v2-1 traced through `sir`. This is the mechanism behind "delegation is
+dead on this machine" (three sub-agent turns, all under 110 ms, `llm_ms: 0`), carried since
+v2 and never explained.
+
+**Commit 2 — approver.** `tctx.extra["approver"] = self.approver` in `loop.py`, keeping the
+fallback in `builtin_delegate.py`. Loop-level test asserting the context `run_turn` builds
+carries the caller's approver, mutation-checked by deleting the line. **The existing tests in
+`test_delegation.py` set the key by hand, which is why this survived.**
+
+**Neither commit touches Pass 6 files, so the stop-and-ask does not trigger** — that is the
+point of putting the assignment in `loop.py` rather than in `builtin_delegate.py`. Both are
+logged here as pre-8a fixes rather than as pass sessions.
+
+### 7a
+
+Non-blocking; Dylan reads it at the pass boundary as planned. **Its violation table is right
+but understates `worker_finished`** — see ruling 1.
+
+## Pre-8a fix commit 1 — landed in the working tree, uncommitted, 2026-09-23
+
+`agent/context.py` (`build_messages` gains `extra_system`, folded into the leading system
+message straight after `handoff_block`) and `agent/loop.py` (the `insert(1, ...)` deleted,
+call site passes it through). No new module, so no `conftest.py` change; `builtin_delegate.py`
+untouched as instructed.
+
+**The mechanism is confirmed against the real model, in its own words.** Probe against vLLM on
+8001 (`owned_by` re-checked: `"sir"` on 8000, `"vllm"` on 8001), prompt assembled by the real
+`build_messages`:
+
+```
+BEFORE  roles=['system','system','user']  → HTTP 400
+        {"error":{"message":"System message must be at the beginning.", ...}}
+AFTER   roles=['system','user']           → HTTP 200  "The capital of France is Paris."
+```
+
+**So "delegation is dead on this machine" — carried since `baseline-v2.md` and never
+explained — has a cause.** Every delegated turn 400-ed before the model was asked anything.
+The three sub-agent turns under 110 ms with `llm_ms: 0` are that 400.
+
+**Mutation, re-run independently by the orchestrator rather than taken on report:** restoring
+`messages.insert(1, ...)` fails **exactly the two new tests, 2 failed / 966 passed — zero
+pre-existing tests bit.** Nothing in 968 tests defended this. The subagent also reports a
+second mutation (deleting the fold in `context.py`) killing the same two. Gates verified
+directly: `uv run pytest` 968 passed, `ruff check .` clean, `ruff format` not run.
+
+**Live data untouched, verified both sides:** journal 1227 rows / 55 run ids / 24 effect / 0
+checkpoint, Postgres `candidate_memories` 116, `facts` 47 — identical before and after. The
+journal copy took the `-wal`.
+
+**Found and deliberately not fixed — a latent third site, for Dylan to rule on.**
+`context.history_messages` does `picked.insert(0, {"role": "system", "content": "Summary of
+earlier conversation..."})` when a session has a `summary`, which lands at **index 1** of the
+assembled list and would 400 identically. It is unreachable today — no caller of
+`repo_archive.end_session` passes a summary and `sessions WHERE summary IS NOT NULL` is 0 —
+so it was left as out of scope, and the new test would catch it the moment a summary is
+written. **Whoever gives that path a producer inherits a live 400.**
+
+Also confirmed in passing: `FINAL_NUDGE`/`STUCK_NUDGE` are already `{"role": "user"}` since
+the 2026-09-22 fix, so `extra_system` was the **last live** mis-positioned system message;
+every other `{"role": "system"}` in `src/agentd` is at index 0.
+
