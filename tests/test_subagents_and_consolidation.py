@@ -99,6 +99,45 @@ async def test_subagent_candidates_are_proposals_not_facts(cfg):
     assert await repo_memory.active_facts() == []  # nothing canonical yet
 
 
+# --- the shape of what a worker is actually sent ------------------------------
+#
+# Why this matters. A worker's role prompt used to be inserted as a *second* system message
+# at index 1, behind the turn's own system block. Nothing in-process objects to that, and
+# the scripted provider below would have accepted it forever. The real model does not:
+# Qwen3's chat template answers any system message that is not the single leading one with
+# `HTTP 400 System message must be at the beginning`, so every delegated turn on this
+# machine failed before the model was asked anything - three sub-agent turns, all under
+# 110 ms, `llm_ms: 0`. The property is about the assembled message list rather than about
+# `build_messages` alone, because the second message was added after `build_messages`
+# returned and a unit test of that function would have been green throughout.
+
+
+def _system_positions(messages: list[dict]) -> list[int]:
+    return [i for i, m in enumerate(messages) if m.get("role") == "system"]
+
+
+async def test_a_worker_is_sent_one_leading_system_message_and_no_other(cfg):
+    provider = FakeProvider(
+        turns=["done"], json_results=[WorkerReport(status="completed", answer="ok")]
+    )
+    session = await Session.create("test")
+    await run_subagent(
+        _spec(prompt="You are the researcher. Cite what you read."),
+        TaskSpec("researcher", "find the thing"),
+        parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="assist",
+        approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
+    )
+
+    assert provider.calls, "the worker never reached the provider"
+    for call in provider.calls:
+        assert _system_positions(call["messages"]) == [0], (
+            f"system messages at {_system_positions(call['messages'])}, "
+            f"roles={[m.get('role') for m in call['messages']]}"
+        )
+    # And folding it in is not the same as dropping it: the worker still reads its role.
+    assert "You are the researcher." in provider.calls[0]["messages"][0]["content"]
+
+
 # --- consolidation -----------------------------------------------------------
 
 

@@ -467,9 +467,13 @@ class AgentLoop:
                     if carried_over
                     else ""
                 ),
+                # A worker's role prompt. It belongs to the one leading system message and
+                # not to a second one: Qwen3's chat template answers a system message in any
+                # other position with `HTTP 400 System message must be at the beginning`,
+                # which is how every delegated turn on this machine failed before the model
+                # was ever asked anything.
+                extra_system=extra_system or "",
             )
-            if extra_system:
-                messages.insert(1, {"role": "system", "content": extra_system})
             # The system block and the retrieved memory are not appended to the archive -
             # they are rebuilt every turn - so this event is the journal's only record that
             # the model was given instructions at all, and how much of the budget they took.

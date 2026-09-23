@@ -521,3 +521,28 @@ async def test_an_earlier_message_is_carried_once_and_the_new_one_is_not_doubled
     assert contents.count(second) == 1
     assert contents.count("First.") == 1
     assert contents[-1] == second
+
+
+# --- one leading system message ------------------------------------------------
+#
+# Why this matters. `extra_system` is how a delegated worker is given its role, and it used
+# to be spliced in as a second system message at index 1. The model this runtime runs on
+# refuses that outright — Qwen3's chat template returns `HTTP 400 System message must be at
+# the beginning` — so the prompt never reached it and the turn ended in milliseconds with
+# no tokens spent. The assertion is on position, not on content: a prompt that carries the
+# role prompt in the right words and the wrong slot is a turn that does not happen.
+
+
+async def test_extra_system_is_folded_into_the_one_leading_system_message(cfg):
+    provider = FakeProvider(turns=["Noted."])
+    loop = AgentLoop(
+        cfg=cfg, registry=Registry(), engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "go", extra_system="You are the researcher.")
+
+    prompt = _prompt(provider)
+    positions = [i for i, m in enumerate(prompt) if m.get("role") == "system"]
+    assert positions == [0], f"system messages at {positions}"
+    assert "You are the researcher." in prompt[0]["content"]

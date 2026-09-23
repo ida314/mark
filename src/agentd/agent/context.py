@@ -93,6 +93,7 @@ def build_messages(
     history: list[dict],
     user_text: str,
     handoff_block: str = "",
+    extra_system: str = "",
 ) -> list[dict]:
     """The prompt for one turn.
 
@@ -100,11 +101,19 @@ def build_messages(
     into the same system message rather than a second one, so the shape of the message list
     is what it always was - system, conversation, the user - and the only thing that changed
     is that the conversation now begins after the handoff's watermark.
+
+    `extra_system` is a delegated worker's role prompt and is folded in the same way, for a
+    harder reason than tidiness: Qwen3's chat template rejects any system message that is
+    not the single leading one with `HTTP 400 System message must be at the beginning`, so
+    a second system message is not a longer prompt, it is a turn that never reaches the
+    model at all.
     """
     cfg = cfg or get_config()
     system = system_prompt(cfg, autonomy, context_block)
     if handoff_block.strip():
         system = f"{system}\n{handoff_block}"
+    if extra_system.strip():
+        system = f"{system}\n{extra_system}"
     return [
         {"role": "system", "content": system},
         *history,
