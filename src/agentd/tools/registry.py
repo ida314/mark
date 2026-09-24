@@ -83,18 +83,34 @@ class Registry:
         return changed
 
     async def select(
-        self, query: str, *, session_used: set[str] | None = None, cfg: Config | None = None
+        self,
+        query: str,
+        *,
+        session_used: set[str] | None = None,
+        cfg: Config | None = None,
+        permitted: set[str] | None = None,
     ) -> list[Tool]:
-        """Pick the tools this turn gets to see."""
+        """Pick the tools this turn gets to see, from the ones the caller may run at all.
+
+        `permitted` is the caller's subset; `None` leaves every enabled tool eligible.
+        It is applied once, to the pool the three selection routes draw from, rather than
+        to each of them: `always_on`, `session_used` and the embedding hits are three ways
+        into this list, and a filter on the way out is one place to forget. `session_used`
+        is the interesting one - it survives a resume, so a session that used a tool before
+        the surface narrowed would otherwise carry it back in.
+        """
         cfg = cfg or get_config()
-        enabled = self.enabled()
+        enabled = [
+            t for t in self.enabled() if permitted is None or t.name in permitted
+        ]
         if len(enabled) <= ALWAYS_EXPOSE_LIMIT:
             return enabled
 
+        eligible = {t.name: t for t in enabled}
         chosen = {t.name: t for t in enabled if t.always_on}
         for name in session_used or set():
-            if name in self.tools and self.tools[name].enabled:
-                chosen[name] = self.tools[name]
+            if name in eligible:
+                chosen[name] = eligible[name]
 
         from ..embed import get_embedder
 
@@ -105,8 +121,8 @@ class Registry:
             for row in await repo_ops.tools_by_similarity(vec, limit=TOP_K * 2):
                 if added >= TOP_K or row["score"] < SIMILARITY_FLOOR:
                     break
-                t = self.tools.get(row["name"])
-                if t and t.enabled and t.name not in chosen:
+                t = eligible.get(row["name"])
+                if t and t.name not in chosen:
                     chosen[t.name] = t
                     added += 1
         return list(chosen.values())
@@ -188,27 +204,41 @@ def tool_search_tool(registry: Registry) -> Tool:
         query = args["query"]
         from ..embed import get_embedder
 
+        def allowed(name: str) -> bool:
+            """Inside the caller's subset, and a name this registry still holds.
+
+            The subset is the boundary: a search that can name a tool outside it is a door
+            into the surface, and the model would be told a tool is "now available" that
+            the executor then refuses - advice that costs a step and cannot work. It is
+            also the only thing standing between a sub-agent and the full registry, because
+            this closure is built over the process registry and then handed to a worker
+            whose own registry is a subset of it; `ctx.tool_subset` is what makes the
+            search a worker runs a search of the worker's tools.
+
+            The membership half is about the `tools` table, which is a persisted index and
+            can score a row for a tool this process no longer registers.
+            """
+            if name not in registry.tools:
+                return False
+            return ctx.tool_subset is None or name in ctx.tool_subset
+
         embedder = get_embedder()
         found: list[dict[str, Any]] = []
         if embedder is not None:
             vec = (await embedder.embed([query]))[0]
             rows = await repo_ops.tools_by_similarity(vec, limit=TOP_K)
-            found = [r for r in rows if r["score"] >= SIMILARITY_FLOOR]
+            found = [r for r in rows if r["score"] >= SIMILARITY_FLOOR and allowed(r["name"])]
         if not found:
             words = {w for w in query.lower().split() if len(w) > 3}
             found = [
                 {"name": t.name, "score": 1.0}
                 for t in registry.enabled()
-                if words & set(f"{t.name} {t.description}".lower().split())
+                if allowed(t.name) and words & set(f"{t.name} {t.description}".lower().split())
             ][:TOP_K]
         if not found:
             return ToolResult(content="No matching tools.")
         ctx.extra.setdefault("added_tools", []).extend(r["name"] for r in found)
-        lines = [
-            f"- {r['name']}: {registry.tools[r['name']].description}"
-            for r in found
-            if r["name"] in registry.tools
-        ]
+        lines = [f"- {r['name']}: {registry.tools[r['name']].description}" for r in found]
         return ToolResult(
             content="These tools are now available for the rest of this turn:\n" + "\n".join(lines)
         )

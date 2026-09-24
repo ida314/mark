@@ -40,6 +40,17 @@ class ToolContext:
     # rather than merely asking about it. Conflating them would mean fetching page 1 of a
     # search makes page 2 impossible.
     private: bool = False
+    # The tool names this caller is permitted to run at all - a worker's `Registry.subset`,
+    # or the orchestrator's own surface. Not "what was offered this turn": `Registry.select`
+    # is an embedding lookup and it misses, so a model naming a tool it is entitled to use
+    # is recovering from a retrieval miss, not overstepping. The boundary is the subset.
+    #
+    # `None` means "this caller has no subset, so do not enforce", and that is load-bearing
+    # rather than a soft default: `policy/replay.execute_approved` runs a queued call long
+    # after the turn that asked for it ended, and an MCP caller has no turn at all. Neither
+    # has a subset, and enforcing an empty one would refuse every call on both paths. An
+    # empty set is a different statement - "this caller may run nothing" - and is enforced.
+    tool_subset: set[str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

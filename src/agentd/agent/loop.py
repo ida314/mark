@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -295,9 +295,23 @@ class AgentLoop:
         role: str = "main",
         actor: str = "main",
         journal: JournalWriter | None = None,
+        tool_subset: Iterable[str] | None = None,
     ) -> None:
         self.cfg = cfg or get_config()
         self.registry = registry or get_registry()
+        # This agent's tool surface: the names it may run, by any route. A sub-agent has
+        # had one since Pass 6 in the shape of `Registry.subset`; this is the same notion
+        # for the orchestrator, which holds the whole registry and so could not express it.
+        #
+        # `None` here means the caller named no surface, and the ceiling is then whatever
+        # its registry holds - see the `tool_subset` property, which resolves it on every
+        # read rather than snapshotting it. Which families actually move off the
+        # orchestrator's surface is Pass 8a's decision, not this change's; what lands now is
+        # the mechanism and the enforcement, so that when 8a passes a set the narrowing is
+        # real.
+        self._tool_subset: set[str] | None = (
+            set(tool_subset) if tool_subset is not None else None
+        )
         self.engine = engine or engine_from_config(self.cfg)
         self.approver = approver or AutoApprover(approve=False)
         self.provider = provider or get_provider(self.cfg)
@@ -316,6 +330,22 @@ class AgentLoop:
         )
         self.last_pack = None
         self._journal = journal
+
+    @property
+    def tool_subset(self) -> set[str]:
+        """The names this agent may run, resolved now and not at construction.
+
+        A snapshot taken in `__init__` would be wrong twice. A caller may register a tool
+        after building its loop - `loop.registry.add(probe)` is what several callers and
+        several tests do - and that tool would be locked out of its own turn. And a worker
+        does not pass a subset at all: its narrowness lives in the registry it was built
+        over (`Registry(tools=registry.subset(...))` in `agent/subagents.py`), so reading
+        the registry is what gives a worker a real subset for free, on every door, without
+        `run_subagent` having to hand one down.
+
+        So: an explicit subset if one was named, otherwise the registry's own ceiling.
+        """
+        return self._tool_subset if self._tool_subset is not None else set(self.registry.tools)
 
     def journal_writer(self) -> JournalWriter:
         """The writer this loop appends to: the process's, unless one was injected.
@@ -438,7 +468,8 @@ class AgentLoop:
 
             # 2. Which tools should this turn even see?
             tools = await self.registry.select(
-                user_text, session_used=session.tools_used, cfg=self.cfg
+                user_text, session_used=session.tools_used, cfg=self.cfg,
+                permitted=self.tool_subset,
             )
             # Session 5d. The manifest lookup is on this turn's list exactly when there is
             # a manifest to look things up in, and off it otherwise - both directions, so
@@ -499,6 +530,17 @@ class AgentLoop:
                 # inside the turn that read the mail and is gone by the next message, which
                 # is the turn an injected instruction would actually use.
                 autonomy=autonomy, tainted=session.tainted, private=session.private,
+                # Carried on the context because two things downstream need it and neither
+                # can see this loop: `tool_search`, which must not advertise outside the
+                # surface, and the executor, which refuses outside it.
+                #
+                # Always a concrete set, resolved for this turn, and never `None` even when
+                # nothing was narrowed. `None` is reserved for a caller that has no surface
+                # at all - a replayed approval, an MCP call - and handing it down from here
+                # would switch the executor's last line off for the one caller that has a
+                # surface to enforce: a worker, whose subset is its registry and which
+                # passes no explicit `tool_subset`.
+                tool_subset=self.tool_subset,
             )
             # The approver this loop was built with, so that a tool which starts a second
             # loop - `delegate` - runs its worker against the same one. `builtin_delegate`
@@ -696,7 +738,21 @@ class AgentLoop:
                         step_id=sid,
                     )
                     call_started = time.perf_counter()
-                    if call.name not in exposed and call.name in self.registry.tools:
+                    # Door 4, kept on purpose. `select` is an embedding lookup and it
+                    # misses; a model naming a tool it is entitled to use is recovering
+                    # from that miss, not overstepping, and the recovery is worth more than
+                    # the tidiness of refusing it. `visible: false, known: true` above is
+                    # how often that happens, which is the number Pass 8a wants.
+                    #
+                    # What it may not do is widen the surface. In-subset only: outside it,
+                    # the name is refused by the executor and must not be left sitting in
+                    # `exposed`, where the next step would be shown a schema for a tool
+                    # that cannot run.
+                    if (
+                        call.name not in exposed
+                        and call.name in self.registry.tools
+                        and call.name in self.tool_subset
+                    ):
                         exposed[call.name] = self.registry.tools[call.name]
                     rj.emit(
                         "tool_started",
@@ -913,6 +969,12 @@ class AgentLoop:
         if handoff is None or not handoff.dropped_manifest:
             return [t for t in tools if t.name != LOOKUP]
         if any(t.name == LOOKUP for t in tools):
+            return tools
+        # Door 2. A handoff is written by one session and read by the next, so this is the
+        # one route on which a decision made *earlier* reaches into this run's surface: a
+        # manifest produced while a tool was still on it must not put the tool back. The
+        # subset is this run's, the manifest is the last one's, and this run's wins.
+        if LOOKUP not in self.tool_subset:
             return tools
         found = self.registry.get(LOOKUP)
         return [*tools, found] if found is not None else tools
