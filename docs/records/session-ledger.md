@@ -1736,3 +1736,45 @@ config.
 restore `[daemon] quiet_hours = [23, 8]`, restore `project = "~/Projects/agent"`, restart the
 daemon, and confirm the next heartbeat completes. A pre-edit copy of the whole file is in this
 session's scratchpad as `config.toml.pre-baseline`.
+
+## Pass 8a ran — `e6a3b83`, 2026-09-24
+
+The full write-up is `docs/records/pass-08-outcome.md`. What belongs here is the order of
+operations and the things that went wrong in the measurement rather than in the system.
+
+**The code landed before the measurement, and the clone was taken at its head.** One commit,
+`e6a3b83`, then `git clone` to `~/Projects/agent-8a` at that sha, `[paths] project` pointed at
+it, `telemetry.jsonl` rotated to `telemetry-20260924-baseline-coding.jsonl` so the pre-8a rows
+stay a separate file, `agent tools sync` (8 embeddings recomputed — `delegate`'s description
+changed with the surface), daemon restarted. Same recording approver, same `runrow.py` as the
+pre-8a rows, copied rather than rewritten.
+
+**Result: 3 pass / 1 partial / 2 fail → 6 pass, at ×7.1 wall clock.** B10 partial→pass,
+B11 fail→pass, B21 fail→pass; B02, B12, B13 hold. Three of the six were verified first-hand
+rather than graded off the agent's own sentence, which is how B11's shipped truthiness bug
+(`older_than_days=0` silently disables the filter) was found inside a passing row.
+
+**Two incidents, both mine and both in the record.** A `pgrep` came back empty while the first
+B11 was still alive; this session read that as "killed" and started a second, so ~40 s of B11
+overlapped two runs on one endpoint — B11's latency is the weakest of the six numbers. Killing
+the duplicate left run `01a0d498` with a `worker_created` and no `worker_finished`: a real
+crash-shaped run in the live journal, not folded, not resumed.
+
+**The measurement wrote durable false beliefs, and the cleanup is owed.** The review gate
+promoted five worker/consolidator candidates into `facts`; four name `agent-8a`, a throwaway
+clone, and one **superseded** the true fact `01a0c4d5` *"Dylan is building a personal agent
+runtime this quarter."* from 2026-09-21. The delete was refused by the sandbox's mass-delete
+classifier and was **not** worked around — the exact SQL, including restoring `01a0c4d5`, is in
+the outcome record under "the memory store was polluted by the measurement". The better fix for
+8b onwards is to run the suite with promotion off rather than clean up after it.
+
+**Step 8 of Dylan's baseline sequence is done.** `~/.config/agent/config.toml` is byte-identical
+to the pre-baseline copy (`diff` clean): `project = "~/Projects/agent"`, `quiet_hours = [23, 8]`,
+daemon restarted 14:55:48 EDT after the edit. The clone `~/Projects/agent-8a` is left in place at
+`e6a3b83` with a clean tree; `~/Projects/agent-baseline` at `a9036c4` is also still there. Both
+are the measurement surfaces the two addenda name, and neither is referenced by the running
+system any more.
+
+**`~/Documents/agent-db-dependency.md` is B21's artefact and was left on disk**, 3 674 bytes.
+It is the file 8d was meant to diff between runs, and it is the first run in which it exists at
+the path the answer claims.
