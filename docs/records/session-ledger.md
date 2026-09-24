@@ -1388,10 +1388,27 @@ only route by which a worker can actually write to the mounted repo is a human s
 `agent chat`. That is the shape the gate-2 ruling wanted, and it now holds by construction on
 both sides rather than by the accident that nothing wrote `ctx.extra["approver"]`.
 
-**One case that is not covered and is worth knowing before it surprises someone:** the coder
-role's `autonomy_cap` is `"act"`, and `cap_autonomy` caps rather than raises, so under
-`agent chat --autonomy act` a delegated coder runs at `act` — where `shell_exec` may resolve
-to `allow` and write to the real repo with no prompt at all. Attended, but not asked.
+**A worry raised here and then disproved — recorded because the disproof is the useful
+part.** This entry first said that under `agent chat --autonomy act` a delegated coder's
+`shell_exec` might resolve to `allow` and write with no prompt, since the role's
+`autonomy_cap` is `"act"` and `cap_autonomy` caps rather than raises. **Wrong.** Evaluated
+against the real policy engine and the shipped `config/policy.default.yaml`:
+
+| tool | observe | assist | act |
+|---|---|---|---|
+| `shell_exec` | **deny** | require_approval | **require_approval** |
+| `fs_write` | **deny** | require_approval | **require_approval** |
+| `delegate` | allow | allow | allow |
+
+`risk_matrix:write/act` is `require_approval`, not `allow`. There is no autonomy level at
+which a write to the mounted repo skips the approver. The claim is struck rather than
+softened.
+
+**And the heartbeat is two layers further from it than the approver argument suggested.**
+`daemon/heartbeat.py:118,130` runs at `autonomy="observe"`, not `assist`, so
+`cap_autonomy(min(...))` caps a heartbeat-delegated coder at `observe`, where `shell_exec`
+and `fs_write` are **`deny`** — refused by the policy engine before any approver is consulted.
+So the `QueueApprover` is the *second* thing stopping an unattended write, not the first.
 
 **The running daemon does not have the new config.** It started 2026-09-23 20:01 and
 `get_config()` resolves at process start, so `[paths] project` is invisible to it until
@@ -1531,3 +1548,80 @@ answer — the worker never got to state a test count, which is exactly the B13 
 new `sessions` row; two `effect_intended`/`effect_committed` pairs for the two `shell_exec`
 calls. No memory writes, no promotions, no `worker_finished`. The clone at
 `~/Projects/agent-probe` has been removed.
+
+## Pass 8 boundary — Dylan's rulings on the four doors, 2026-09-24
+
+### The enforcement fix: a ceiling, not the visible set — its own commit, before the baseline
+
+The orchestrator put the wrong design and **the correction is the substance.** The proposal
+was "refuse a registered-but-*unoffered* tool at the executor." Dylan's reading, recorded
+close to verbatim:
+
+> "If only door 1 respects the subset, 8a's tool move is still advisory: the orchestrator can
+> `tool_search` for `fs_write` (door 3), pick it up from a handoff manifest written by an
+> earlier session that used it (door 2), or just name it (door 4). The boundary has to be the
+> subset itself, and every door has to respect it."
+
+And the half that inverts the original proposal: **naming a tool that is in the subset but was
+not shown this turn is legitimate recovery from a retrieval miss.** `Registry.select` is an
+embedding lookup and it misses. Enforcing *offered* would have broken a working behaviour
+while leaving three doors open — the worst of both. The boundary is **subset membership**.
+
+Ruled, four parts, all binding:
+
+1. **Doors 1–3 filter against the subset.** `select`, `_with_lookup` and `tool_search`'s
+   `added_tools` may only return tools inside it. Door 2 is named specifically: a handoff
+   manifest written by an earlier session that *had* a tool must not reintroduce it.
+2. **Door 4 stays, but only inside the subset.** Kept and journaled exactly as today
+   (`tool_requested` with `visible: false, known: true`). Out-of-subset names are refused.
+3. **The executor checks subset membership as the last line**, so a fifth door added later
+   **fails closed rather than open**. Defence in depth, not the primary gate.
+4. **Nothing is added to `tool_requested`.** *"Don't add a field to `tool_requested` to mark
+   'outside surface.' That would be the precedent question again on a type with 258 live
+   rows. Put the reason in `tool_failed`'s existing error text."* If a structured field turns
+   out to be needed it is `opt()` or a new event type, **and it comes back to him first.**
+   This is the required-field ruling of 2026-09-23 being applied by its author, one day later,
+   to the first case that tested it.
+
+**Eight tests: one per door, for both the orchestrator and a worker**, each reaching an
+out-of-subset tool through that door and asserting refusal, each mutation-checked
+individually. His reason for the worker half, so it is not mistaken for redundancy:
+*"Workers already have `Registry.subset`, but I don't know that doors 2–4 respect it there
+either, and the test settles that."*
+
+**Why it lands before the baseline and does not contaminate it:** all 258 real
+`tool_requested` events are `visible=1, known=1`, so no past run could have been affected, and
+8a branches from a tree where "offered" is actually enforced. The shipped orchestrator subset
+is *everything* — the mechanism and its tests land now, and 8a is what narrows it.
+
+### The other three
+
+**Fix 1 goes in the outcome table.** `d02a559`, so the record shows both pre-8a fixes landed
+before the measurement rather than only the one this session made. Done.
+
+**The `act` correction is accepted, and the table is the right place for it.** Dylan will stop
+the heartbeat timer for the hour — **for the endpoint-contention reason, not because the
+daemon could write.** *"After the restart the 400 goes away, but the heartbeat will still
+spend its step budget retrying a denied `open_loop_close` ten times. Log it for after Pass 8."*
+Logged in `docs/plans/pass-10-evaluate.md` under 10c, with two neighbours found in the same
+evidence: a working heartbeat can never report `completed` (budget 4, `abandoned` at
+`steps >= max_steps`), and `repo_agenda.notify(title="Heartbeat failed")` has never fired
+because a provider 400 does not raise out of `run_turn`.
+
+**Clone, agreed — and 8d must match.** His sequence: stop the timer; `git clone` at HEAD and
+record the sha; point `[paths] project` at the clone; restart the daemon; run the delegation
+probe to completion; run B11–B13 under `chat`, resetting within the clone; record as the
+`baseline-v2.md` §2 addendum **with the sha and "run against a clone"**; then restore
+`project`, restart the daemon, restart the timer. **"8a's closing comparison should run the
+same way, against a clone at 8a's head, so both sides of the comparison are measured
+identically"** — now in the pass file under 8d, with the verified warning that it must be a
+clone and not a `git worktree` (a worktree's `.git` is a file pointing outside the mount, so
+`git` is dead inside the container).
+
+### Also done at this boundary
+
+`agent-sandbox:pre-8` now tags `b65b2239cbca`, the 270MB pre-8 build, which was still on disk
+as a dangling image. Rollback is `docker tag agent-sandbox:pre-8 agent-sandbox:local`, not a
+rebuild from git history. The 256m/512m reproduction is recorded in `pass-08-outcome.md` as
+the reason for the setting, and the pass file now carries the offered-set number 20 with both
+numbers required in 8d's table.

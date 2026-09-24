@@ -21,7 +21,7 @@ independent defects sat between the tool surface and a worker that could do the 
 
 | sha | defect | how it presented |
 |---|---|---|
-| `d02a559` | `extra_system` inserted a second system message at index 1 | every worker turn 400-ed at step 1, `llm_ms: 0` |
+| `d02a559` | **pre-8a fix 1** — `extra_system` inserted a second system message at index 1 | every worker turn 400-ed at step 1, `llm_ms: 0` |
 | `c9aa84f` | nothing ever wrote `ctx.extra["approver"]` | every delegated worker got a `QueueApprover`; all writes denied |
 | `91fa9c6` | no `[paths] project`; the sandbox mounted the empty workspace | the coder could not find the repo, and could not run a test in it |
 | `a8639a8` | the sandbox image had no `uv`, no `pytest`, no reachable Postgres | the suite skipped entirely, and "skipped" reads like a pass |
@@ -31,8 +31,14 @@ nothing, because three tests set `extra["approver"]` by hand and called the tool
 directly; the project path by nothing, because `conftest` leaves `project` unset; and the
 sandbox by nothing, because no test has ever been `-m docker` marked.
 
-`d02a559` landed before this session. The other three landed in it, each verified alone in a
-detached worktree rather than trusted for being green beside the others.
+**Both fixes landed before the measurement, which is the point of listing them together.**
+`d02a559` — pre-8a fix 1 — was committed 2026-09-23 18:10, before this session opened; it
+carries two tests (`tests/test_agent_loop.py`, `tests/test_subagents_and_consolidation.py`),
+was mutation-checked by restoring `messages.insert(1, ...)` (**2 failed, 966 passed — zero of
+968 pre-existing tests defended it**), and was probed against vLLM on :8001 both ways:
+`roles=['system','system','user']` → HTTP 400, `roles=['system','user']` → 200. The other
+three landed in this session, each verified alone in a detached worktree rather than trusted
+for being green beside the others.
 
 ## The live probe, which is the evidence the chain works
 
@@ -44,6 +50,30 @@ fourteen tool calls and every one failed.
 It was interrupted before `worker_finished`, so the report schema, the result cache and the
 task boundary were not exercised on that run, and no graded test count was produced. Full
 detail, including what the probe does *not* establish, is in the session ledger.
+
+## Why the sandbox tmpfs is 512m, in the record rather than only in the commit
+
+`builtin_shell.docker_command` mounts `--tmpfs /tmp:rw,size=512m`, raised from 256m. The
+reason is a reproduction, not a margin: PGDATA lives on that tmpfs because the container root
+filesystem is read-only, and pytest's `tmp_path` roots live there too. One suite run peaks at
+**188MB**, so 256m looks sufficient and survives exactly one run. Reproduced directly, twice,
+in the real `docker_command` flags:
+
+| tmpfs | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| 256m | 983 passed | **`18 failed, 664 passed, 301 errors`**, tmpfs 100% | — |
+| 512m | 983 passed | 983 passed | 983 passed, peak 352MB |
+
+**The second row is the whole argument.** A worker whose job is to iterate on the suite runs
+it more than once per container, and at 256m the second run returns a large, confident,
+entirely wrong result. That is this codebase's named failure mode — a plausible answer where
+there should be an error — and it is worth 256MB of tmpfs to remove. 512m is the smallest
+round size that holds three consecutive runs.
+
+The other measured costs of the self-contained image, accepted at the same ruling: **+0.19s on
+every `shell_exec`** (0.12s → 0.31s for `ls`), paid by trivial commands too, and the image
+going **270MB → 1.05GB**. The pre-8 image is tagged `agent-sandbox:pre-8` (`b65b2239cbca`), so
+a rollback is one `docker tag` and not a rebuild from git history.
 
 ## Three findings that bind 8a
 
@@ -86,10 +116,17 @@ Every unattended caller builds `QueueApprover` — `daemon/heartbeat.py:123`,
 worker an approver that queues and denies, which is the shape the gate-2 ruling wanted, now
 holding by construction on both sides rather than by the accident that nothing wrote the key.
 
-The uncovered case: the coder role's `autonomy_cap` is `"act"` and `cap_autonomy` caps rather
-than raises, so under `agent chat --autonomy act` a delegated coder runs at `act`, where
-`shell_exec` may resolve to `allow` and write to the real repository **with no prompt at all**.
-Attended, but not asked.
+**A worry this record raised and then disproved.** It first said that under
+`agent chat --autonomy act` a delegated coder's `shell_exec` might resolve to `allow`, since
+the role's `autonomy_cap` is `"act"`. Evaluated against the real engine and the shipped
+`config/policy.default.yaml`, that is wrong: `shell_exec` and `fs_write` are **deny** at
+`observe` and **require_approval** at both `assist` and `act`. **No autonomy level lets a
+write to the mounted repo skip the approver.**
+
+The heartbeat is further from it still: `daemon/heartbeat.py:118,130` runs at
+`autonomy="observe"`, so `cap_autonomy` caps a heartbeat-delegated coder there, where both
+tools are refused by the policy engine before any approver is consulted. The `QueueApprover`
+is the second layer, not the first.
 
 ## What 8a still needs before it is dispatched
 

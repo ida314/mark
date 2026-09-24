@@ -76,6 +76,31 @@ should coder gain content-addressed file pre-images for real undo
 The last three are the deferred items from the durability spine. Revisit them only when a
 trace shows they are costing something.
 
+### Logged from the Pass 8 boundary, with the evidence already in hand
+
+*Added 2026-09-24, on Dylan's instruction: "not blocking, log it for after Pass 8."*
+
+- **The heartbeat spends its step budget retrying a call that is denied every time.** After
+  the 2026-09-23 daemon restart the 400 is gone, but a heartbeat turn will still retry a
+  denied `open_loop_close` up to its budget. The daemon runs at `autonomy="observe"`
+  (`daemon/heartbeat.py:118,130`) with `max_steps = 4`, so a denial the model cannot appeal
+  can consume the whole turn. Nothing in the loop tells a model that a `deny` is final rather
+  than an argument problem worth rephrasing — which is the same shape as the
+  `_rejected` counter `tools/executor.py` already keeps for invalid arguments, applied to
+  policy denials instead.
+- **A working heartbeat can never report `completed`.** `loop.py:829` sets `abandoned`
+  whenever `steps >= max_steps`, and the heartbeat's budget is 4; it used all four on both of
+  its successful runs. Its answer is therefore by construction "a summary of unfinished work,
+  not an answer" (`loop.py:825`), and that is the text `repo_agenda.notify` files as a
+  Suggestion. Tuning item, not a bug.
+- **Daemon health is invisible where it looks like it should be.** A provider 400 does not
+  raise out of `run_turn` — it is journaled as `agent_finished status=failed` — so
+  `repo_agenda.notify(title="Heartbeat failed")` has never once fired. 64 notifications
+  exist and exactly one is a `heartbeat` row. The `except Exception` around the heartbeat
+  catches everything except the failure mode that actually happens, so anyone checking the
+  agenda for daemon health concludes it is fine. This one is a trace question with its answer
+  already known.
+
 ---
 
 ## Exit criteria

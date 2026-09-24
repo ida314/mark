@@ -13,6 +13,47 @@ path into a broken one. Do not start this pass until Pass 6 is done.
 
 Move one capability family per session, verifying between each.
 
+### The two numbers, and which one 8d compares against
+
+*Added 2026-09-24, on Dylan's ruling, after the surface was measured rather than assumed.*
+
+"Permanent surface" above reads as the `always_on` set, which is **13** tools. But
+`Registry.select` also hands a turn its session-used tools and the top-k embedding matches,
+and what a turn actually pays for — in prompt tokens, and in the selection error this pass
+exists to reduce — is the **offered** set. Measured from live telemetry, 46 records with
+`role == "main"`:
+
+| | value |
+|---|---|
+| tools offered per turn | **20** on 39 of 46 turns; 19 on six; 18 on one |
+| `always_on` | 13 |
+| enabled in the registry | 29 (26 at the Pass 1 baseline) |
+
+**The before-number 8d compares against is 20, not 13.** Report both in the 8d table: the
+permanent set is what this pass moves, the offered set is what it is trying to make smaller.
+
+Two consequences for the plan below. The target surface names `reminder_set`, `watcher_add`
+and `open_loops_list` as permanent, and **none of the three is `always_on` today** — so
+8a–8c are not purely subtractive, and reaching the target means promoting as well as
+moving. And the borderline cases the pass defers to measurement (`goal_upsert`,
+`open_loop_add`, `open_loop_close`, `profile_read`) start from a mixed state: only
+`profile_read` is `always_on` now.
+
+### "Moved out of the orchestrator surface" has to mean something
+
+*Added 2026-09-24. Ruled as its own commit, landing before the 8a baseline run.*
+
+Four doors put a tool in front of a turn: `Registry.select`; `AgentLoop._with_lookup`;
+`tool_search` via `ctx.extra["added_tools"]`; and `agent/loop.py:699-700`, which added **any
+registered tool the model named** to `exposed` and ran it, with no visibility check anywhere
+in `tools/executor.py`. Dropping a tool from `always_on` closes the first two only, so
+before that commit this pass's central verb was advisory.
+
+All 258 real `tool_requested` events in the live journal are `visible=1, known=1`, so no past
+run was affected and the pre-8a baseline is not contaminated by the fix. **Every session of
+this pass must treat "the orchestrator cannot call X" as a claim needing a test**, not a
+description of what was removed from a list.
+
 ---
 
 ## Target permanent surface
@@ -102,6 +143,27 @@ task specification is underspecified, not that the tool should return to the orc
 Establish that before reverting anything.
 
 **Exit.** Orchestrator surface in the 8–12 range with completion rate at or above baseline.
+
+### Both sides of the comparison are measured the same way
+
+*Added 2026-09-24, on Dylan's ruling.*
+
+The pre-8a baseline (B11–B13 under `chat`) is run against a **clone at a recorded sha**, with
+`[paths] project` pointed at the clone, not at the working checkout. Two reasons, and the
+second is the one that binds 8d: the real checkout holds untracked files and is edited in
+parallel, so it is not a stable measurement surface; and the rows reset between tasks with
+`git checkout` and a patch apply/reverse, which should not happen in a tree someone is
+working in.
+
+**8d's closing comparison runs the same way — a clone at 8a's head, with the sha recorded —
+so both sides of the comparison are measured identically.** A comparison where the before was
+taken on a clone and the after on a live checkout is measuring the checkout as well as the
+tool surface.
+
+Note for whoever sets this up: **clone it, do not `git worktree` it.** Verified 2026-09-24 —
+a worktree's `.git` is a file pointing at a gitdir outside the container mount, so `git`
+inside the sandbox dies with `fatal: not a git repository`. A clone works, including
+`git apply` of the B12 fixture.
 
 ---
 
