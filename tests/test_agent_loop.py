@@ -293,7 +293,11 @@ async def test_a_correction_cue_does_not_let_untrusted_content_reach_the_fast_pa
         ]
     )
     loop = AgentLoop(
+        # Stated, because since 8b an unstated surface means "orchestrator" and an
+        # orchestrator has no `web_fetch`. This test is about taint reaching the fast path,
+        # and the tool is a stand-in for any untrusted source.
         cfg=cfg, registry=_registry("web_fetch", "memory_remember"),
+        tool_subset=["web_fetch", "memory_remember"],
         engine=engine_from_config(cfg), approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")

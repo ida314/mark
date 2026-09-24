@@ -416,3 +416,170 @@ exists for. It has not been folded or resumed.
   not as a defect to fix.
 - **The final report call as a second inference over a truncated transcript.** It can lose work
   that was done, and after 8a it is on the critical path for every coding row. Pass 10c.
+
+---
+
+# Session 8b — the researcher role, web
+
+*2026-09-24. Suite 1008 → 1014, ruff clean, no typecheck configured. Code half only: the
+B14–B16 comparison is run separately and is the empty section at the end of this one.*
+
+`web_search` and `web_fetch` are off the orchestrator's surface and belong to the
+`researcher` durable role, which already held both. Like 8a, this session moved a boundary
+rather than building a destination — and unlike 8a, it defined no new worker, for a reason
+given below that is itself a test.
+
+## what shipped
+
+| file | what changed |
+|---|---|
+| `src/agentd/tools/surface.py` | two entries in `MOVED_TO_ROLE`, with the session-8b block that says why |
+| `src/agentd/agent/subagents.py` | `RESEARCHER`'s prompt and `expected_output` now ask for the findings, not the search; the comment above `SPECS` records why no ephemeral worker was defined |
+| `src/agentd/agent/prompts/main.md` | the orchestrator is told it has no web access, and the interlock paragraph no longer names tools it no longer has |
+| `src/agentd/tools/builtin_delegate.py` | `researcher` is no longer "web or document research" — the same verb-led shape 8a gave `coder` |
+| `tests/test_tool_surface_pass8.py` | six more tests, and the module docstring now covers the pass rather than one session |
+| `tests/test_private_interlock.py` | four loops that used `web_fetch` as a stand-in now state their surface, via one `_mail_loop` helper |
+| `tests/test_agent_loop.py` | one loop, same reason (`test_a_correction_cue_...`) |
+
+**`src/agentd/tools/executor.py` was not touched, and that was checked rather than assumed.**
+`MOVED_OUT` already formats `{role}` from `owner_of(name)`, so a `web_fetch` refusal names
+the researcher and the delegation to it with no edit. 8a could not test that the owner was
+looked up rather than written in — its whole family belonged to one role — and 8b can:
+`test_naming_web_fetch_gets_the_orchestrator_the_researcher_and_not_the_coder` asserts the
+string names the researcher *and* does not contain "coder".
+
+**`agent tools sync` is owed and was deliberately not run.** `delegate`'s description
+changed, and `Registry.sync_embeddings` is what puts that text in front of
+`tools_by_similarity`. Until it runs, the embedding row for `delegate` is the 8a wording.
+It writes to the live store, which this session is not permitted to do.
+
+## what deviated from the plan
+
+**1. No ephemeral workers, where the pass file names three.** The pass file asks for a source
+finder, a document analyst and a synthesis worker. None was defined, on 8a's criterion rather
+than on taste: `coder/explore` exists because it holds a capability the full role does not —
+nothing it can call returns `require_approval`, so it finishes where the approver queues and
+denies. Measured against the shipped `config/policy.default.yaml`, **all six of the
+researcher's tools are `allow` at `observe`, `assist` and `act`**, so the role already has
+that property and every narrower slice of it would differ only in the wording of its prompt.
+That is exactly what 8a refused a test/debug worker for, and each extra name is another way
+to phrase a delegation and so another way to miss 6c's result cache.
+`test_the_researcher_role_already_needs_nobody_at_the_terminal` is the premise as a check: a
+web tool that starts needing approval (an egress budget, a paid API) fails it, and that is
+when the source finder should be revisited.
+
+**2. The brief's mechanism for the offered set is wrong in detail, though its conclusion
+holds.** With 22 permitted tools `Registry.select` does **not** short-circuit —
+`len(enabled) <= ALWAYS_EXPOSE_LIMIT` is `22 <= 20`, false — so the similarity route still
+runs and backfills whatever slots the web tools vacated, exactly as it did at 24. The offered
+count therefore still will not fall; it is now *capped* at 22 instead of 24. The pool must
+reach 20 or fewer before `select` returns everything, and at that point offered equals
+permitted. **That is 8c's move, and 8b reporting a flat offered count is the expected result,
+not a disappointment.**
+
+**3. One extra loop needed its surface stated.** The brief predicted the interlock tests;
+`tests/test_agent_loop.py::test_a_correction_cue_does_not_let_untrusted_content_reach_the_fast_path`
+also used `web_fetch` as its untrusted source and silently stopped tainting the turn — it
+failed with `status: accepted` where it expected `Queued for review`, which is this
+codebase's named failure mode arriving through a test rather than through the runtime.
+
+## what is now true that was not before
+
+- The orchestrator cannot reach the web by any of the four doors. Door 1 is tested through
+  `session.tools_used`, which survives a resume and is the one route by which a moved tool
+  returns without anyone deciding it should; door 4 through the real loop and the real
+  refusal.
+- The refusal's owner is looked up, not hardcoded — now falsifiable, with two roles in play.
+- **The researcher keeps `fs_read`, `fs_list` and `fs_search` although 8a moved them to
+  `coder`.** The subtraction is the *orchestrator's* ceiling, not a worker's.
+  `test_the_researcher_still_reads_files_that_the_coder_role_owns` is what would catch a
+  future edit that applied `orchestrator_surface` to worker subsets too; the field symptom
+  would be B16 — "does `gcal.py` handle recurring events the way Google's docs say" — coming
+  back with the docs and not the file.
+- The interlock paragraph in `main.md` is accurate again. It used to promise that reading
+  mail shuts off "the web tools, the sandbox, research delegation and file writes"; after 8a
+  and 8b the orchestrator has none of the first three, so what it now says is that delegation
+  to `researcher` and `coder` starts refusing, and that this closes every route off the box
+  because the web and the sandbox live inside those two.
+
+## schemas exactly as implemented
+
+```python
+MOVED_TO_ROLE: dict[str, str] = {
+    "fs_list": "coder", "fs_read": "coder", "fs_search": "coder",
+    "fs_write": "coder", "shell_exec": "coder",
+    "web_search": "researcher", "web_fetch": "researcher",
+}
+```
+
+`RESEARCHER` is unchanged in shape: `tool_names=["web_search", "web_fetch", "fs_read",
+"fs_list", "fs_search", "memory_search"]`, `max_steps=10`, `autonomy_cap="assist"`. Two
+sentences were added to its contract — the prompt's *"Report the answer, not the search.
+Your caller never sees the pages you read or the queries you tried"*, and
+`expected_output`'s *"The findings themselves, not a narration of the searches that produced
+them."* `delegate`'s `agent` enum is unchanged: `["researcher", "coder", "memory"]`.
+
+## the two numbers
+
+|  | 8a | 8b |
+|---|---|---|
+| registered / enabled | 29 | **29** |
+| permanent (`always_on`) | 13 | **13** — neither web tool was ever `always_on` |
+| permitted — may run at all | 24 | **22** |
+| offered per turn | 17–20 | *measured by the B14–B16 run; expected flat near 20, see deviation 2* |
+
+The 22: `calendar_upcoming coursework_due delegate gmail_message gmail_search goal_upsert
+goals_list handoff_lookup memory_history memory_remember memory_search notify_user
+open_loop_add open_loop_close open_loops_list profile_read reminder_set time_now tool_search
+watcher_add working_memory_list working_memory_note`.
+
+## the tests, and what defended the claim before them
+
+Six new tests, all against `build_registry()` and the real no-argument default. Five
+mutations, each applied alone and run against the whole suite:
+
+| mutation | new tests killed | pre-existing killed |
+|---|---|---|
+| the web has not moved (both entries dropped) | 3 | **0** |
+| moved to a role that does not grant them (`researcher` → `coder`) | 1 | 1 (8a's `test_every_moved_tool_is_granted_by_the_role_it_moved_to`) |
+| the refusal names the coder whatever moved | 1 | **0** |
+| a worker's subset narrowed like an orchestrator's | 2 | 2 (8a's coder-worker test; `test_a_subagent_only_sees_the_tools_it_was_given`) |
+| the researcher loses the file tools | 1 | **0** |
+
+**Three of five were defended by nothing that existed before this session**, and the two that
+were defended were caught by 8a's own file — that is, by the previous session of this pass and
+not by the other 1000 tests.
+
+## deferred, and where it went
+
+- **`agent tools sync`**, owed for the `delegate` description. The orchestrator runs it.
+- **The offered-set reduction.** Still not demonstrated, and cannot be until the permitted
+  pool reaches 20 — 8c's `memory_history`, `memory_search`, `gmail_search`, `gmail_message`
+  would take it to 18.
+- **A source finder / document analyst worker**, deferred with its trigger stated: a policy
+  change that makes a web tool need approval, or a measured `researcher` run that spends its
+  ten steps searching and never reads.
+- **Everything 8a deferred** stands unchanged: exposing `coder/explore` with its
+  `policy.default.yaml` edit, the truncated-transcript report call, `-m docker` selecting
+  nothing, and the memory-store cleanup 8a's own measurement owes.
+- **No prompt test.** `main.md`'s two new claims are asserted nowhere; 8a set that precedent
+  and 8b did not break it. The runtime enforces the boundary either way — the prompt only
+  decides whether the model wastes a step finding out.
+
+## open questions for later passes
+
+- **The interlock and the moved families now overlap.** `private-data-no-outward-delegation`
+  matches `args.agent.in [researcher, coder]`, so after reading mail the orchestrator has
+  neither the web tools nor the role that holds them. That is the intended shape, but it
+  means a private turn's research capability is now zero rather than degraded, and no test
+  covers the combination of a moved family and a private session.
+- **Does compression actually happen?** The researcher's contract asks for findings rather
+  than a transcript, and nothing verifies the result is smaller than what the orchestrator
+  would have accumulated itself. 8a's finding that the final report call is a second
+  inference over `text[:20000]` applies here with more force: a research worker's transcript
+  is the part most likely to exceed that.
+
+## B14–B16 comparison
+
+*Placeholder. To be filled in by whoever runs the measurement — the rows, the method, and
+the before/after offered-set counts. Nothing in this section has been measured yet.*

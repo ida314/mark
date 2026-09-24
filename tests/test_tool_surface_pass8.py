@@ -1,4 +1,9 @@
-"""Session 8a: the filesystem and shell family leaves the orchestrator for the `coder` role.
+"""Pass 8: the capability families that have left the orchestrator, and who owns them now.
+
+Session 8a moved the filesystem and shell family to `coder`; session 8b moved `web_search`
+and `web_fetch` to `researcher`. One file for both, because the claim is the same claim with
+a different family in it, and a second file would be a second place for the next session to
+forget to update.
 
 `tests/test_tool_surface.py` establishes that a surface is a boundary - four doors, each shut
 against a probe tool. This file asserts the thing that file's mechanism was built for, and it
@@ -26,7 +31,7 @@ import json
 from agentd.agent.delegation import TaskSpec
 from agentd.agent.loop import AgentLoop, Session
 from agentd.agent.results import WorkerReport
-from agentd.agent.subagents import CODER, CODER_EXPLORE, SPECS, run_subagent
+from agentd.agent.subagents import CODER, CODER_EXPLORE, RESEARCHER, SPECS, run_subagent
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
 from agentd.policy.engine import PolicyContext, ToolCallInfo, engine_from_config
@@ -39,6 +44,12 @@ from agentd.tools.surface import MOVED_TO_ROLE, orchestrator_surface
 # put the family back one tool at a time.
 READ_SIDE = "fs_read"
 WRITE_SIDE = "shell_exec"
+
+# Session 8b's family. `web_fetch` is the one that carries an argument and an SSRF guard, so
+# it is the one driven through the loop; `web_search` is asserted alongside it wherever the
+# claim is about the family rather than about one call.
+WEB_FETCH = "web_fetch"
+WEB_SEARCH = "web_search"
 
 
 def _orchestrator(cfg, provider: FakeProvider, registry: Registry | None = None) -> AgentLoop:
@@ -271,3 +282,157 @@ def test_the_surface_is_a_subtraction_and_says_so_for_an_empty_registry():
     assert orchestrator_surface([]) == set()
     assert orchestrator_surface(["time_now", "delegate"]) == {"time_now", "delegate"}
     assert orchestrator_surface([READ_SIDE, "time_now"]) == {"time_now"}
+
+
+# --- session 8b: the web family, and the researcher --------------------------------------
+
+
+async def test_the_shipped_orchestrator_cannot_search_the_web_or_open_a_url(cfg):
+    """8b's claim, named rather than derived.
+
+    The set-difference test above holds of an empty `MOVED_TO_ROLE` and of one that lost the
+    web entries, because it reads the same dict on both sides. These two names are what this
+    session says it moved, so these two names are asserted.
+    """
+    loop = _orchestrator(cfg, FakeProvider())
+
+    assert WEB_SEARCH not in loop.tool_subset and WEB_FETCH not in loop.tool_subset
+    # Registered, enabled, and still not the orchestrator's: the move is a surface decision
+    # and not a tool being switched off, which is what keeps the researcher able to call it.
+    assert {WEB_SEARCH, WEB_FETCH} <= set(loop.registry.tools)
+
+
+async def test_naming_web_fetch_gets_the_orchestrator_the_researcher_and_not_the_coder(
+    cfg, journaled
+):
+    """Door 4, and the half of the refusal 8a could not test: that the owner is looked up
+    rather than written into the sentence.
+
+    8a's family all belongs to one role, so a refusal that said "coder" unconditionally would
+    have passed every test it wrote. A second role is what makes `owner_of` falsifiable, and
+    the assertion that the *coder* is not named is the whole point of the test.
+    """
+    provider = FakeProvider(
+        turns=[
+            [(WEB_FETCH, {"url": "https://docs.example/recurring-events"})],
+            "I cannot open a page myself.",
+        ]
+    )
+    session = await Session.create("test")
+
+    await _run(_orchestrator(cfg, provider), session, "what do Google's docs say?")
+
+    error = json.loads(_tool_replies(provider)[0])["error"]
+    assert "belongs to the researcher sub-agent" in error
+    assert "delegate(agent='researcher'" in error
+    assert "coder" not in error
+    failed = [e for e in journaled("tool_failed") if e.payload["name"] == WEB_FETCH]
+    assert "belongs to the researcher sub-agent" in failed[0].payload["error"]
+    # It never became part of the turn, and it never ran: a fetch is an `unsafe_write`
+    # because the server may act on it, so "refused before the handler" is the claim.
+    requested = [e for e in journaled("tool_requested") if e.payload["name"] == WEB_FETCH]
+    assert [e.payload["visible"] for e in requested] == [False]
+    assert [e.payload["known"] for e in requested] == [True]
+    assert [e.payload["name"] for e in journaled("tool_finished")] == []
+
+
+async def test_a_conversation_that_browsed_before_the_move_is_not_offered_the_web_after(cfg):
+    """Door 1 through the route with a memory, for 8b's family.
+
+    Worth repeating rather than trusting 8a's version: `session.tools_used` is persisted and
+    survives a resume, so a chat that fetched a page last week is the one route by which a
+    moved tool comes back without anyone deciding it should.
+    """
+    provider = FakeProvider(turns=["nothing to do"])
+    session = await Session.create("test")
+    session.tools_used = {WEB_SEARCH, WEB_FETCH, "time_now"}
+
+    await _run(_orchestrator(cfg, provider), session, "look that up again")
+
+    offered = provider.calls[0]["tools"]
+    assert WEB_SEARCH not in offered and WEB_FETCH not in offered
+    assert "time_now" in offered
+
+
+async def test_the_researcher_worker_holds_the_web_the_orchestrator_gave_up(cfg):
+    """The positive half, through the real `run_subagent` rather than off the spec.
+
+    The loopback url is deliberate: `web_fetch`'s own SSRF guard refuses it inside the
+    handler, which is after the surface check this test is about, so the tool is reached and
+    nothing leaves the machine. A surface refusal would never get that far.
+    """
+    provider = FakeProvider(
+        turns=[[(WEB_FETCH, {"url": "http://127.0.0.1/8b"})], "Could not read it."],
+        json_results=[WorkerReport(status="blocked", answer="The page was unreachable.")],
+    )
+    session = await Session.create("test")
+
+    await run_subagent(
+        RESEARCHER, TaskSpec("researcher", "find out what the docs say"),
+        parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="act",
+        approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
+    )
+
+    offered = provider.calls[0]["tools"]
+    assert WEB_SEARCH in offered and WEB_FETCH in offered
+    assert "belongs to the researcher sub-agent" not in "".join(_tool_replies(provider))
+
+
+async def test_the_researcher_still_reads_files_that_the_coder_role_owns(cfg):
+    """The subtraction is the orchestrator's ceiling, not a global disabling.
+
+    `fs_read`, `fs_list` and `fs_search` moved to `coder` in 8a and the researcher keeps all
+    three, because half of a real research question is in the repository - "does this file
+    handle recurring events the way the vendor's docs say" is one brief. If the moved
+    families were ever subtracted from a worker's own subset too, this is what would say so,
+    and the symptom in the field would be a researcher that can read the web and not the
+    file it was asked about.
+    """
+    granted = set(RESEARCHER.tool_names or [])
+
+    assert {"fs_read", "fs_list", "fs_search"} <= granted
+    assert {name for name, role in MOVED_TO_ROLE.items() if role == "coder"} & granted
+
+    provider = FakeProvider(
+        turns=["nothing to read"],
+        json_results=[WorkerReport(status="completed", answer="Nothing to read.")],
+    )
+    session = await Session.create("test")
+    await run_subagent(
+        RESEARCHER, TaskSpec("researcher", "how does gcal.py handle recurring events"),
+        parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="act",
+        approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
+    )
+
+    assert "fs_read" in provider.calls[0]["tools"]
+
+
+def test_the_researcher_role_already_needs_nobody_at_the_terminal(cfg):
+    """Why 8b defined no ephemeral workers, as a check rather than as a paragraph.
+
+    `coder/explore` earns a spec because it holds a capability the full role does not:
+    nothing it can call returns `require_approval`, so it completes where the approver queues
+    and denies. Every one of the researcher's tools is `allow` at every autonomy level, so the
+    role already has that property and a narrower slice of it - a source finder, a document
+    analyst - would differ from the role only in the wording of its prompt.
+
+    When this fails, the reasoning has expired rather than the code: a web tool that starts
+    needing approval (an egress budget, a paid API) is exactly the change that would make a
+    read-only research worker worth defining.
+    """
+    engine = engine_from_config(cfg)
+    registry = build_registry()
+
+    outcomes = {
+        engine.evaluate(
+            ToolCallInfo(
+                name=name, risk=registry.tools[name].risk,
+                tags=set(registry.tools[name].tags), args={},
+            ),
+            PolicyContext(autonomy=level, origin="interactive"),
+        ).outcome
+        for name in RESEARCHER.tool_names or []
+        for level in ("observe", "assist", "act")
+    }
+
+    assert outcomes == {"allow"}

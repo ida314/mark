@@ -21,9 +21,10 @@ from .effects import UNSAFE_WRITE
 @tool(
     "delegate",
     (
-        "Hand a self-contained task to a sub-agent: 'researcher' for web or document research, "
-        "'coder' for anything in the user's code - reading it, searching it, editing it or "
-        "running it - 'memory' for a deep search of what you know. "
+        "Hand a self-contained task to a sub-agent: 'researcher' for anything outside this "
+        "machine - searching the web, opening a url, reading a document, comparing what "
+        "sources say - 'coder' for anything in the user's code - reading it, searching it, "
+        "editing it or running it - 'memory' for a deep search of what you know. "
         "You get back a status (completed, blocked or uncertain), an answer, its evidence and "
         "what was done - not their whole transcript."
     ),

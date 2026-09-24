@@ -31,12 +31,26 @@ from collections.abc import Iterable
 # anything on the user's machine itself; that whole workflow goes to one worker that owns it
 # end to end, which is the architecture's "subagents complete an entire coherent workflow"
 # rather than the orchestrator narrating a file at a time into its own context.
+
+# Session 8b. The web family, to the `researcher` role.
+#
+# The orchestrator supplies the research objective, not the individual searches. A turn that
+# keeps `web_search` reads three pages into its own context to answer one question, and the
+# context it spends is the context the conversation runs in; a `researcher` delegation reads
+# the same three pages into a context that is discarded and returns the compressed result.
+# That is the asymmetry the move is for, and it is the reason the role's reporting contract
+# says what it found rather than what it searched.
+#
+# Neither name was `always_on`, so this move does not change the permanent set. It lowers the
+# ceiling - what the orchestrator may run by any of the four doors - from 24 to 22.
 MOVED_TO_ROLE: dict[str, str] = {
     "fs_list": "coder",
     "fs_read": "coder",
     "fs_search": "coder",
     "fs_write": "coder",
     "shell_exec": "coder",
+    "web_search": "researcher",
+    "web_fetch": "researcher",
 }
 
 
