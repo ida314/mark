@@ -132,7 +132,10 @@ def test_an_unknown_durable_role_is_refused_rather_than_given_a_default_worker()
     with pytest.raises(UnknownRole) as exc:
         TaskSpec("analyst", "do the thing")
     assert "researcher" in str(exc.value)  # it says what does exist
-    assert set(SPECS) == {"researcher", "coder"}
+    # Session 8a added `coder/explore`, an ephemeral worker inside the coder role. It is a
+    # spec like any other and so a name a delegation may use; what it is not is a name the
+    # *model* may use, because `delegate`'s `agent` enum is the door and it lists roles.
+    assert set(SPECS) == {"researcher", "coder", "coder/explore"}
 
 
 def test_a_task_of_only_whitespace_is_refused_rather_than_delegated_empty():

@@ -22,7 +22,8 @@ from .effects import UNSAFE_WRITE
     "delegate",
     (
         "Hand a self-contained task to a sub-agent: 'researcher' for web or document research, "
-        "'coder' for multi-file code work, 'memory' for a deep search of what you know. "
+        "'coder' for anything in the user's code - reading it, searching it, editing it or "
+        "running it - 'memory' for a deep search of what you know. "
         "You get back a status (completed, blocked or uncertain), an answer, its evidence and "
         "what was done - not their whole transcript."
     ),

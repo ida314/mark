@@ -29,6 +29,13 @@ def _registry(*names: str) -> Registry:
     reg.add(*(all_tools[n] for n in names))
     return reg
 
+# Session 8a moved the filesystem and shell family off the orchestrator's surface, and a
+# loop that names no surface is an orchestrator. The tests below use `fs_read`/`fs_write` as
+# a convenient stand-in for "a tool" while testing something else entirely, so they say what
+# their surface is - the registry they were handed - the same way `run_subagent` does for a
+# worker. Without that they would be testing the 8a refusal instead of what they are named
+# for, which `tests/test_tool_surface_pass8.py` already does deliberately.
+
 
 async def _run(loop: AgentLoop, session: Session, text: str, **kwargs) -> list:
     return [event async for event in loop.run_turn(session, text, **kwargs)]
@@ -41,7 +48,7 @@ async def test_tool_result_is_fed_back_and_the_answer_streams(cfg, tmp_path, jou
         turns=[[("fs_read", {"path": str(target)})], "The file says 42."]
     )
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
@@ -64,7 +71,7 @@ async def test_denied_write_comes_back_to_the_model_as_a_denial(cfg, journaled):
         turns=[[("fs_write", {"path": str(target), "content": "x", "reason": "because"})], "Understood."]
     )
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_write"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_write"), tool_subset=["fs_write"], engine=engine_from_config(cfg),
         approver=AutoApprover(approve=False), provider=provider,
     )
     session = await Session.create("test")
@@ -85,7 +92,7 @@ async def test_approved_write_happens_and_records_undo(cfg):
         turns=[[("fs_write", {"path": str(target), "content": "hello", "reason": "user asked"})], "Written."]
     )
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_write"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_write"), tool_subset=["fs_write"], engine=engine_from_config(cfg),
         approver=AutoApprover(approve=True), provider=provider,
     )
     session = await Session.create("test")
@@ -117,7 +124,8 @@ async def test_untrusted_output_taints_the_turn_and_escalates_later_writes(cfg, 
     )
     approver = AutoApprover(approve=False)
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("web_fetch", "fs_write"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("web_fetch", "fs_write"),
+        tool_subset=["web_fetch", "fs_write"], engine=engine_from_config(cfg),
         approver=approver, provider=provider,
     )
     session = await Session.create("test")
@@ -141,7 +149,7 @@ async def test_the_step_budget_ends_with_a_summary(cfg, journaled):
         ]
     )
     loop = AgentLoop(
-        cfg=small, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=small, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
@@ -172,7 +180,7 @@ async def test_the_step_budget_ends_with_a_summary(cfg, journaled):
 async def test_invalid_tool_arguments_are_reported_not_raised(cfg, journaled):
     provider = FakeProvider(turns=[[("fs_read", {})], "I need a path."])
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
@@ -185,7 +193,7 @@ async def test_invalid_tool_arguments_are_reported_not_raised(cfg, journaled):
 async def test_unknown_tool_is_reported_to_the_model(cfg, journaled):
     provider = FakeProvider(turns=[[("no_such_tool", {})], "That tool does not exist."])
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
@@ -198,7 +206,7 @@ async def test_long_tool_output_is_truncated(cfg):
     big.write_text("y" * 50_000)
     provider = FakeProvider(turns=[[("fs_read", {"path": str(big)})], "Read it."])
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")
@@ -213,7 +221,7 @@ async def test_long_tool_output_is_truncated(cfg):
 async def test_the_turn_is_archived_and_audited(cfg):
     provider = FakeProvider(turns=["Hello there."])
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider,
     )
     session = await Session.create("test")

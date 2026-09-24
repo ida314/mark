@@ -92,6 +92,13 @@ def _registry(*names: str) -> Registry:
     reg.add(*(all_tools[n] for n in names))
     return reg
 
+# Session 8a moved the filesystem and shell family off the orchestrator's surface, and a
+# loop that names no surface is an orchestrator. The tests below use `fs_read`/`fs_write` as
+# a convenient stand-in for "a tool" while testing something else entirely, so they say what
+# their surface is - the registry they were handed - the same way `run_subagent` does for a
+# worker. Without that they would be testing the 8a refusal instead of what they are named
+# for, which `tests/test_tool_surface_pass8.py` already does deliberately.
+
 
 # --- the vocabulary ---------------------------------------------------------
 
@@ -308,7 +315,7 @@ async def test_a_complete_turn_is_readable_from_the_journal_alone(cfg, tmp_path)
     store = JournalStore(tmp_path / "turn.db")
     writer = JournalWriter(store)
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider, journal=writer,
     )
     session = await Session.create("test")
@@ -413,7 +420,7 @@ async def test_a_consumer_that_walks_away_mid_turn_still_closes_the_run(cfg, tmp
     store = JournalStore(tmp_path / "turn.db")
     writer = JournalWriter(store)
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), provider=provider, journal=writer,
     )
     session = await Session.create("test")
@@ -441,7 +448,7 @@ async def test_a_denied_call_records_the_rule_that_denied_it(cfg, tmp_path):
     store = JournalStore(tmp_path / "turn.db")
     writer = JournalWriter(store)
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_write"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_write"), tool_subset=["fs_write"], engine=engine_from_config(cfg),
         approver=AutoApprover(approve=False), provider=provider, journal=writer,
     )
     session = await Session.create("test")

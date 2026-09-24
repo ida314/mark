@@ -63,6 +63,13 @@ def _registry(*names: str) -> Registry:
     reg.add(*(all_tools[n] for n in names))
     return reg
 
+# Session 8a moved the filesystem and shell family off the orchestrator's surface, and a
+# loop that names no surface is an orchestrator. The tests below use `fs_read`/`fs_write` as
+# a convenient stand-in for "a tool" while testing something else entirely, so they say what
+# their surface is - the registry they were handed - the same way `run_subagent` does for a
+# worker. Without that they would be testing the 8a refusal instead of what they are named
+# for, which `tests/test_tool_surface_pass8.py` already does deliberately.
+
 
 def _msg(preview: str = "hi") -> dict[str, Any]:
     return {"role": "user", "actor": "user", "chars": len(preview), "preview": preview}
@@ -84,7 +91,7 @@ async def test_a_turn_that_calls_a_tool_says_nothing_about_it_on_the_stream(cfg,
     target = cfg.paths.roots()[0] / "note.txt"
     target.write_text("42")
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("fs_read"), engine=engine_from_config(cfg),
+        cfg=cfg, registry=_registry("fs_read"), tool_subset=["fs_read"], engine=engine_from_config(cfg),
         approver=AutoApprover(True), journal=writer,
         provider=FakeProvider(turns=[[("fs_read", {"path": str(target)})], "It says 42."]),
     )

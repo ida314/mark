@@ -1811,14 +1811,22 @@ def policy_explain(
 @tools_app.command("list")
 def tools_list() -> None:
     from ..tools.registry import get_registry
+    from ..tools.surface import owner_of
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("tool")
     table.add_column("risk")
+    # Since 8a the registry is no longer the orchestrator's surface, and a table that does
+    # not say so is a table a reader will take for one. This column is the only place the
+    # move is visible outside the code.
+    table.add_column("owner")
     table.add_column("tags")
     table.add_column("description", overflow="fold")
     for tool in sorted(get_registry().enabled(), key=lambda t: (t.risk, t.name)):
-        table.add_row(tool.name, tool.risk, ",".join(tool.tags), tool.description)
+        table.add_row(
+            tool.name, tool.risk, owner_of(tool.name) or "orchestrator",
+            ",".join(tool.tags), tool.description,
+        )
     console.print(table)
 
 

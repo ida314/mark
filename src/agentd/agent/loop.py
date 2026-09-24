@@ -35,6 +35,7 @@ from ..tools.base import ToolContext
 from ..tools.builtin_handoff import LOOKUP
 from ..tools.executor import ToolExecutor
 from ..tools.registry import Registry, get_registry
+from ..tools.surface import orchestrator_surface
 from . import budget
 from . import context as ctxmod
 from . import handoff as handoff_mod
@@ -303,12 +304,10 @@ class AgentLoop:
         # had one since Pass 6 in the shape of `Registry.subset`; this is the same notion
         # for the orchestrator, which holds the whole registry and so could not express it.
         #
-        # `None` here means the caller named no surface, and the ceiling is then whatever
-        # its registry holds - see the `tool_subset` property, which resolves it on every
-        # read rather than snapshotting it. Which families actually move off the
-        # orchestrator's surface is Pass 8a's decision, not this change's; what lands now is
-        # the mechanism and the enforcement, so that when 8a passes a set the narrowing is
-        # real.
+        # `None` here means the caller named no surface, which is what an orchestrator does:
+        # the ceiling is then its registry minus the families that have moved to a durable
+        # role. See the `tool_subset` property, which resolves that on every read rather than
+        # snapshotting it.
         self._tool_subset: set[str] | None = (
             set(tool_subset) if tool_subset is not None else None
         )
@@ -335,17 +334,24 @@ class AgentLoop:
     def tool_subset(self) -> set[str]:
         """The names this agent may run, resolved now and not at construction.
 
-        A snapshot taken in `__init__` would be wrong twice. A caller may register a tool
-        after building its loop - `loop.registry.add(probe)` is what several callers and
-        several tests do - and that tool would be locked out of its own turn. And a worker
-        does not pass a subset at all: its narrowness lives in the registry it was built
-        over (`Registry(tools=registry.subset(...))` in `agent/subagents.py`), so reading
-        the registry is what gives a worker a real subset for free, on every door, without
-        `run_subagent` having to hand one down.
+        A snapshot taken in `__init__` would be wrong: a caller may register a tool after
+        building its loop - `loop.registry.add(probe)` is what several callers and several
+        tests do - and that tool would be locked out of its own turn. So the ceiling is read
+        off the registry on every access, and session 8a's narrowing is a *subtraction* from
+        it rather than a fixed list, which is what keeps that property true.
 
-        So: an explicit subset if one was named, otherwise the registry's own ceiling.
+        Naming no subset means this loop is an orchestrator, and an orchestrator's surface is
+        everything its registry holds minus the families that have moved to a durable role
+        (`tools/surface.py`). That is the default on purpose: the five places that build an
+        orchestrator - `cli/chat.py`, `cli/app.py`, `daemon/{telegram,scheduler,heartbeat}.py`
+        - and `one_shot` below all pass nothing, and a sixth added later gets the narrowing
+        without anyone remembering to ask for it. A worker states its surface outright in
+        `run_subagent`, because a worker's surface is its own subset and subtracting the moved
+        families from *it* would take the coder's tools away from the role they moved to.
         """
-        return self._tool_subset if self._tool_subset is not None else set(self.registry.tools)
+        if self._tool_subset is not None:
+            return self._tool_subset
+        return orchestrator_surface(self.registry.tools)
 
     def journal_writer(self) -> JournalWriter:
         """The writer this loop appends to: the process's, unless one was injected.

@@ -36,9 +36,13 @@ def _registry(*names: str) -> Registry:
 
 
 def _loop(cfg, provider, *tools: str, approve: bool = True) -> AgentLoop:
+    # `tool_subset` says out loud that this loop's surface is the registry it was handed.
+    # Session 8a moved the filesystem and shell family off the orchestrator, and a loop that
+    # names no surface is an orchestrator - so without this the rows below would be
+    # measuring the 8a refusal rather than the telemetry of a tool call.
     return AgentLoop(
         cfg=cfg, registry=_registry(*tools), engine=engine_from_config(cfg),
-        approver=AutoApprover(approve), provider=provider,
+        approver=AutoApprover(approve), provider=provider, tool_subset=tools,
     )
 
 

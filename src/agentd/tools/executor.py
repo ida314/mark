@@ -32,6 +32,7 @@ from ..policy.engine import PolicyContext, PolicyEngine, ToolCallInfo
 from . import effects
 from .base import Tool, ToolContext, ToolResult
 from .idempotency import CanonicalizationError, args_hash, declared_names
+from .surface import owner_of
 
 # What the model is told when the guard refuses. It names the tool, says what is actually
 # known - the call was announced and never reported back, so it *may* have gone out - and
@@ -58,6 +59,24 @@ OUT_OF_SUBSET = (
     "fixed for the whole run, so neither searching for it nor calling it again will reach "
     "it. Do what you can with the tools you have; if the work genuinely needs {tool}, say "
     "so plainly instead, and whoever reads this can hand it to something that has it."
+)
+
+# Session 8a. The same refusal for a tool that did not merely fail to be granted but was
+# *moved*, and therefore has a named owner. Everything above still holds - there is no route
+# to it from inside this turn - and the difference is that there is somewhere for the work to
+# go, which the sentence above cannot say because before 8a there was nowhere.
+#
+# Dylan's ruling of 2026-09-24 put the reason in `tool_failed`'s existing error text rather
+# than in a new field on `tool_requested`, so this string is the whole record of the fact.
+# It names the delegation and not the tool: handing `coder` a brief to "call fs_read on X" is
+# the orchestrator narrating a file at a time through a worker, which is the shape the move
+# exists to stop.
+MOVED_OUT = (
+    "Refusing to run {tool}. It is not part of this agent's tool surface: {tool} belongs to "
+    "the {role} sub-agent now, and the surface is fixed for the whole run, so neither "
+    "searching for it nor calling it again will reach it. Delegate the whole piece of work "
+    "instead - delegate(agent='{role}', task=...) with a brief complete enough to act on "
+    "without seeing this conversation - rather than asking it to make this one call for you."
 )
 
 UNTRUSTED_WRAPPER = (
@@ -123,9 +142,14 @@ class ToolExecutor:
         # keeps a sub-agent's message unchanged - a worker's registry *is* its subset, so
         # an out-of-subset name is unknown to it and is reported as such.
         if ctx.tool_subset is not None and name not in ctx.tool_subset:
+            role = owner_of(name)
+            message = (
+                MOVED_OUT.format(tool=name, role=role) if role
+                else OUT_OF_SUBSET.format(tool=name)
+            )
             return await self._fail(
-                action_id, parent_id, ctx, name, args, OUT_OF_SUBSET.format(tool=name),
-                started, data={"out_of_subset": True},
+                action_id, parent_id, ctx, name, args, message, started,
+                data={"out_of_subset": True, "moved_to": role},
             )
         if err:
             return await self._fail(action_id, parent_id, ctx, name, {}, err, started)

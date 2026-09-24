@@ -105,7 +105,54 @@ CODER = SubagentSpec(
     ),
 )
 
-SPECS: dict[str, SubagentSpec] = {s.name: s for s in (RESEARCHER, CODER)}
+# Session 8a - an ephemeral worker *within* the coder role, and the only one this session
+# found a reason to define.
+#
+# A durable role is a standing configuration; an ephemeral worker is one run of it. The two
+# below differ in the only way that buys anything: `coder` holds `fs_write` and `shell_exec`,
+# both of which are `require_approval` at every autonomy level this system runs at, so every
+# `coder` delegation needs someone at a terminal. `coder/explore` holds neither. Nothing it
+# can call returns `require_approval`, so it is the one shape of coder work that completes on
+# an unattended path - `agent ask`, a watcher, the daemon heartbeat - where the approver
+# queues and denies. That is a capability the whole role does not have, which is what makes
+# this a worker worth defining rather than a paragraph of prompt.
+#
+# The implementation worker is `coder` itself: a spec that differed from it only in wording
+# would be a second name for the same worker, and a second way to phrase a delegation is a
+# second way to miss 6c's result cache. A separate test/debug worker was considered and not
+# defined for the same reason - it would hold `shell_exec` and `fs_read` like the role does,
+# and differ only in what its prompt asked for. If a later pass measures a `coder` run that
+# spends its budget re-reading the repo before it can run a failing test, that is the
+# evidence that would justify splitting one out.
+#
+# Not reachable from the model in 8a: `delegate`'s `agent` enum is unchanged, so the
+# orchestrator still names roles and not workers. Exposing it means adding the name to that
+# enum *and* to `private-data-no-outward-delegation` in `config/policy.default.yaml` in the
+# same edit - the interlock matches on `args.agent.in [researcher, coder]`, and a worker name
+# that is not in that list is a delegation the private-data rule does not see. Deferred to 8d
+# with the measurement that would settle it: whether a coding row on an unattended path fails
+# for want of approvals that `coder/explore` would not have needed.
+CODER_EXPLORE = SubagentSpec(
+    name="coder/explore",
+    prompt=(
+        "You are a code exploration sub-agent. Answer questions about a repository by "
+        "reading it, and cite what you read.\n"
+        "You can read, list and search files. You cannot write anything and you cannot run "
+        "commands - that is deliberate, not a fault to work around, so do not ask for a "
+        "shell or propose an edit.\n"
+        "Every claim about the code carries the file path and the line number you read it "
+        "at. Say plainly what you looked for and could not find, rather than inferring it "
+        "from a name."
+    ),
+    tool_names=["fs_read", "fs_list", "fs_search", "memory_search"],
+    max_steps=12,
+    expected_output=(
+        "The answer, with a file path and line number behind every claim about the code, "
+        "and what you looked for and could not find."
+    ),
+)
+
+SPECS: dict[str, SubagentSpec] = {s.name: s for s in (RESEARCHER, CODER, CODER_EXPLORE)}
 
 
 def project_block(cfg: Config, *, has_shell: bool) -> str:
@@ -221,6 +268,11 @@ async def run_subagent(
         role=spec.role,
         actor=f"subagent:{spec.name}",
         journal=rj.writer,
+        # A worker's surface is its subset, stated rather than inferred. Since 8a an
+        # unstated surface means "orchestrator", and an orchestrator's ceiling has the
+        # moved families subtracted from it - which applied here would take `fs_write` and
+        # `shell_exec` away from the very role they were moved to.
+        tool_subset=set(restricted.tools),
     )
     loop.cfg = cfg.model_copy(update={"agent": cfg.agent.model_copy(update={"max_steps": spec.max_steps})})
 
