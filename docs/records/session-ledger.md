@@ -1683,3 +1683,56 @@ instruction to test the worker half rather than assume it is what found that.
    execution**; the loop guard only stops the name being adopted into `exposed`.
 
 Suite 987 → 998, ruff clean, nothing staged that was not this change, no test file edited.
+
+## Baseline environment armed — 2026-09-24 11:41 EDT
+
+Steps 1–4 of Dylan's sequence, run on his instruction. **Everything here is temporary and has
+to be undone at step 8; the restore values are written into the config file itself, beside
+each change.**
+
+**1. The heartbeat is silenced, in config rather than by stopping the daemon.**
+`[daemon] quiet_hours = [23, 8]` → `[0, 24]`. `in_quiet_hours` reads
+`start <= hour < end` when `start <= end`, so `[0, 24]` is true at every hour and
+`heartbeat_loop` hits its `continue` before `situation_report` — **no model call at all**,
+which is the point, since the reason for stopping it is contention on the shared endpoint and
+not any risk of it writing. Confirmed against the loaded config: `quiet now? True`.
+
+**Checked before touching it, because the key is shared:** `daemon/notifier.py:81-83` falls
+back to `cfg.daemon.quiet_hours` **only when `cfg.ntfy.quiet_hours is None`**, and the live
+config sets `[ntfy] quiet_hours = [0, 0]`. So push is unaffected and keeps its always-on
+window. Had `[ntfy]` been unset, this edit would have silenced notifications too.
+
+**2. The clone, and the sha.**
+
+```
+~/Projects/agent-baseline   a9036c4465bf3b7d91642b2274fd1f85262f510c
+```
+
+`git clone` of the working checkout, then `git checkout main`, which is the same commit — on
+a branch rather than detached, so the rows can reset with `git checkout` and read normally in
+`git status`. **A clone and not a `git worktree`**, per the verified finding: a worktree's
+`.git` is a file pointing at a gitdir outside the container mount, so `git` dies inside the
+sandbox. Confirmed here: `.git` is a directory, and `evals/fixtures/b12-mutation.patch` is
+present for B12's run condition. No `.venv`, which is correct — the sandbox uses `/opt/venv`.
+
+The working checkout is at the same sha, so the only differences are the untracked files
+(`CLAUDE.md`, the three `docs/plans` prompt files, `repo-drop(1).zip`) and whatever Dylan
+edits next. **That is the whole reason for the clone.**
+
+**3. `[paths] project` points at the clone.** `project = "~/Projects/agent-baseline"`, with
+the old line kept commented directly above it. Verified through the loaded config rather than
+by reading the file back: `cfg.paths.project_root` and `builtin_shell.mount_source()` both
+resolve to the clone, and `project_block` renders the clone's path in the worker's role
+prompt. **So the read-write sandbox mount is now on the clone, not on Dylan's tree.**
+
+**4. Daemon restarted.** `systemctl --user restart agent-daemon.service`, active since
+11:41:24 EDT, pid 95082, and `daemon_status` carries that pid with `{'status': 'running'}` at
+15:41:25Z. The config file's mtime is 11:41:13 and the process started 11:41:24, so **the
+restart is after the edit** and the running daemon has both changes — which is the thing a
+`systemctl status` alone would not tell you, since an editable install reloads code but never
+config.
+
+**Owed at step 8, and the session that ends without doing it leaves the system wrong:**
+restore `[daemon] quiet_hours = [23, 8]`, restore `project = "~/Projects/agent"`, restart the
+daemon, and confirm the next heartbeat completes. A pre-edit copy of the whole file is in this
+session's scratchpad as `config.toml.pre-baseline`.
