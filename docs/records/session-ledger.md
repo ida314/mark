@@ -1485,3 +1485,49 @@ docker. Flagged, not built.
 **Where the approved order stands now.** Steps 1 and 2 met; the sandbox prerequisite met.
 **Step 3 — B11, B12, B13 under `chat`, attended, ~1 hour — is next and it needs Dylan at the
 terminal.** Step 4 is the `baseline-v2.md` §2 addendum, step 5 is dispatching 8a.
+
+## The live probe — the whole chain works, and it was interrupted before it finished
+
+Run against a **throwaway clone**, not the working tree: `~/Projects/agent-probe`, with
+`AGENT_PATHS__PROJECT` pointed at it, so nothing a worker did could reach Dylan's repo. Real
+config, real SIR endpoint, real journal, real sandbox image. `AutoApprover(True)`, because the
+point was to exercise `shell_exec` rather than the approval wall. One delegation to `coder`:
+*"Run this project's full test suite and report exactly how many tests passed, how many
+failed, and the command you used. Do not change any files."*
+
+**Dylan interrupted it partway, and it is not being re-run.** What had already landed is the
+part that mattered, read back out of the journal (run `01a0d3ca-c8ca-7172-81b6-67fb31ce19f5`,
+23 rows, 14:21:17–14:22:33Z):
+
+| seq | call | result |
+|---|---|---|
+| 6→8 | `fs_list "/home/dylan/Projects/agent-probe"` | **ok**, 240 chars, 4 ms |
+| 10→12 | `fs_read ".../pyproject.toml"` | **ok**, 1913 chars, 2 ms |
+| 14→18 | `shell_exec "uv run pytest 2>&1 \| tail -40"` | **ok, `exit=0`**, 3297 chars, **28.3 s** |
+| 20 | `shell_exec "uv run pytest ... \| grep -E 'passed\|failed\|error'"` | requested; interrupted here |
+
+**Zero `tool_failed` events in the run.** Against the 2026-09-24 00:38 probe — fourteen tool
+calls, every one of them failed — that is the whole pre-8a chain working at once, in the live
+path rather than in a harness:
+
+- **fix 1** (`d02a559`): the worker turn runs at all; before it, `subagent:coder` died at step 1
+  on the `extra_system` 400 with `answer_chars: 0`.
+- **ruling 1** (`91fa9c6`): the model wrote an **absolute path into the project** on its first
+  call and it resolved. The previous probe's fourteen failures were relative paths landing in
+  the empty workspace plus one out-of-roots guess.
+- **fix 2** (`c9aa84f`): the probe's approver reached the worker, so `shell_exec` was approved
+  rather than queue-denied. Under the old fallback this row would read `denied`.
+- **the sandbox** (`a8639a8`): `uv run pytest` **exited 0 inside the container** on a live
+  delegation — the command B12's task text names, run by the model, not by a verification
+  script.
+
+**What this probe does not establish**, and it should not be written up as if it did: there is
+no `worker_finished`, so nothing exercised the report schema, the result cache or the
+`worker_finished` boundary on this run; and "exit=0" is the shell's status, not a graded
+answer — the worker never got to state a test count, which is exactly the B13 failure mode
+(reasoning about a truncated result) that the real eval row exists to measure.
+
+**Live data written, stated rather than glossed:** journal 1313 → 1336 rows, 58 → 59 runs; one
+new `sessions` row; two `effect_intended`/`effect_committed` pairs for the two `shell_exec`
+calls. No memory writes, no promotions, no `worker_finished`. The clone at
+`~/Projects/agent-probe` has been removed.
