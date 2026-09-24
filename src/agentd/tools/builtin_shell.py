@@ -31,7 +31,13 @@ def docker_command(command: str, *, network: bool, timeout_s: int, name: str) ->
     return [
         "docker", "run", "--rm", "--name", name,
         "--network", "bridge" if network else "none",
-        "--read-only", "--tmpfs", "/tmp:rw,size=256m",
+        # 512m, not the 256m this was: the sandbox image runs its own Postgres with
+        # PGDATA under this tmpfs (the root filesystem is read-only), and pytest puts
+        # its tmp_path roots here too. One suite run peaks at 188MB. At 256m a second
+        # run in the same container fills the tmpfs and reports 18 failed / 301 errors
+        # - a wrong answer that looks like a real one, which is the worst outcome for
+        # a worker whose job is to iterate on the suite.
+        "--read-only", "--tmpfs", "/tmp:rw,size=512m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--pids-limit", "256", "--memory", cfg.sandbox.memory, "--cpus", cfg.sandbox.cpus,
         "--user", "1000:1000",

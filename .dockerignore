@@ -1,0 +1,9 @@
+# The sandbox image's build context is the repo root (see `agent sandbox build`), but the
+# Dockerfile only needs pyproject.toml, uv.lock and docker/. Without this, the 400MB host
+# virtualenv and the git history are uploaded to the daemon on every build.
+.venv/
+.git/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+*.zip
