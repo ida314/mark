@@ -364,13 +364,23 @@ def test_an_airgapped_sandbox_still_runs_after_reading_mail():
     assert decision.rule_id != "private-data-no-egress"
 
 
-def test_local_delegation_survives_the_interlock():
-    """delegate(memory) never builds a sub-agent; it packs retrieval in this process."""
-    decision = _shipped().evaluate(
-        ToolCallInfo(name="delegate", risk="read", tags=("core",), args={"agent": "memory"}),
-        PolicyContext(autonomy="assist", private=True),
-    )
-    assert decision.outcome == "allow"
+def test_delegation_to_a_role_with_no_way_off_the_box_survives_the_interlock():
+    """The rule names roles rather than the tool, and the names are the ones that hold a
+    route off this machine: `researcher` has the web, `coder` has the sandbox.
+
+    This used to read "delegate(memory) never builds a sub-agent", which was the reason
+    until session 8c made `memory` a real durable role and moved `memory_search` and
+    `memory_history` into it. The verdict is unchanged and the reason is not: a memory
+    worker holds three read-only local tools, and denying it would mean that reading the
+    mail leaves the agent unable to consult its own memory at all - which is the workflow
+    the interlock exists to preserve, not one it is meant to break.
+    """
+    for agent in ("memory", "mail"):
+        decision = _shipped().evaluate(
+            ToolCallInfo(name="delegate", risk="read", tags=("core",), args={"agent": agent}),
+            PolicyContext(autonomy="assist", private=True),
+        )
+        assert decision.outcome == "allow", agent
 
 
 def test_the_mail_tools_do_not_lock_themselves_out():

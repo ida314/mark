@@ -43,6 +43,35 @@ from collections.abc import Iterable
 #
 # Neither name was `always_on`, so this move does not change the permanent set. It lowers the
 # ceiling - what the orchestrator may run by any of the four doors - from 24 to 22.
+
+# Session 8c. The memory family to `memory`, and the mail family to `mail`.
+#
+# Two moves in one session because they are one decision each and neither is the other's:
+#
+# `memory_search` and `memory_history` go to a role that did not exist as a worker until
+# now. `delegate(agent="memory")` used to be the one branch of the delegate tool that was
+# not a delegation - it packed retrieval in this process and built no worker - so there was
+# nothing for these two to move *to*. 8c makes `memory` a real durable role with a spec, a
+# budget and a reporting contract, which is what "reachable through a durable role" has to
+# mean if the exit criterion is a test rather than a sentence. The orchestrator still gets
+# what it knows: the retrieved context block is built for every turn and is unchanged.
+#
+# `gmail_search` and `gmail_message` go to `mail`, a role created for them, and the choice
+# of role was a safety decision rather than a filing one. The obvious home was `researcher`,
+# which already reads things from outside the machine - and that is exactly what it must not
+# be. `private-data-no-outward-delegation` exists because a sub-agent starts with a fresh
+# session, unaware the caller ever read the mailbox, holding `web_search` and `web_fetch`;
+# after 8b the researcher is the *only* holder of those two, so putting the mailbox in it
+# would put the user's mail and the open web inside one worker and defeat the interlock in
+# the one place it was written to hold. `mail` holds the two read-only Gmail tools and
+# nothing else, which is a premise `tests/test_tool_surface_pass8.py` checks rather than a
+# property this comment asserts.
+#
+# Three of the four - everything but `memory_history` - are `always_on`, so this is the
+# first session of the pass that shrinks the orchestrator's *permanent* set and not only
+# its ceiling: 13 -> 10 permanent, 22 -> 18 permitted. The flags themselves are untouched,
+# because `always_on` means "always offered by the registry that holds it" and the registry
+# that holds these four is now the role's.
 MOVED_TO_ROLE: dict[str, str] = {
     "fs_list": "coder",
     "fs_read": "coder",
@@ -51,6 +80,10 @@ MOVED_TO_ROLE: dict[str, str] = {
     "shell_exec": "coder",
     "web_search": "researcher",
     "web_fetch": "researcher",
+    "memory_search": "memory",
+    "memory_history": "memory",
+    "gmail_search": "mail",
+    "gmail_message": "mail",
 }
 
 

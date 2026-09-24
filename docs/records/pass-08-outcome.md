@@ -1,6 +1,6 @@
 # Pass 8 — Tool Surface Reduction — outcome
 
-Sessions completed: **8a**. 8b, 8c and 8d are untouched and append to this file.
+Sessions completed: **8a**, **8b**, **8c**. 8d is untouched and appends to this file.
 
 The pass's own exit criteria — target surface reached, no regression against baseline, every
 moved tool reachable through a durable role — are **not yet met**, and cannot be until 8b and
@@ -583,3 +583,261 @@ not by the other 1000 tests.
 
 *Placeholder. To be filled in by whoever runs the measurement — the rows, the method, and
 the before/after offered-set counts. Nothing in this section has been measured yet.*
+
+---
+
+# Session 8c — memory and the mailbox, and the two roles they moved to
+
+*2026-09-24. Suite 1014 → 1028, ruff clean, no typecheck configured. Code half only: the
+B17–B20 comparison is run separately and is the empty section at the end of this one.*
+
+`memory_search`, `memory_history`, `gmail_search` and `gmail_message` are off the
+orchestrator's surface. Unlike 8a and 8b, this session did **not** only move a boundary: one
+of the two destinations did not exist, the other had to be created rather than chosen, and
+moving the mailbox behind a delegation took two interlock mechanisms out of reach that had to
+be put back in the same change.
+
+The permitted pool is **18**, which is the number the pass has been waiting for: `select`
+short-circuits, and the offered set is no longer chosen by an embedding.
+
+## what shipped
+
+| file | what changed |
+|---|---|
+| `src/agentd/tools/surface.py` | four entries in `MOVED_TO_ROLE`, with the session-8c block that says why the mailbox is not the researcher's |
+| `src/agentd/agent/subagents.py` | `MEMORY` and `MAIL` specs; `reads_private_data()`; `SPECS` grows to five |
+| `src/agentd/tools/builtin_delegate.py` | the `agent == "memory"` in-process branch is gone; `mail` in the enum; the result carries `private` |
+| `src/agentd/agent/loop.py` | `private_call` also reads `result.data["private"]`, so a delegation can raise the caller's interlock |
+| `config/policy.default.yaml` | `mail-delegation-never-unattended`; the interlock's comment no longer rests on a premise 8c removed |
+| `src/agentd/agent/prompts/main.md` | the orchestrator is told it cannot search memory and cannot read mail, and what a `mail` delegation costs |
+| `tests/test_tool_surface_pass8.py` | fourteen more tests; the module docstring covers three sessions |
+| `tests/test_policy.py` | `test_local_delegation_survives_the_interlock` renamed and re-reasoned: its stated reason had expired |
+| `tests/test_delegation.py` | `SPECS` is five roles |
+| `tests/test_tool_arguments.py` | one loop that used `memory_search` as a stand-in now states its surface |
+
+## what deviated from the plan, and why
+
+**1. `delegate(agent="memory")` was not a delegation, so 8c had to build the role before it
+could move anything to it.** The branch called `memory.retrieval.pack` in this process and
+built no worker; there was no `SubagentSpec` named `memory`, and 8a's
+`test_every_moved_tool_is_granted_by_the_role_it_moved_to` fails rather than passing quietly
+when a family is moved to a name with no spec. The branch is **removed**: every value of
+`agent` is now a durable role, and `memory` is a read-only worker over `memory_search`,
+`memory_history` and `profile_read`.
+
+What is lost is one retrieval call answered in-process; what is gained is a worker that can
+ask more than once — a deep memory question is "search, notice the answer is superseded,
+check its history, say which holds now", which is three calls and a judgement rather than one
+`pack()`. The orchestrator is not left blind: the retrieved context block is built for every
+turn by `agent/context.py` and 8c does not touch it.
+
+**2. The mail tools went to a new `mail` role, and that was a safety decision.** The obvious
+home was `researcher`, and it is the one role they must not have. After 8b the researcher is
+the **only** holder of `web_search` and `web_fetch`, and
+`private-data-no-outward-delegation` exists precisely because a sub-agent starts with a fresh
+session unaware its caller read the mailbox — so a researcher holding the mailbox would have
+both sides of that interlock inside one context where no rule can see them, while the rule
+went on reading as though it were enforced.
+`test_the_mailbox_and_the_open_web_are_never_inside_one_worker` is that argument over **every**
+spec, so the tidy wrong edit fails rather than passes.
+
+**3. Moving the mailbox behind a delegation broke two things that had to be fixed here.**
+Neither is in the pass file; both are consequences of the move, and shipping the move without
+them would have been a net loss of safety dressed as a surface reduction.
+
+* **A worker's `session.private` dies with the worker.** What survives is its answer, and for
+  this role the answer *is* the user's mail, rendered into the orchestrator's context. Without
+  propagation the orchestrator could have asked `mail` for the registrar's deadline and then
+  delegated to `researcher` — mail in context, web in the worker, interlock never consulted.
+  `builtin_delegate` now reports `private` on the result and `agent/loop.py` raises
+  `session.private` on the caller, the same flag `private_output` raises for a tool run in the
+  turn itself. It is **derived from the role's tools**, not declared: the day somebody adds
+  `gmail_search` to `researcher`, delegating to the researcher starts closing the door with no
+  edit here.
+* **`mail-tools-never-unattended` stopped reaching.** It matches `origin: [daemon]`, and
+  `run_subagent` gives a worker an origin of `subagent:<role>` rather than its caller's — so a
+  heartbeat that delegated to `mail` would have handed the mailbox to a turn the rule cannot
+  see. `mail-delegation-never-unattended` is the same refusal one layer up. A worker cannot
+  delegate onward (`delegate` is in no role's `tool_names`), so that one call is the daemon's
+  only route, and the test asserts both halves.
+
+**4. `memory` and `mail` are deliberately *not* in `private-data-no-outward-delegation`.** Not
+because they are small. Before 8c the orchestrator held `memory_search` and `memory_history`
+itself and both are in `test_policy.py`'s `PRIVATE_SAFE` set — the interlock shuts the
+*egress* door and a local SELECT over the user's own memory opens none. After 8c a delegation
+is the only way to reach them, so listing `memory` there would mean reading the mail leaves
+the agent unable to consult its memory at all, which is the workflow the interlock was
+written to preserve rather than one it is meant to break. The premise — that between them the
+two roles hold five read-only tools and no egress tag — is checked against the real registry
+rather than asserted in the comment.
+
+**5. The brief's mechanism for the offered set is right, and its number is one too high.**
+`select` does short-circuit at 18 and does return the whole permitted pool. But a turn is
+offered **17**, not 18, because `AgentLoop._with_lookup` withholds `handoff_lookup` unless the
+session has a handoff manifest to resolve refs against. 18 is the steady-state count only in a
+session that has handed off. Both are in the test.
+
+**6. One extra loop needed its surface stated**, as in 8b:
+`tests/test_tool_arguments.py::test_the_same_rejected_arguments_do_not_get_to_spend_the_whole_turn`
+built an orchestrator over a two-tool registry and asserted that `memory_search` survived the
+withdrawal of `memory_remember`. After the move it was offered nothing at all — the assertion
+would have passed for the wrong reason had it been written the other way round.
+
+## what is now true about the code that was not before
+
+- **The orchestrator cannot reach the user's mailbox or search its own memory, by any of the
+  four doors.** Door 1 is tested through `session.tools_used`, which survives a resume and is
+  the one route by which a moved tool returns without anyone deciding it should; door 3
+  through `tool_search`; door 4 through the real loop and the real refusal, with `visible` and
+  `known` read off the journal and `tool_finished` empty.
+- **`delegate` has no special case left.** Every value of `agent` builds a worker, is journaled
+  as one, and is cached under a task spec.
+- **A tool result can raise the caller's interlock.** Previously only a static
+  `private_output` flag on the tool being run could. This is the second flag to cross the
+  worker boundary; `tainted` was the first, and it crosses as `trust`.
+- **8b's open question is closed.** "No test covers the combination of a moved family and a
+  private session" — `test_a_mail_delegation_closes_the_door_behind_it` runs a real turn in
+  which the mail family is moved *and* the researcher is refused afterwards by the interlock
+  rather than by the surface.
+- **The permanent set shrank for the first time in this pass.** 8a and 8b moved nothing that
+  was `always_on`; three of these four are.
+
+## schemas exactly as implemented
+
+```python
+MOVED_TO_ROLE: dict[str, str] = {
+    "fs_list": "coder", "fs_read": "coder", "fs_search": "coder",
+    "fs_write": "coder", "shell_exec": "coder",
+    "web_search": "researcher", "web_fetch": "researcher",
+    "memory_search": "memory", "memory_history": "memory",
+    "gmail_search": "mail", "gmail_message": "mail",
+}
+
+MEMORY = SubagentSpec(
+    name="memory",
+    tool_names=["memory_search", "memory_history", "profile_read"],
+    max_steps=8, autonomy_cap="observe",
+)
+MAIL = SubagentSpec(
+    name="mail",
+    tool_names=["gmail_search", "gmail_message"],
+    max_steps=6, autonomy_cap="observe",
+)
+SPECS = {researcher, coder, coder/explore, memory, mail}
+```
+
+`delegate`'s `agent` enum is `["researcher", "coder", "memory", "mail"]` — `coder/explore` is
+still not in it. `reads_private_data(spec, registry=None) -> bool` is
+`any(tool.private_output for tool in the role's tools)`; `delegate`'s result data is
+`{"status": ..., "report_valid": ..., "private": ...}`. The new policy rule:
+
+```yaml
+- id: mail-delegation-never-unattended
+  match: {tool: delegate, origin: [daemon], args: {agent: {in: [mail]}}}
+  outcome: deny
+```
+
+`autonomy_cap="observe"` on both roles is the strongest cap that costs them nothing: every
+tool either holds evaluates to `allow` at observe, assist and act against the shipped policy,
+which is what `test_the_two_new_roles_need_nobody_at_the_terminal` pins. Neither role holds
+`memory_remember` or anything else that writes — a worker proposes memories through
+`candidate_memories` in its report, and a second path would be a second `proposed_by` for the
+same inference.
+
+## the two numbers, and the short-circuit
+
+|  | 8a | 8b | 8c |
+|---|---|---|---|
+| registered / enabled | 29 | 29 | **29** |
+| permanent — `always_on` ∧ on the surface | 13 | 13 | **10** |
+| permitted — may run at all | 24 | 22 | **18** |
+| `Registry.select` short-circuits | no | no | **yes** (18 ≤ `ALWAYS_EXPOSE_LIMIT` 20) |
+| offered per turn | 17–20 | flat, near 20 | **17**, and 18 after a handoff |
+
+The 18: `calendar_upcoming coursework_due delegate goal_upsert goals_list handoff_lookup
+memory_remember notify_user open_loop_add open_loop_close open_loops_list profile_read
+reminder_set time_now tool_search watcher_add working_memory_list working_memory_note`.
+
+The 10 permanent: the 18 minus `goal_upsert open_loop_add open_loop_close open_loops_list
+reminder_set watcher_add working_memory_list working_memory_note`.
+
+**The short-circuit was verified, not asserted.** `select` is called with the real permitted
+set and its result compared to that set; the turn is then run and its offered set compared to
+the permitted set minus `handoff_lookup`, and checked to contain `reminder_set`,
+`watcher_add` and `open_loops_list` — three tools that are *not* `always_on` and could only
+have arrived by the short-circuit. **The three tools the pass file names as permanent are
+therefore offered on every turn today without being promoted**, which is context for 8d's
+promotion decision, not a substitute for it: they are offered because the pool is small, and
+a nineteenth tool would put the embedding route back in charge.
+
+## the tests, and what defended the claim before them
+
+Fourteen new tests, all against `build_registry()`, the real no-argument default and the
+shipped `config/policy.default.yaml`. Six mutations, each applied alone against the whole
+suite:
+
+| mutation | new tests killed | pre-existing killed |
+|---|---|---|
+| 8c moved nothing (four entries dropped) | 5 | **0** |
+| the mailbox filed under `researcher`, which already grants the web | 2 | **0** |
+| `memory` moved to a name with no spec behind it | 2 | 2 (8a's `test_every_moved_tool_is_granted_by_the_role_it_moved_to`; the role-registry test in `test_delegation.py`) |
+| a mail delegation does not close the door on the caller | 1 | **0** |
+| the daemon may delegate its way into the mailbox | 1 | **0** |
+| every delegation closes the door, not only a private-data one | 1 | **0** |
+
+**Five of six were defended by nothing that existed before this session**, and the one that
+was defended was caught by 8a's own file and by a test this session had already edited. The
+two that matter most are rows four and five: both are *safety* regressions that a surface move
+causes without touching a security file, and the 1014-test suite had nothing to say about
+either.
+
+## deferred, and where it went
+
+- **`agent tools sync`**, owed again: `delegate`'s description changed. The orchestrator runs
+  it. Until it does, the embedding row for `delegate` is the 8b wording — harmless at a
+  permitted pool of 18, because the similarity route no longer runs for the orchestrator at
+  all, but it still feeds `tool_search`.
+- **`~/.config/agent/policy.yaml` is a stale copy of the shipped default and this session was
+  not permitted to write to it.** It is missing `mail-delegation-never-unattended` *and*
+  `telegram-outbound-always-asks`, which predates 8c — so the drift is not new. **On the live
+  box the daemon can currently delegate its way to the mailbox**, and will be able to until
+  that file is refreshed from `config/policy.default.yaml`. Tests read `DEFAULT_POLICY`
+  (`conftest` sets `cfg.policy_file`), which is why they are green and the live system is not
+  covered. Flagged for the orchestrator before the B17–B20 rows are run.
+- **No prompt test**, as in 8a and 8b. `main.md`'s new claims are asserted nowhere; the
+  runtime enforces the boundary either way.
+- **Ephemeral workers inside `memory` and `mail`.** None defined, on 8a's criterion: neither
+  role has a tool that returns `require_approval`, so every narrower slice of either would
+  differ only in the wording of its prompt — which is what 8a refused a test/debug worker for.
+- **Everything 8a and 8b deferred** stands: exposing `coder/explore` with its
+  `policy.default.yaml` edit, the truncated-transcript report call, `-m docker` selecting
+  nothing, the source-finder worker, and the memory-store cleanup 8a's measurement owes.
+
+## open questions for later passes
+
+- **A worker launders taint, and 8c adds two more roles that can.** `run_subagent` builds a
+  fresh `Session` whose `tainted` starts False, so a brief written out of an untrusted context
+  produces a worker whose own result is `trusted`. The interlock keys on `private`, not
+  `tainted`, so this is pre-existing and unchanged by 8c — but a `memory` worker is now the
+  first role that can be delegated to *from a private turn* and whose report inserts
+  `candidate_memories`. Those candidates are proposals and the review gate still adjudicates
+  them; what is missing is that their `source_trust` is computed from the worker's session
+  rather than from the caller's.
+- **Every worker is handed `main.md`.** `build_messages` folds the role prompt into the one
+  leading system message *after* the orchestrator's, so a `mail` worker is currently told "You
+  cannot read the user's mail" and a `coder` worker is told it has no file tools. Three
+  families deep, this has stopped being cosmetic: it is a whole system prompt of instructions
+  addressed to somebody else, and the contradiction is load-bearing prose rather than dead
+  text. Pass 10.
+- **`delegate` is `unsafe_write` and `risk: read`.** That is why the interlock needs a named
+  rule per role rather than a risk match, and why each new role is a decision in two files. A
+  role registry that policy could match on directly would remove the coupling; nothing needs
+  it yet.
+- **The daemon-origin family of rules is escapable by delegation in general.** 8c closed it
+  for `mail` because that rule's subject moved behind a delegation in this session. The same
+  shape applies to any future `origin: [daemon]` rule whose tool lives in a role.
+
+## B17–B20 comparison
+
+*Placeholder. To be filled in by whoever runs the measurement — the rows, the method, and the
+before/after offered-set counts. Nothing in this section has been measured yet.*

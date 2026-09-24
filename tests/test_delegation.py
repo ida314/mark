@@ -135,7 +135,8 @@ def test_an_unknown_durable_role_is_refused_rather_than_given_a_default_worker()
     # Session 8a added `coder/explore`, an ephemeral worker inside the coder role. It is a
     # spec like any other and so a name a delegation may use; what it is not is a name the
     # *model* may use, because `delegate`'s `agent` enum is the door and it lists roles.
-    assert set(SPECS) == {"researcher", "coder", "coder/explore"}
+    # Session 8c added `memory` and `mail`, both of which the enum does list.
+    assert set(SPECS) == {"researcher", "coder", "coder/explore", "memory", "mail"}
 
 
 def test_a_task_of_only_whitespace_is_refused_rather_than_delegated_empty():

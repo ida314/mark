@@ -82,9 +82,16 @@ async def test_the_same_rejected_arguments_do_not_get_to_spend_the_whole_turn(cf
             "I could not store that.",
         ]
     )
+    registry = _registry("memory_remember", "memory_search")
+    # The surface is stated because it is not what this test is about. Since 8c
+    # `memory_search` belongs to the `memory` sub-agent, so a loop that named no subset
+    # would be an orchestrator and would not be offered it - and the assertion below, that
+    # a *second* tool survives the withdrawal of the first, would hold for the wrong reason
+    # by being offered nothing at all.
     loop = AgentLoop(
-        cfg=cfg, registry=_registry("memory_remember", "memory_search"),
+        cfg=cfg, registry=registry,
         engine=engine_from_config(cfg), approver=AutoApprover(True), provider=provider,
+        tool_subset=set(registry.tools),
     )
     session = await Session.create("test")
     events = await _run(loop, session, "east village")

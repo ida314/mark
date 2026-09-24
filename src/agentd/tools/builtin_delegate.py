@@ -2,12 +2,22 @@
 
 This is the model's door onto `agent.delegation.delegate`, and the only thing it does on its
 own is unpack the tool call. The wire argument stays `agent` rather than becoming
-`durable_role`: `config/policy.default.yaml` matches on `args.agent.in [researcher, coder]`
-to keep a private-data turn from delegating its way around the interlock, and a rename here
-that did not land in the policy file in the same edit would open that door silently.
+`durable_role`: `config/policy.default.yaml` matches on `args.agent` twice - to keep a
+private-data turn from delegating its way around the interlock, and to keep the daemon from
+delegating its way into the mailbox - and a rename here that did not land in the policy file
+in the same edit would open both doors silently.
 
-`agent="memory"` is not a delegation at all - it packs retrieval in this process and builds
-no worker - so it is answered before a task spec is built.
+Session 8c removed the one branch that was not a delegation. `agent="memory"` used to call
+`memory.retrieval.pack` in this process and build no worker; it now starts a worker like
+every other role, because the memory tools moved to that role and a family cannot move to a
+role with no spec behind it. The consequence for this file is that there is no longer any
+special case here at all: every value of `agent` is a durable role.
+
+What this file does own is the one thing a delegation can hand back that a status and an
+answer do not say: whether the worker put the user's own private data in the caller's
+context. `agent/loop.py` raises `session.private` from `private_output` on a tool it ran
+itself, and a `mail` delegation has to raise the same flag for the same reason - otherwise
+moving the mailbox behind a worker would repeal the interlock by moving it out of reach.
 """
 
 from __future__ import annotations
@@ -24,13 +34,15 @@ from .effects import UNSAFE_WRITE
         "Hand a self-contained task to a sub-agent: 'researcher' for anything outside this "
         "machine - searching the web, opening a url, reading a document, comparing what "
         "sources say - 'coder' for anything in the user's code - reading it, searching it, "
-        "editing it or running it - 'memory' for a deep search of what you know. "
+        "editing it or running it - 'memory' for a deep search of what you know about the "
+        "user, including how a belief changed - 'mail' for anything in the user's mailbox, "
+        "which is the only way to read it. "
         "You get back a status (completed, blocked or uncertain), an answer, its evidence and "
         "what was done - not their whole transcript."
     ),
     required(
         obj(
-            agent={"type": "string", "enum": ["researcher", "coder", "memory"]},
+            agent={"type": "string", "enum": ["researcher", "coder", "memory", "mail"]},
             task={
                 "type": "string",
                 "description": "A complete brief: they cannot see this conversation.",
@@ -60,25 +72,6 @@ from .effects import UNSAFE_WRITE
 )
 async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     agent_name = args["agent"]
-
-    if agent_name == "memory":
-        from ..config import get_config
-        from ..memory.retrieval import pack
-
-        # Unchanged by 6a, concatenation included. This is a retrieval query and not a
-        # delegation: nothing is journaled as a worker, nothing is cached under a task spec,
-        # and rewriting the text that gets embedded would be a change to what comes back.
-        query = args["task"]
-        if args.get("context"):
-            query = f"{query}\n\nBackground from the user's agent:\n{args['context']}"
-        result = await pack(
-            query, budget_tokens=get_config().retrieval.deep_budget_tokens, mode="deep",
-            session_id=ctx.session_id, turn_id=ctx.turn_id,
-        )
-        body = result.text or "Nothing relevant in memory."
-        if result.conflicts:
-            body += "\n\nConflicts: " + "; ".join(result.conflicts)
-        return ToolResult(content=body, data={"items": len(result.items)})
 
     from ..agent import delegation
 
@@ -113,6 +106,12 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     # read here rather than threaded through the worker so that the switch and the render sit
     # in one place. Off, the transcript stays in the archive.
     payload = result.for_orchestrator(debug=get_config().delegation.debug_transcripts)
+    # Session 8c. Read off the role, after the delegation succeeded and so after the role
+    # name has been validated. `reads_private_data` derives it from what the role's tools
+    # declare, so this is not a list of role names that has to be kept in step with one.
+    from ..agent.subagents import reads_private_data
+
+    private = reads_private_data(delegation.role_spec(agent_name))
     return ToolResult(
         content=json.dumps(payload, indent=2),
         # Only `completed` is a tool call that did what it was asked. `blocked` and
@@ -122,7 +121,12 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
         # silent retry.
         ok=result.status == "completed",
         trust="untrusted" if result.tainted else "trusted",
-        data={"status": result.status, "report_valid": result.report_valid},
+        # `private` is what `agent/loop.py` reads to close the interlock on the *caller*.
+        # The worker's own flag died with its session, and its answer is the user's mail.
+        data={
+            "status": result.status, "report_valid": result.report_valid,
+            "private": private,
+        },
     )
 
 

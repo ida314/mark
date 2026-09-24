@@ -94,11 +94,22 @@ hard_deny:
     match:
       private: true
       source: "mcp:*"
-  # Named rather than tagged, so `delegate(memory)` keeps working: that branch never builds
-  # a sub-agent, it calls memory.retrieval.pack in this process. The other two do, and a
-  # sub-agent gets a *fresh* Session whose flags start at their defaults - so it would begin
-  # life unaware this one had read the mailbox, holding web_search and web_fetch. That makes
-  # delegation the way around every other rule here, not merely another one of them.
+  # Named rather than tagged, and the names are the roles that hold a route off this box. A
+  # sub-agent gets a *fresh* Session whose flags start at their defaults, so it begins life
+  # unaware this one had read the mailbox - and `researcher` holds web_search and web_fetch
+  # (the only holder of either since pass 8b) while `coder` holds the sandbox and fs_write.
+  # That makes delegation to those two the way around every other rule here, not merely
+  # another one of them.
+  #
+  # `memory` and `mail` are deliberately not listed, and the reason is not that they are
+  # small. Session 8c moved memory_search, memory_history, gmail_search and gmail_message
+  # off the orchestrator, so after reading mail the agent has no way to consult memory at
+  # all unless the memory delegation survives - and "read the invitation, then look at what
+  # it collides with" is the workflow this interlock was written to preserve, not one it is
+  # meant to break. Neither role can carry anything off the machine: between them they hold
+  # five read-only tools and no egress tag, which tests/test_tool_surface_pass8.py checks
+  # against the real registry rather than trusting this comment. The day one of them gains
+  # a tool that can reach outside, that test fails and this list is what has to change.
   - id: private-data-no-outward-delegation
     reason: a sub-agent starts with a clean context and its own web tools; start a new
       session if you need one
@@ -134,6 +145,22 @@ rules:
     match:
       tags: [mail]
       origin: [daemon]
+    outcome: deny
+  # The same refusal one layer up, and it exists because moving a tool behind a delegation
+  # moves it out of the rule above's reach. `run_subagent` gives a worker `origin` of
+  # `subagent:<role>`, never its caller's, so a heartbeat that delegates to `mail` would
+  # hand the mailbox to a turn whose origin is `subagent:mail` and sail past
+  # `mail-tools-never-unattended`. A worker cannot delegate in turn - `delegate` is in no
+  # role's tool_names - so the daemon's only route to the mailbox is this one call.
+  - id: mail-delegation-never-unattended
+    reason: the mailbox is not read on your behalf while nobody is watching, and a
+      sub-agent's origin is its own rather than the daemon's
+    match:
+      tool: delegate
+      origin: [daemon]
+      args:
+        agent:
+          in: [mail]
     outcome: deny
   - id: watchers-need-approval
     reason: creates autonomous behaviour that outlives this turn

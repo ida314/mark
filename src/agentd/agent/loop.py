@@ -773,7 +773,17 @@ class AgentLoop:
                         session.tainted = True
                         tctx.tainted = True
                     called = self.registry.tools.get(call.name)
-                    private_call = bool(called and called.private_output)
+                    # Session 8c. Two ways the user's own data gets into this turn, and
+                    # both have to raise the same flag. `private_output` is the static one:
+                    # this tool, run here, returns the mailbox. The second is a delegation
+                    # to a role that holds such a tool - the worker's own `session.private`
+                    # died with the worker, and what came back is its answer, which is the
+                    # mail. Declared on the result rather than on `delegate` itself because
+                    # `delegate` is private for one value of one argument and not for the
+                    # others; see `tools/builtin_delegate.py`.
+                    private_call = bool(called and called.private_output) or bool(
+                        result.data.get("private")
+                    )
                     if private_call:
                         # Mutating the shared context means the very next call in this same
                         # batch is already judged against the interlock, exactly as taint is.
