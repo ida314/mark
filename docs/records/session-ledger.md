@@ -1005,3 +1005,483 @@ Also confirmed in passing: `FINAL_NUDGE`/`STUCK_NUDGE` are already `{"role": "us
 the 2026-09-22 fix, so `extra_system` was the **last live** mis-positioned system message;
 every other `{"role": "system"}` in `src/agentd` is at index 0.
 
+## Pre-8a fix commit 2 — landed in the working tree, uncommitted, 2026-09-23
+
+`agent/loop.py` only: `tctx.extra["approver"] = self.approver` at line 508, in the existing
+`extra`-key block after the `ToolContext` constructor, with a comment naming the failure.
+`builtin_delegate.py` untouched and its fallback left in place, so the diff stays out of Pass 6
+files and the stop-and-ask does not trigger.
+
+Brief confirmed on every point: `self.approver` is set at `loop.py:302`; before this change
+`grep -rn '"approver"' src/` returned **exactly one hit** — the read at `builtin_delegate.py:83`
+— so nothing ever wrote the key; `subagents.run_subagent(approver=...)` already threaded it into
+the worker's `AgentLoop`.
+
+**Mutation, re-run independently by the orchestrator:** deleting the line kills **1 test, the new
+one. 968 passed. No pre-existing test died.** The subagent also mutated it to a different
+`AutoApprover` instance (right type, wrong object) and the same single test died on identity.
+Gates verified directly: **969 passed**, `ruff check .` clean, `ruff format` not run.
+
+**That zero-pre-existing-kills result is itself the answer to why this survived Pass 6.**
+`test_delegation.py:287,328` and `test_worker_results.py:252` each build a `ToolContext` by hand
+with `extra={"approver": AutoApprover(True)}` and call `builtin_delegate.delegate.handler`
+directly, bypassing `run_turn` entirely. **The hand-set key still fully masks the bug**; all three
+tests left untouched, as instructed.
+
+**Live data identical both sides:** journal 1227 rows / 55 run ids, `candidate_memories` 116. No
+new module, so nothing owed to the `conftest.py` monkeypatch list.
+
+**OWED TO DYLAN BEFORE THE ATTENDED RUNS — a worker's approval prompt is indistinguishable from
+the orchestrator's.** He accepted mid-delegation prompting as the cost of ruling "inherit the
+caller's approver"; he has not seen what the prompt says. Reported, not changed:
+
+- `ApprovalRequest` (`policy/approvals.py:14`) has **no `actor` and no `role` field**, so a
+  worker's `actor` (`subagent:<name>`) cannot reach the prompt even in principle.
+- `origin` **does** reach it — `run_turn(origin=f"subagent:{spec.name}")` (`subagents.py:241`) →
+  `ApprovalRequest(origin=ctx.origin)` (`executor.py:143`) — but `CliApprover.request`
+  (`cli/chat.py:59`) never renders it. The attribution is on the object and discarded by the
+  renderer. **One line to add to the panel body.**
+- `session_id` cannot substitute: a worker's `Session` is built with `id=parent_session_id`
+  (`subagents.py:189`), identical to the caller's. Same shape as the Pass 6 privacy item.
+
+This matters for step 3 of the approved order specifically: during B11-B13 attended, Dylan is the
+one answering these prompts, and a worker's `fs_write` will look like the orchestrator's.
+
+## Daemon restarted, and the live journal names both 400 producers — 2026-09-23 20:01 EDT
+
+Dylan committed fix 1 and ran `systemctl --user restart agent-daemon.service`. Service active,
+running `/home/dylan/Projects/agent/.venv/bin/agent`, an editable install pointed at the working
+tree — so the restarted daemon is carrying **fix 1 and the uncommitted fix 2** as well.
+
+**His premise was right and the journal proves it, but not through the agenda.** A provider 400
+does not raise out of `run_turn` — it is journaled as `agent_finished status=failed` — so
+`repo_agenda.notify(title="Heartbeat failed")` has **never once fired** (no `source='daemon'` row
+has ever been written; 64 notifications total, one `heartbeat` row ever, from 2026-09-20).
+**Anyone looking for daemon health in the agenda would conclude the daemon was fine.**
+
+The journal says otherwise: **27 failed turns, and 33 rows carrying the string `System message
+must be at the beginning`.** Broken down, and this is the useful part — **it is one error string
+with two independent producers:**
+
+| producer | count | step count | cause |
+|---|---|---|---|
+| `daemon:heartbeat` | 14 | 4 = its `max_steps` | `FINAL_NUDGE` at the step budget |
+| `main` (cli 7, telegram 3) | 10 | 12 = `max_steps` | `FINAL_NUDGE` at the step budget |
+| `subagent:researcher` | 6 | dies at step 1 | `extra_system`, i.e. **fix 1** |
+| `subagent:coder` | 3 | dies at step 1 | `extra_system`, i.e. **fix 1** |
+
+**The nudge half was already fixed in code on 2026-09-22** — `loop.py:538` appends `FINAL_NUDGE`
+as `{"role": "user"}` — but the daemon process predated that commit and Python does not reload on
+an editable install, so **the running process kept 400-ing on code that had been fixed in the tree
+for a day.** The most recent was 2026-09-23T18:11:05Z, 45.3 s wasted after four completed steps
+and two real tool calls, answer_chars 0. Restarting is the whole fix for that half.
+
+**The subagent half is independent live confirmation of fix 1, from Dylan's own journal rather
+than from a probe.** Nine delegated turns, all dead at step 1 before the model answered anything
+— which is exactly `baseline-v2`'s "delegation dead: three sub-agent turns, all under 110 ms,
+`llm_ms: 0`", now with a cause.
+
+**Watching for the next heartbeat** (interval 1800 s, and it sleeps *before* its first iteration,
+so ~00:31Z; it also makes no model call at all unless the situation report is actionable and its
+digest changed, so a quiet tick is not evidence of a fix).
+
+**Method note worth keeping: daemon health is not visible where it looks like it should be.** The
+`except Exception` handler around the heartbeat catches everything except the failure mode that
+actually happens. Worth a Pass 10 entry.
+
+## Step 2 confirmed, and the live delegation probe — 2026-09-24 00:31Z and 00:38Z
+
+**The heartbeat completed a real model turn for the first time.** 00:31:53Z, 30 min after the
+restart: 4 steps, five real tool calls (`open_loops_list`, `memory_search`, `coursework_due`,
+`calendar_upcoming`), `FINAL_NUDGE` appended as a **user** message (168 chars, "[runtime, not
+from the user]...") and **no 400**, a 1234-char answer, and the suggestion reached the agenda
+(`notifications`, `source=heartbeat`, 00:31:53 — only the second such row ever). Against
+2026-09-23T18:11:05Z: same 4 steps, `answer_chars` 0, HTTP 400. **Step 2 of the approved order
+is met.**
+
+Status reads `abandoned`, not `completed`, and that is not a failure: `loop.py:829` sets
+`abandoned` whenever `steps >= max_steps`, and the heartbeat's `max_steps` is **4**. **So a
+working heartbeat can never report `completed` unless the model finishes in three steps** — it
+used all four both times. Its answer is by construction "a summary of unfinished work, not an
+answer" (`loop.py:825`), and that is the text `repo_agenda.notify` files as a Suggestion.
+**Pass 10 tuning item, not a bug.**
+
+### The probe: fix 1 works, and it uncovers the blocker for 8a
+
+One live delegation to the **coder** role, read-only task, `AutoApprover(approve=False)` so a
+write could not be approved by accident.
+
+**Dylan's caveat is satisfied: a worker turn now completes.** 15 steps, 14 tool calls, 52.1 s of
+model time, 64.7 s wall, ending in a 714-char answer. Before fix 1, `subagent:coder` died at
+step 1 with `answer_chars` 0. **The 400 is gone in the live path, not only in a probe harness.**
+
+**And Pass 6's open gap closes with it.** Pass 6 recorded that "the schema has never decoded a
+report a real 27B wrote". It has now: `worker_finished` carries `report_valid: true`,
+`status: uncertain`, `evidence: 2`, `followups: 2`, `actions_taken: 0`, and the summary is
+honest — *"Could not list Python files in src/agentd/agent because that path does not exist in
+the workspace."* A truthful `uncertain` with a valid report is exactly 6b's design working.
+
+**THE FINDING, and it should stop B11-B13 from being run yet: the coder cannot see the
+repository.** Tool tally for the run — `fs_list` ×10, `fs_read` ×1, `shell_exec` ×3 — and every
+one failed:
+
+- `fs_list path="src/agentd/agent"` → `Not a directory:
+  /home/dylan/.local/share/agent/workspace/src/agentd/agent`. Relative paths resolve under the
+  empty workspace, as `builtin_fs.py:18` has always done.
+- `fs_list path="/home/dylan"` → denied, `rule: fs-outside-roots`.
+- `fs_list path="."` and the workspace root → `(empty directory)`.
+- `shell_exec` ×3, all against `/workspace` (the sandbox's container path) → denied,
+  `rule: risk_matrix:write/assist` (the probe's own approver, by design).
+
+**This is `pass-01-outcome.md:346`'s second item, the one filed as "Related, and cheaper to
+answer" beside the approval-wall question — and unlike the approval wall, nobody ever answered
+it.** Its own words: *"'in this repository' resolves to nothing. Every repo task in the suite
+failed on this before it reached the capability it was written to measure. A coder role inherits
+the problem unchanged."* Confirmed live, against the actual coder role, 24 hours before 8a would
+have created one.
+
+**Consequence for the approved order:** 8a gives the coder role `fs_*` and `shell_exec`. If a
+path into Dylan's repo cannot be resolved, B11/B12/B13 will fail after 8a for the same reason
+they failed in v2, and **8a's comparison will measure path resolution a second time instead of
+tool surface.** Running the attended rows *before* this is settled bakes that into the
+comparand. **Put to Dylan: this needs an answer before step 3, not after.**
+
+Noted in passing, a correction: **tool events now carry `worker_id`** (`tool_requested`,
+`tool_started`, `tool_failed`, `tool_finished`, `message_appended` all have it) and `step_id` is
+namespaced by the worker's turn id. The carried item "effect events carry no `worker_id`
+(3b #4)" is still true of *effect* events only.
+
+**Live data written by the probe, stated rather than glossed:** journal 1248 → 1313 rows (64 in
+the probe run `8002fd81-...`, plus one stray single-row run `885a06a9`), one new `sessions` row
+(`01a0d0d9-6d9d-7207-aade-1c9d5e3b3a12`), no effects, no promotions, no memory writes.
+
+## Pass 7/8 boundary — three more rulings, 2026-09-24
+
+Dylan took the recommended option on all three, bare, so the cost written into each option is
+the cost accepted.
+
+### Ruling 1 — the coder cannot find the repo: option (c), both halves, one commit
+
+**Not a permissions problem, and two problems rather than one.** `allowed_roots` already
+contains `~/Projects`, so an absolute path into the repo works today; the probe failed because
+the model used *relative* paths, which `builtin_fs._p()` sends to the empty workspace, and its
+one absolute guess (`/home/dylan`) was outside the roots while the correct parent was inside
+them. **There is no `project` key in `config.py` — nothing tells a worker where it is.**
+Separately, `builtin_shell.py:26` mounts `{cfg.paths.workspace}:/workspace:rw`, the *empty*
+directory, so `shell_exec` cannot see the repo by construction.
+
+**That second half is load-bearing for the owed rows.** B12 (diagnose a seeded test failure) and
+B13 (run the suite and interpret a large output) both require running tests against the repo.
+**Neither could pass today whatever 8a did to the tool surface.**
+
+Accepted with the option, and binding on the implementation: the project root is **named
+explicitly in config, never auto-detected** (inference is a recorded failure mode here), and
+**`fs_*` stays absolute-only — `_p()`'s semantics do not move.** The fix is that the worker
+learns the absolute path. The sandbox mount is **rw** on the real repo, accepted knowingly,
+while Dylan edits the same tree in parallel. Rejected: (a) alone (B12/B13 still cannot run a
+test), (b) alone, and (d) scoping the coder to the workspace and accepting an uninformative
+comparand.
+
+### Ruling 2 — the anonymous worker approval prompt: option (a), render it
+
+One line in `CliApprover.request` (`cli/chat.py:59`). `origin` already reaches
+`ApprovalRequest` (`executor.py:143`) carrying `subagent:coder` and the renderer discards it;
+`ApprovalRequest` has no `actor`/`role` field and `session_id` is the caller's, so `origin` is
+the only signal that exists. Rejected: accepting it for the attended runs, on the grounds that
+Dylan answers these prompts personally during B11-B13 and a worker asking to write is the case
+the gate-2 ruling exists for.
+
+### Ruling 3 — the latent third 400: option (b), leave it armed
+
+`context.history_messages` inserts a `"Summary of earlier conversation..."` **system** message at
+`picked[0]`, landing at index 1 and 400-ing identically. Genuinely dead: nothing passes a summary
+to `repo_archive.end_session` and `sessions WHERE summary IS NOT NULL` is 0. **No code this
+pass.** Fix 1's test is the guard and catches it the first time a summary is written. **Whoever
+gives that path a producer inherits a live 400** — that is the accepted cost, and the reason this
+entry exists.
+
+### Also ruled at the same time: from here, remaining tasks are dispatched to subagents.
+
+**Outstanding action, not a ruling: fix 2 is still uncommitted.** `tctx.extra["approver"] =
+self.approver` and its test are live in the running daemon (editable install) and absent from
+git. A restart before committing silently reverts it.
+
+## Ruling 1 implemented — and it uncovers why B12 and B13 still cannot pass
+
+In the working tree, uncommitted: `config.py` (`PathsConfig.project`, `project_root`, and a
+validator refusing a project outside `allowed_roots`), `config/default.toml` (documented,
+**commented out**), `agent/subagents.py` (`project_block(cfg, *, has_shell)` appended to the role
+prompt, **empty when no project is configured — no guess**), `tools/builtin_shell.py`
+(`mount_source()` = `project_root or workspace`, mounted rw at `/workspace`, preview and
+description naming what is really mounted, and a refusal to start when the mount source does not
+exist — `docker run -v` would otherwise create it as root and every command would then lie), plus
+`tests/test_project_root.py` (11 tests). **`_p()` untouched, as the ruling required.**
+
+**980 passed** (969 before), ruff clean, verified directly. **7 mutations, all killed, no
+pre-existing test died for any of them.** One finding inside that:
+`test_sandbox_never_mounts_the_docker_socket` did **not** die under the mount mutation — it
+asserts the workspace path appears in the command line and passes only because `conftest` leaves
+`project` unset. **It stops biting on the mount source the moment a project is configured.**
+
+**Not live.** `~/.config/agent/config.toml` has no `project` key and the subagent correctly did
+not edit user config outside the repo. Until `project = "~/Projects/agent"` is added under
+`[paths]`, behaviour is identical to today. **That is the one manual step, and it is what arms
+the rw mount.**
+
+**What `shell_exec` can do once it is set, in one sentence:** any command the model writes runs as
+uid 1000 with `/home/dylan/Projects/agent` mounted read-write as its working directory, so it can
+overwrite or delete Dylan's uncommitted in-editor work — `rm -rf`, a stray `git checkout`/`clean`,
+or `ruff format .` rewriting 75 of 126 files — with no undo, and the container being throwaway
+protects nothing.
+
+### THE SANDBOX CANNOT RUN THIS PROJECT'S SUITE — three blockers, all verified directly
+
+1. **No toolchain.** `agent-sandbox:local` has `python3` = **3.12.14** and `git`, and **no `uv`, no
+   `pytest`, no gcc/make/node.** This project runs on **3.14**.
+2. **The venv dangles.** `.venv/bin/python` targets
+   `~/.local/share/uv/python/cpython-3.14.*/python3.14`, outside the mount, so `readlink -f`
+   resolves to nothing inside the container.
+3. **Postgres is unreachable.** It is published `127.0.0.1:55432->5432` — host loopback only.
+   From the sandbox, `127.0.0.1`, `172.17.0.1` and `host.docker.internal` are all
+   closed/unreachable, so `conftest`'s `pg_dsn` would `pytest.skip` the whole suite and **the best
+   output a worker could honestly report is "skipped".**
+
+**So B12 (diagnose a seeded test failure) and B13 (run the suite and interpret a large output)
+cannot pass, and the mount alone does not buy them.** This is not a tool-surface property and 8a
+cannot fix it.
+
+**Separately, and it contradicts `CLAUDE.md`:** `uv run pytest -m docker` reports **980 deselected,
+0 selected — the docker-marked suite is empty.** `CLAUDE.md` names `-m docker` as a real gate.
+Nothing has ever been marked. The subagent's container checks were run by hand with a read-only
+mount.
+
+**Live data unchanged:** journal 1313 rows / 58 run ids before and after; `candidate_memories` 116;
+`facts` 47. No conftest change owed — `builtin_shell` and `subagents` are already on the
+monkeypatch list.
+
+**Reported, not acted on:** `agent init` / `agent doctor` print the workspace and never the
+project, so a misconfigured `project` is invisible there.
+
+
+---
+
+## Pass 8 opens for real — three pre-8a commits landed, 2026-09-24
+
+The working tree that had been carrying pre-8a fix 2 and ruling 1's implementation is now
+committed. Each was verified alone in a detached worktree (`git worktree add --detach`), not
+merely green beside the others: **980 passed at `91fa9c6` with nothing of Dylan's in the
+tree**.
+
+| sha | what it is | ruled |
+|---|---|---|
+| `c9aa84f` | fix 2 — a delegated worker inherits the caller's approver | gate 2, 2026-09-23 |
+| `91fa9c6` | `[paths] project`, the role-prompt block, the sandbox mount | ruling 1, 2026-09-24 |
+| `a4b32e4` | the approval prompt names the worker that is asking | ruling 2, 2026-09-24 |
+
+Ruling 2 had been ruled and **not implemented** — `cli/chat.py` still discarded `req.origin`.
+It is implemented now, and the mutation was re-run by the orchestrator rather than taken on
+report: reverting the render kills **2 of the 3 new tests and 0 pre-existing**, and making the
+orchestrator branch claim a worker kills the negative test alone, so it is not vacuous. Three
+signals fire together for a worker (title, magenta border, a bold first body line) because the
+person answering these prompts during an attended eval run is answering a stream of them.
+
+**`[paths] project` is now live.** `~/.config/agent/config.toml` gained
+`project = "~/Projects/agent"` under `[paths]` (backup of the pre-edit file in this session's
+scratchpad). Verified through the real config, not by reading the file back:
+`cfg.paths.project_root` and `builtin_shell.mount_source()` both resolve to
+`/home/dylan/Projects/agent`, and `project_block` renders the path plus the absolute-paths
+sentence, with the /workspace sentence for the coder and without it for the researcher.
+
+**That arms the read-write mount, which is the accepted cost of ruling 1 and is now real
+rather than prospective.** Any command a model writes runs as uid 1000 with
+`/home/dylan/Projects/agent` mounted read-write as its working directory. Also now true, and
+noted at ruling 1: `test_sandbox_never_mounts_the_docker_socket` passes only because
+`conftest` leaves `project` unset, so it stops biting on the mount source in any context where
+a project is configured.
+
+## Gate 1 put to Dylan again, and ruled — the sandbox gets fixed first
+
+**The blocker is larger than the ledger recorded.** The 2026-09-24 entry said B12 and B13
+could not pass; in fact **all three gate-1 rows** are unrunnable, because B11's rubric requires
+`uv run pytest` green as well. So the approved order's step 3 — "run B11, B12, B13 under
+`chat`, attended" — could not have been executed as written, and running it would have
+produced three environmental failures indistinguishable from a capability floor.
+
+Confirmed rather than assumed: `tests/conftest.py::pg_dsn` is **session-scoped** and calls
+`pytest.skip` on an unreachable Postgres, and essentially every test reaches it through the
+`cfg` fixture — so the whole suite skips, it is not a partial loss. And
+`migrations/0001_extensions.sql` needs **`vector` and `pg_trgm`**, so any Postgres the sandbox
+gets has to be a pgvector build, not stock.
+
+**Ruled: fix the sandbox, self-contained.** The image carries its own Postgres on container
+loopback and its own prebuilt environment; **`--network none` stays the default posture and
+the sandbox never reaches the host DB or the internet to run the suite.** Rejected, and the
+rejection is the substance: giving the container a route to `127.0.0.1:55432` is cheaper and
+less exotic, and it would hand a sandbox running model-written commands network access to the
+agent's own memory database — 47 facts, 116 candidates, the whole Postgres side of the journal.
+The isolation that made `shell_exec` acceptable is not spendable on a convenience. Also
+rejected: amending gate 1 to the rows that can execute (B02, B10, B21), on the grounds that the
+write-and-run-tests half of the coder role is exactly the half 8a moves, and Pass 10 would
+inherit a coder role nobody had ever seen finish a change.
+
+**Costs accepted with the option, stated when it was offered:** a session of environment work
+that no pass file owns, delaying 8a by that session; a much larger image whose baked venv goes
+stale whenever `uv.lock` moves, with nothing that detects the drift; and the verbatim command
+problem — **B12's task text instructs the agent to run `uv run pytest tests/test_telemetry.py`**,
+so `uv run pytest` has to work offline in the container rather than be replaced by a bespoke
+command the worker would have to be told.
+
+**Where this sits in the approved order.** Steps 1 and 2 are met. Step 3 is now preceded by the
+sandbox work. Steps 4 (the `baseline-v2.md` §2 addendum) and 5 (dispatch 8a) are unchanged.
+
+### A finding that decides what 8a has to build: "not offered" does not mean "cannot call"
+
+Found while reading the surface 8a is supposed to reduce, before any 8a code was written.
+There are **four** doors by which a tool reaches a turn, and the pass file's "move it out of
+the orchestrator surface" only closes two of them:
+
+1. `Registry.select` — `always_on`, plus what the session already used, plus the top-k
+   embedding matches above `SIMILARITY_FLOOR` (`tools/registry.py:84-110`).
+2. `AgentLoop._with_lookup` — the handoff manifest's special case, both directions.
+3. `tool_search` — the model asks for more, and `ctx.extra["added_tools"]` makes them visible
+   on the next step (`agent/loop.py:805-811`).
+4. **`agent/loop.py:699-700` — the model names a tool it was never shown, and the loop adds
+   it to `exposed` and runs it.** `tools/executor.py` performs no visibility check of any
+   kind; the only consequence is that `tool_requested` is journaled with `visible: false`
+   first, which is Pass 1a's `not_visible` selection-failure kind. **The call still executes.**
+
+**Probed, not inferred.** A scratch test (run and deleted, nothing left in `tests/`) built an
+`AgentLoop` over a registry holding one tool, replaced `select` with one that returns `[]`, and
+had the provider call that tool by name: `offered=[] registered=yes ran=True`. A first attempt
+was inconclusive and is worth recording — with one tool registered `select` returns everything,
+because `len(enabled) <= ALWAYS_EXPOSE_LIMIT` short-circuits it, so the tool *was* offered and
+the probe proved nothing. The second version forces the empty offer.
+
+So `fs_write` and `shell_exec` are reachable from the orchestrator today by *name alone*,
+whatever `select` does, and removing them from `always_on` — which they are already not on —
+would change nothing that matters. A flag that only `select` and `tool_search` honour would
+leave door 4 open and 8a would report a surface reduction it had not made.
+
+**The mechanism that closes all four at once already exists and is the one workers use.** A
+worker's loop is built with `Registry(tools=registry.subset(spec.tool_names, spec.tool_tags))`
+(`agent/subagents.py`), so a name outside the subset is simply not in `self.registry.tools`
+and door 4 cannot open. The orchestrator, by contrast, is built with the full
+`get_registry()` (`agent/loop.py:300`). **The symmetric fix is to give the orchestrator a
+subset too**, rather than to add per-tool visibility flags to `select`.
+
+Consequence for 8a's brief, and for 8d's measurement: the exit criterion "every moved tool
+reachable through a durable role" has a matching negative that nothing currently tests —
+*not reachable any other way* — and it should be a test, not a description.
+
+### Checked before arming the mount: what fix 2 actually propagates on the unattended paths
+
+The rw mount plus "a worker inherits the caller's approver" is only safe if the unattended
+callers hold an approver that cannot approve. Verified by reading every construction site
+rather than assuming: **every unattended path builds `QueueApprover`** —
+`daemon/heartbeat.py:123` and `daemon/scheduler.py:55` (`origin="daemon"`),
+`daemon/telegram.py:331`, and `cli/app.py:627,1626` for `agent ask`. `CliApprover` is
+constructed in exactly one place, `cli/chat.py`, which is attended by definition.
+
+So fix 2 hands a daemon-initiated worker the daemon's `QueueApprover`, which queues the call
+and returns a denial — the coder's `shell_exec` stays denied on the heartbeat path, and the
+only route by which a worker can actually write to the mounted repo is a human sitting at
+`agent chat`. That is the shape the gate-2 ruling wanted, and it now holds by construction on
+both sides rather than by the accident that nothing wrote `ctx.extra["approver"]`.
+
+**One case that is not covered and is worth knowing before it surprises someone:** the coder
+role's `autonomy_cap` is `"act"`, and `cap_autonomy` caps rather than raises, so under
+`agent chat --autonomy act` a delegated coder runs at `act` — where `shell_exec` may resolve
+to `allow` and write to the real repo with no prompt at all. Attended, but not asked.
+
+**The running daemon does not have the new config.** It started 2026-09-23 20:01 and
+`get_config()` resolves at process start, so `[paths] project` is invisible to it until
+`systemctl --user restart agent-daemon.service`. Not restarted here: it is not on the
+critical path (the attended rows run under `agent chat`, a fresh process), and a restart is
+what arms the mount for the heartbeat's own delegations. Dylan's call.
+
+### The before-number 8d compares against, measured rather than assumed
+
+Read off the live telemetry (`~/.local/share/agent/logs/telemetry.jsonl`, 52 records, 46 with
+`role == "main"`) and the live journal (copied with its `-wal`, 1313 rows / 58 runs).
+
+**The orchestrator is offered 20 tools on 39 of 46 real main turns** (19 on six, 18 on one),
+out of a registry that is now 29 enabled tools — it was 26 when the Pass 1 baseline was taken.
+Thirteen of those are `always_on`: `calendar_upcoming`, `coursework_due`, `delegate`,
+`gmail_message`, `gmail_search`, `goals_list`, `handoff_lookup`, `memory_remember`,
+`memory_search`, `notify_user`, `profile_read`, `time_now`, `tool_search`. The rest arrive by
+embedding similarity.
+
+So **the number Pass 8 has to move from is 20, not 13.** "Permanent surface" in the pass file
+reads naturally as the `always_on` set, but what a turn actually pays for in prompt tokens and
+in selection error is the offered set, and the two differ by seven. Both numbers belong in the
+8d table. Note also that the pass file's target surface names `reminder_set`, `watcher_add`
+and `open_loops_list` as permanent, and none of the three is `always_on` today — so 8a–8c are
+not purely subtractive, and the borderline cases it asks to decide empirically
+(`goal_upsert`, `open_loop_add`, `open_loop_close`, `profile_read`) start from a mixed state.
+
+**And the honest limit on the door-4 finding above: it has never fired here.** All **258**
+`tool_requested` events in the live journal are `visible=1, known=1` — not one call to a tool
+the turn had not been shown. So door 4 is a latent hole in what 8a can *guarantee*, not an
+observed behaviour, and the 8a record must not write it up as if the model were already
+reaching around the surface. What it means is narrower and still decisive: after 8a, "the
+orchestrator cannot call `shell_exec`" would be a claim the code does not support, and one
+`FakeProvider` test naming the tool directly would expose it.
+
+## The sandbox now runs the suite — `a8639a8`, 2026-09-24
+
+Ruling implemented. `docker/sandbox.Dockerfile` rebased on `pgvector/pgvector:0.8.1-pg17`
+with `uv`, a 3.14 interpreter and `uv sync --frozen` into `UV_PROJECT_ENVIRONMENT=/opt/venv`
+at build time; a cluster initdb'd at build as uid 1000 and copied into the tmpfs per
+container; `docker/sandbox-profile.sh` at `/etc/profile.d/10-agent-sandbox.sh` to start it
+and export `AGENT_DB__DSN`; `.dockerignore`; and the tmpfs raised 256m → 512m in
+`builtin_shell.docker_command`.
+
+**Verified by the orchestrator, not taken on report**, against a detached worktree mounted at
+the real `docker_command` flags:
+
+| check | result |
+|---|---|
+| `uv run pytest` in-container, `--network none` | **983 passed**, 0 failed, 0 skipped — host parity |
+| three consecutive runs at 512m | 983 / 983 / 983, tmpfs peak **352MB of 512** |
+| the same at 256m | run 1 green, **run 2 `18 failed, 664 passed, 301 errors`**, tmpfs 100% |
+| `uv run pytest tests/test_telemetry.py` (B12 verbatim) | 19 passed |
+| `sys.prefix` under `uv run` | `/opt/venv` |
+| planted `.venv` sentinel in the mount, after a full run | byte-identical, `find -printf` diff empty |
+| bare `python3`, `git`, `git apply` of the B12 fixture | all work on a real clone |
+| tmpfs constant reverted to 256m | exactly 1 test dies, 986 pass, none pre-existing |
+
+Host gates: **987 passed**, `ruff check .` clean. `ruff format` not run.
+
+**The 256m double-run result is the justification for the bump and it is the house bug
+class.** One run fits; the second fills the tmpfs and returns a large, confident,
+entirely wrong test result. A worker iterating on the suite would read it as real.
+
+**Three things to know that the brief did not anticipate:**
+
+1. **The Postgres base image has no system Python at all**, so `python`/`python3`/`pip`
+   disappeared — a silent capability regression against `python:3.12-slim` that would have
+   broken any model-written `python3 -c ...`. Closed by putting `/opt/venv/bin` on PATH in
+   the profile script. It has to be the profile script and not the Dockerfile, because
+   `/etc/profile` *resets* PATH for non-root logins and discards the image `ENV`.
+2. **`agent-sandbox:local` was rebuilt and re-tagged in place**, so the live image the daemon
+   would use is the new one already. Recoverable — the old Dockerfile is in git history — but
+   it is a change to the running system that happened as part of an implementation task, and
+   it is recorded here rather than glossed.
+3. **A git *worktree* is dead inside the container**: its `.git` is a file pointing at a
+   gitdir outside the mount. A real clone or the real repo works fine. Only affects how the
+   image is verified, not how a worker uses it.
+
+**Corrections to earlier ledger entries, both from this work:** the container's Python is
+3.14.7 against the host's 3.14.5 (same minor; uv took the latest patch, pin it if they must
+match), and `patch(1)` is absent from the image — immaterial, since the B12 fixture is
+applied with `git apply`, which works.
+
+**`-m docker` still selects 0 of 987.** `CLAUDE.md` names it as a gate and nothing has ever
+been marked. The four new tests in `tests/test_sandbox_image.py` are static assertions on the
+Dockerfile and the profile script, deliberately not docker-marked: a real one would need the
+image built and would have to skip cleanly when run *inside* the sandbox, where there is no
+docker. Flagged, not built.
+
+**Where the approved order stands now.** Steps 1 and 2 met; the sandbox prerequisite met.
+**Step 3 — B11, B12, B13 under `chat`, attended, ~1 hour — is next and it needs Dylan at the
+terminal.** Step 4 is the `baseline-v2.md` §2 addendum, step 5 is dispatching 8a.
