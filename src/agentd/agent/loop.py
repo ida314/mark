@@ -500,6 +500,12 @@ class AgentLoop:
                 # is the turn an injected instruction would actually use.
                 autonomy=autonomy, tainted=session.tainted, private=session.private,
             )
+            # The approver this loop was built with, so that a tool which starts a second
+            # loop - `delegate` - runs its worker against the same one. `builtin_delegate`
+            # falls back to a `QueueApprover` when this key is absent, and nothing else
+            # ever set it: under `agent chat` every delegated worker was being built with
+            # an approver that cannot prompt, so each of its writes came back denied.
+            tctx.extra["approver"] = self.approver
             # Session 7b. This turn's working-memory handle, built from the run journal so
             # that its scope is fixed by the run and the worker - a worker's `AgentLoop`
             # builds its own and has no argument with which to name its caller's. Handed

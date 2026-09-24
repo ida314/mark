@@ -15,6 +15,7 @@ from agentd.db import repo_ops
 from agentd.llm.fake import FakeProvider
 from agentd.policy.approvals import AutoApprover
 from agentd.policy.engine import engine_from_config
+from agentd.tools.base import Tool, ToolResult, obj
 from agentd.tools.registry import Registry
 
 
@@ -546,3 +547,40 @@ async def test_extra_system_is_folded_into_the_one_leading_system_message(cfg):
     positions = [i for i, m in enumerate(prompt) if m.get("role") == "system"]
     assert positions == [0], f"system messages at {positions}"
     assert "You are the researcher." in prompt[0]["content"]
+
+
+# --- the caller's approver reaches the tool context ------------------------------
+#
+# Why this matters. `delegate` builds a second `AgentLoop` for the worker, and it takes that
+# worker's approver from `ctx.extra["approver"]`, falling back to a `QueueApprover` when the
+# key is absent. Nothing in `src/` ever set the key, so the fallback always fired: under
+# `agent chat` the caller holds a `CliApprover` that can ask the user, but the worker got a
+# `QueueApprover`, which never prompts — it queues the call and hands the model a denial. A
+# delegated role that needs `fs_write` or `shell_exec` was therefore denied every write,
+# with nothing in the code or in `agent doctor` looking wrong. The assertion is on object
+# identity, not on type: an equivalent-looking approver built somewhere else is the bug.
+
+
+async def test_a_tool_sees_the_approver_the_loop_was_built_with(cfg):
+    seen: list[object] = []
+
+    async def handler(args, ctx):
+        seen.append(ctx.extra.get("approver"))
+        return ToolResult(content="ok")
+
+    probe = Tool(
+        name="records_its_context", description="records the context it was called with",
+        parameters=obj(), handler=handler, effect_class="read", risk="read",
+    )
+    approver = AutoApprover(True)
+    provider = FakeProvider(turns=[[("records_its_context", {})], "Done."])
+    loop = AgentLoop(
+        cfg=cfg, registry=Registry(), engine=engine_from_config(cfg),
+        approver=approver, provider=provider,
+    )
+    loop.registry.add(probe)
+    session = await Session.create("test")
+    await _run(loop, session, "run the probe")
+
+    assert seen, "the probe tool was never called"
+    assert seen[0] is approver
