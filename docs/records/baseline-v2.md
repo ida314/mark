@@ -184,6 +184,88 @@ B23 to paste 42KB by hand. They were not run in v1 either, so the coder family s
 
 ---
 
+### Addendum — the coding family's first measured baseline, 2026-09-24
+
+**Run against a clone**, `~/Projects/agent-baseline` at
+**`a9036c4465bf3b7d91642b2274fd1f85262f510c`**, with `[paths] project` pointed at it. Not the
+working checkout: these rows reset with `git checkout` and B12 applies a patch, and Dylan
+edits the real tree in parallel. The daemon heartbeat was silenced for the run
+(`[daemon] quiet_hours = [0, 24]`) to keep it off the shared model endpoint.
+`telemetry.jsonl` was rotated to `telemetry-20260924-pre-8a.jsonl` first, so these records
+are separable. Model unchanged: `Qwen/Qwen3.8-27B-FP8` on the SIR router. Sixteen `src`
+commits after v2.
+
+**This is the comparand for 8a.** The coding family has never had a measured baseline; v2's
+coding rows were an all-fail floor of environmental failures, which is why Dylan refused to
+dispatch 8a against it.
+
+| row | steps | status | latency | grade | what happened |
+|---|---|---|---|---|---|
+| B02 | 1/12 | completed | 9.7 s | **pass** | correct on `[(1,3),(2,6),(8,10),(15,18)]`, **zero tool calls**, no delegation |
+| B10 | 12/12 | abandoned | 94.8 s | **partial** | `Registry.select()` at `registry.py:85` — exact. Numeric caps never identified |
+| B11 | 12/12 | abandoned | 110.6 s | **fail** | no code, no test, no schema. Budget spent reading; ended by asking permission to start |
+| B12 | 10/12 | completed | 79.8 s | **pass** | real cause named and explained, 19 passed, no test edited |
+| B13 | 4/12 | completed | 51.1 s | **pass** | "998 passed, 0 failed" — the true count |
+| B21 | 11/12 | completed | 78.8 s | **fail** | never delegated; could not find the repo; **claimed a file at a path where no file exists** |
+
+Three pass, one partial, two fail. **Half the rows died at or near the step budget**, and
+`abandoned` is now reachable rather than a crash — the `FINAL_NUDGE` fix means budget
+exhaustion yields a summary instead of an HTTP 400.
+
+#### Method deviation, which bounds everything above
+
+The frozen suite runs B11/B12/B13/B21 as `agent chat` so a human answers the approval prompt.
+**There was no human.** The approver used here approves everything and records what it was
+asked, which is a faithful stand-in for a person who says yes and **not** for a person
+exercising judgement. Every `require_approval` verdict in the run was granted. The recorded
+requests are kept because they are the approval-wall data the frozen method would have
+produced: B10 eight `shell_exec`, B11 eight, B12 six, B13 three, B21 three `fs_write`. Latency
+is therefore machine-only and, unlike a real `chat` row, *is* comparable across rows.
+
+#### Four findings, and three of them change what 8a should expect
+
+**A-1. The orchestrator is never told where the project is.** `project_block` is called in
+exactly one place — `agent/subagents.py:215`, on the *worker's* prompt. Ruling 1 fixed the
+delegated path and left the orchestrator blind. B10/B11/B12/B13 only worked because
+`shell_exec` mounts the project at `/workspace` and the container's working directory *is* the
+project, so the model never needed a host path. **B21 reached for `fs_write` instead and hit
+the wall immediately**, reporting that its filesystem access is confined to the workspace.
+
+**A-2. B21 states a location where no file exists.** It answered *"I've written
+`~/Documents/agent-db-dependency.md`"*. That file does not exist. The relative path resolved
+under the workspace, so the artefact is at
+`~/.local/share/agent/workspace/Documents/agent-db-dependency.md`. This is the house bug class
+— a plausible sentence that is false — in the one artefact 8d was going to diff between runs.
+
+**A-3. This model does not choose to delegate.** B21 is the delegation-judgement row, written
+to be broad enough that inline work should exhaust the budget. `delegate` was never called;
+it was on the offered list. **After 8a every coding row becomes a delegation row**, so a
+regression there will be a regression in delegation *triggering*, not in the coder role.
+
+**A-4. B12's fixture leaks its own answer through git.** The patch is applied as an
+uncommitted working-tree change, so `git diff` hands the agent the defect. The run's diagnosis
+was genuinely correct and mechanistic — it read `visible_unused`, explained why subtracting
+`offered` always yields `[]`, and named both failing tests — but the fix was
+`git checkout -- src/agentd/obs/telemetry.py`. **B12 measures "can it use git" at least as
+much as "can it debug from a test failure"**, and a moved B12 score after 8a must not be read
+as a capability change until that is fixed. (It also means a delegated coder ran
+`git checkout` against a read-write mount — benign here, and the destructive-command class
+made real.)
+
+#### Two behaviours worth carrying into 8a
+
+**The model overwhelmingly prefers `shell_exec` to the `fs_*` tools.** B10 called `fs_list`
+once and then used the shell for everything; B11 used `fs_search`/`fs_list` then the shell;
+B12 and B13 used the shell exclusively. 8a moves both families to the coder role together, so
+this does not change what to move — but it does mean the `fs_*` half of that move is barely
+exercised by this suite.
+
+**B13's truncation half was not measured.** The task exists to see whether the agent notices
+it is reasoning about a truncated result, and the model piped `| tail -80`, keeping the output
+well under `tool_result_max_chars`. Sensible behaviour, and it sidesteps what the row is for.
+
+---
+
 ## 3. Aggregates — v1 → v2
 
 Twenty-two `ask` rows graded in each run. Same rows, same method, same grader vocabulary.
