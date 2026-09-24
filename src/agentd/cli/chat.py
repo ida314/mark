@@ -55,14 +55,26 @@ class CliApprover:
         self.prompt_session = session
 
     async def request(self, req: ApprovalRequest) -> ApprovalResult:
-        body = [f"[bold]{req.tool_name}[/bold]  risk={req.risk}  rule={req.decision.rule_id}"]
+        worker = req.origin[len("subagent:") :] if req.origin.startswith("subagent:") else None
+        body = [
+            f"[bold magenta]▶ DELEGATED WORKER: {worker}[/bold magenta]"
+            if worker
+            else f"[dim]requested by: orchestrator ({req.origin})[/dim]",
+            f"[bold]{req.tool_name}[/bold]  risk={req.risk}  rule={req.decision.rule_id}",
+        ]
         if req.reason:
             body.append(f"\n[italic]Why:[/italic] {req.reason}")
         if req.decision.reason:
             body.append(f"[dim]{req.decision.reason}[/dim]")
         args = {k: v for k, v in req.args.items() if k != "content"}
         body.append(f"\n[dim]{args}[/dim]")
-        console.print(Panel("\n".join(body), title="Approval needed", border_style="yellow"))
+        console.print(
+            Panel(
+                "\n".join(body),
+                title=f"Approval needed — subagent:{worker}" if worker else "Approval needed",
+                border_style="magenta" if worker else "yellow",
+            )
+        )
         if req.preview:
             console.print(
                 Syntax(
