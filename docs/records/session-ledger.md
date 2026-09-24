@@ -1625,3 +1625,61 @@ as a dangling image. Rollback is `docker tag agent-sandbox:pre-8 agent-sandbox:l
 rebuild from git history. The 256m/512m reproduction is recorded in `pass-08-outcome.md` as
 the reason for the setting, and the pass file now carries the offered-set number 20 with both
 numbers required in 8d's table.
+
+## The enforcement fix landed — `2d92aa2`, 2026-09-24
+
+All four doors filter against the subset, and `AgentLoop.tool_subset` is a **property rather
+than a snapshot**. The shipped orchestrator narrows nothing; 8a is what narrows it.
+
+**It went in wrong first, and that is the part worth recording.** The first implementation
+snapshotted `set(self.registry.tools)` in `__init__`, and its comment claimed that was
+"today's behaviour exactly". It was not: several callers and several tests do
+`loop.registry.add(probe)` *after* constructing the loop, and the snapshot locked those tools
+out of their own turn. **Two pre-existing tests caught it immediately** —
+`test_a_tool_sees_the_approver_the_loop_was_built_with` and
+`test_the_manifest_covers_the_tool_output_of_the_turn_that_handed_off`. That is the opposite
+of every other defect in this pass, where the answer to "how many pre-existing tests died" was
+zero, and it is why the property shape was found before the commit rather than after it. The
+same two are now the regression guard for it.
+
+**Mutations re-run by the orchestrator, not taken on report.** Verified directly, suite of 998:
+
+| mutation | new tests killed | pre-existing killed |
+|---|---|---|
+| door 1 — drop `permitted` from `select` | orchestrator doors 1 and 2 | **0** |
+| door 2 — drop the `_with_lookup` guard | orchestrator door 2 | **0** |
+| door 3 — `tool_search` ignores the subset | **both** door-3 tests, orchestrator and worker | **0** |
+| door 4 — the re-add ignores the subset | orchestrator door 4 | **0** |
+| the executor's last line disabled | 3 tests | **0** |
+| `None` enforces an empty subset | 1 | **20** |
+| the subset snapshotted in `__init__` | 0 | **2** (exactly the pair above) |
+
+**The 20 is the useful number.** Making `None` mean "enforce nothing permitted" kills twenty
+pre-existing tests across `test_effect_ledger`, `test_cold_resume`, `test_mcp_client` and
+`test_tools_and_daemon` — so `policy/replay.execute_approved` and the MCP callers, which have
+no turn and no surface, are genuinely covered rather than merely asserted to be fine.
+
+**Worker doors 1, 2 and 4 turn out to be closed by construction**, and the mutation says by
+what: `restricted = Registry(tools=registry.subset(...))` at `agent/subagents.py:211`. Door 2
+additionally cannot be reached through `run_subagent` at all, because it builds the worker a
+fresh `Session` whose `handoff` is always `None`; that test drives a worker-shaped loop
+directly. **Worker door 3 was genuinely open** — `tool_search`'s closure is over the *process*
+registry, so a worker was being told it "now had" tools from the whole machine. Dylan's
+instruction to test the worker half rather than assume it is what found that.
+
+**Three corrections to how the doors were described, all of which matter to 8a:**
+
+1. **Door 4's re-add does not control what the model is shown.** `tool_schemas` is a separate
+   list, appended to only by the `tool_search` reveal. The re-add touches `exposed` only, whose
+   effects are the `visible` flag on a *later* call to the same name, and the STUCK withdrawal
+   path. A first version of the door-4 test asserted "not offered on the next step" and the
+   mutation **survived it**; it now asserts the `visible` flag stays `false` across two calls.
+   **8a reads that rate — it should know it is measuring the flag, not the schema list.**
+2. **`select` short-circuits when the permitted pool is at or below `ALWAYS_EXPOSE_LIMIT` (20).**
+   A narrow surface is therefore offered whole and door 1's filter only bites above it. Since
+   8a's target is 8–12 tools, **door 1's filter will be inert at the target surface** and the
+   other three doors are what enforce it.
+3. **For a directly-named out-of-surface tool the executor is the only thing that refuses
+   execution**; the loop guard only stops the name being adopted into `exposed`.
+
+Suite 987 → 998, ruff clean, nothing staged that was not this change, no test file edited.
