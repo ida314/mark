@@ -99,6 +99,11 @@ allowed_roots = [
     "~/.local/share/agent/workspace",
     "~/.local/share/agent/memory",
 ]
+# The project a delegated worker works on, and the directory `shell_exec` mounts rw at
+# /workspace. Stated here on purpose: nothing infers it from cwd or git, so a worker that
+# is not told this path has no way to find the repo. Must be inside allowed_roots. Unset
+# means there is no project and the sandbox mounts the (empty) workspace instead.
+# project = "~/Projects/agent"
 
 [sandbox]
 image = "agent-sandbox:local"

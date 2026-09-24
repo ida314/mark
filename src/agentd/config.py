@@ -98,6 +98,12 @@ class RetrievalConfig(BaseModel):
 class PathsConfig(BaseModel):
     data_dir: Path = Path("~/.local/share/agent")
     allowed_roots: list[Path] = Field(default_factory=list)
+    # The project a delegated worker is working on, as an absolute path it can be told.
+    # Named here and nowhere else: it is never inferred from the process's cwd, from git,
+    # or from where this file happens to live. "The repo I am standing in" is a guess, and
+    # a worker that guesses wrong reads an empty directory or writes into the wrong tree.
+    # None means there is no project, and the sandbox falls back to the workspace.
+    project: Path | None = None
 
     @property
     def memory_repo(self) -> Path:
@@ -117,6 +123,30 @@ class PathsConfig(BaseModel):
 
     def roots(self) -> list[Path]:
         return [expand(r) for r in self.allowed_roots]
+
+    @property
+    def project_root(self) -> Path | None:
+        """The configured project, expanded, or None when none is configured."""
+        return expand(self.project) if self.project is not None else None
+
+    @model_validator(mode="after")
+    def _project_stays_inside_the_roots(self) -> PathsConfig:
+        """A configured project may not reach outside what the fs tools are allowed to see.
+
+        The sandbox mounts this directory rw, and that mount answers to nothing else - the
+        policy engine's root check runs on `fs_*` arguments, not on a bind mount. So the
+        one place that can hold the two together is here, at load time, loudly.
+        """
+        root = self.project_root
+        if root is None:
+            return self
+        if not any(root == r or r in root.parents for r in self.roots()):
+            raise ValueError(
+                f"[paths] project ({root}) is not inside any of allowed_roots "
+                f"({[str(r) for r in self.roots()]}); the sandbox would mount it rw anyway, "
+                "so add the root explicitly or point project somewhere already allowed"
+            )
+        return self
 
 
 class SandboxConfig(BaseModel):

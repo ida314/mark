@@ -107,6 +107,38 @@ CODER = SubagentSpec(
 
 SPECS: dict[str, SubagentSpec] = {s.name: s for s in (RESEARCHER, CODER)}
 
+
+def project_block(cfg: Config, *, has_shell: bool) -> str:
+    """The absolute path of the project a worker is working on, as prose it can act on.
+
+    A worker is told this or it cannot find the project at all. Nothing in the runtime
+    derives it: `fs_*` resolves a relative path under the agent's workspace, the sandbox
+    has no notion of where the user's code lives, and there is no cwd a delegated turn
+    inherits. Every one of a live `coder` delegation's fourteen tool calls failed for
+    exactly this reason - relative paths landed in an empty workspace and its one absolute
+    guess, `/home/dylan`, was outside the allowed roots.
+
+    Empty when no project is configured: saying nothing is better than naming a directory
+    the worker would then treat as the project.
+    """
+    root = cfg.paths.project_root
+    if root is None:
+        return ""
+    lines = [
+        f"The project you are working on is at {root}.",
+        "File tools take absolute paths. A path that is not absolute is resolved under the "
+        f"agent's workspace ({cfg.paths.workspace}), which is not the project, so write "
+        "every path out in full starting from the project root above.",
+    ]
+    if has_shell:
+        lines.append(
+            "In shell_exec the project is mounted read-write at /workspace, which is the "
+            "container's working directory, so shell commands see it as the current "
+            "directory and anything they change there is changed for real."
+        )
+    return "\n\n" + "\n".join(lines)
+
+
 # The words are the schema's, field by field, because this is the one prompt whose output is
 # rejected rather than repaired: a worker that answers this in prose has failed, and telling
 # it what shape to answer in is the cheapest thing the runtime can do about that.
@@ -177,6 +209,10 @@ async def run_subagent(
         return cached
 
     restricted = Registry(tools=registry.subset(spec.tool_names, spec.tool_tags))
+    # The role prompt plus the one thing about this machine the role prompt cannot know.
+    # Composed once and used for both the working turn and the final report call, so the
+    # worker is never asked to report under a different system message than it worked under.
+    worker_prompt = spec.prompt + project_block(cfg, has_shell="shell_exec" in restricted.tools)
     loop = AgentLoop(
         cfg=cfg,
         registry=restricted,
@@ -241,7 +277,7 @@ async def run_subagent(
             origin=f"subagent:{spec.name}",
             autonomy=autonomy,
             record_user_message=False,
-            extra_system=spec.prompt,
+            extra_system=worker_prompt,
             run_id=run_id,
             worker_id=worker_id,
             parent_turn_id=parent_turn_id,
@@ -264,7 +300,7 @@ async def run_subagent(
         try:
             report = await loop.provider.complete_json(
                 [
-                    {"role": "system", "content": spec.prompt},
+                    {"role": "system", "content": worker_prompt},
                     {"role": "user", "content": f"Task: {brief}"},
                     {"role": "assistant", "content": text[:20000] or "(no output)"},
                     {"role": "user", "content": FINAL_INSTRUCTION},

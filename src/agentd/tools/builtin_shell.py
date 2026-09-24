@@ -7,11 +7,23 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from pathlib import Path
 
 from ..config import get_config
 from ..ids import uuid7
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
 from .effects import UNSAFE_WRITE
+
+
+def mount_source() -> Path:
+    """The host directory the container sees at /workspace.
+
+    `paths.project` when one is configured, so a command can actually read and build the
+    project it was delegated against, and the workspace otherwise. Never both: /workspace is
+    one path, and a worker told to run the suite needs it to be the project's.
+    """
+    cfg = get_config()
+    return cfg.paths.project_root or cfg.paths.workspace
 
 
 def docker_command(command: str, *, network: bool, timeout_s: int, name: str) -> list[str]:
@@ -23,7 +35,9 @@ def docker_command(command: str, *, network: bool, timeout_s: int, name: str) ->
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--pids-limit", "256", "--memory", cfg.sandbox.memory, "--cpus", cfg.sandbox.cpus,
         "--user", "1000:1000",
-        "-v", f"{cfg.paths.workspace}:/workspace:rw",
+        # rw, and the project when there is one: a worker whose job is to change code and
+        # run the suite cannot do either through a read-only mount of an empty directory.
+        "-v", f"{mount_source()}:/workspace:rw",
         "-w", "/workspace",
         cfg.sandbox.image,
         "bash", "-lc", command,
@@ -33,16 +47,20 @@ def docker_command(command: str, *, network: bool, timeout_s: int, name: str) ->
 def _preview(args: dict) -> str:
     cfg = get_config()
     net = "network ON" if args.get("network") else "network off"
+    source = mount_source()
+    what = "project" if cfg.paths.project_root is not None else "workspace"
     return (
         f"$ {args['command']}\n\n"
         f"in container {cfg.sandbox.image}, {net}, read-only root, "
-        f"workspace {cfg.paths.workspace} mounted at /workspace"
+        f"{what} {source} mounted read-write at /workspace"
     )
 
 
 @tool(
     "shell_exec",
-    "Run a shell command inside an isolated container with the workspace mounted at /workspace.",
+    "Run a shell command inside an isolated container. The configured project directory is "
+    "mounted read-write at /workspace, which is the working directory; changes to it persist "
+    "on the host. With no project configured, the agent workspace is mounted there instead.",
     required(
         obj(
             command={"type": "string"},
@@ -59,14 +77,26 @@ def _preview(args: dict) -> str:
     preview=_preview,
     # unsafe_write: the argument is a command line the model wrote, so there is nothing
     # generic to reason about. The container is throwaway but `/workspace` is mounted rw
-    # and survives it, and with `network=true` the command can reach anything the host
-    # can. No class short of this one is defensible for an arbitrary program.
+    # and survives it - and it is now the real project directory, so a command here edits
+    # the same working tree the user does - and with `network=true` the command can reach
+    # anything the host can. No class short of this one is defensible for an arbitrary
+    # program.
     effect_class=UNSAFE_WRITE,
 )
 async def shell_exec(args: dict, ctx: ToolContext) -> ToolResult:
     cfg = get_config()
     if not shutil.which("docker"):
         return ToolResult(content="Docker is not available, so the sandbox is disabled.", ok=False)
+    source = mount_source()
+    if not source.is_dir():
+        # Said, not worked around. `docker run -v` would create a missing host directory as
+        # root and hand back a container that looks fine and can see nothing, and silently
+        # mounting the workspace instead would be the same lie with a plausible directory
+        # in it: every command would run against the wrong tree and report success.
+        return ToolResult(
+            content=f"The directory to mount at /workspace does not exist: {source}",
+            ok=False,
+        )
     timeout = min(int(args.get("timeout_s", cfg.sandbox.default_timeout_s)), cfg.sandbox.max_timeout_s)
     network = bool(args.get("network", False))
     name = f"agent-sbx-{uuid7().hex[:12]}"
