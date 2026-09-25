@@ -93,6 +93,45 @@ trace shows they are costing something.
   its successful runs. Its answer is therefore by construction "a summary of unfinished work,
   not an answer" (`loop.py:825`), and that is the text `repo_agenda.notify` files as a
   Suggestion. Tuning item, not a bug.
+- **A worker's final report is a second inference over a truncated transcript, and it is wrong
+  in both directions.** Named in the 8a record and never filed here until now. Four measured
+  instances across three sessions: a researcher claimed "no web access from that context" having
+  made zero calls in a run where the same role made ten successful web calls minutes earlier
+  (8b); a coder reported "all 19 tests pass" when 2 of 19 failed, disproved by re-running the
+  same fixture on the same commit (8d B12); a coder emitted a citation naming three files that
+  do not exist after eleven correct `shell_exec` calls had found the real ones (8d B10); and in
+  the one case the orchestrator caught it, the worker's own `status` was `uncertain` while its
+  report claimed success (8d B11). After 8a this is on the critical path for every coding row,
+  because the report is all the orchestrator ever sees. **On the 8d evidence this outranks the
+  rest of this list.**
+
+- **`daemon + delegate(researcher)` is `allow`, so a heartbeat can reach the open web
+  unattended.** Carried out of 8c, filed for 8d, not fixed there. `delegate` is `risk="read"`,
+  so `daemon-never-external` (which matches `risk: [external, destructive]`) cannot see it; and
+  a worker's `ctx.origin` is `subagent:researcher`, so nothing keyed on `origin: [daemon]`
+  applies one layer down. `web_fetch` is also `risk="read"` — its `effect_class` is
+  `unsafe_write`, a different axis the engine does not consult — so it is `allow` at `observe`.
+  8c closed the same hole for `mail` by name with `mail-delegation-never-unattended`; the
+  general fix is one rule at the `delegate` layer naming every role that holds an outward tool,
+  or reclassifying `web_fetch`'s risk. `coder` is covered only incidentally, by the risk matrix
+  denying `shell_exec`/`fs_write` at `observe`. **This is a policy hole, not a tuning question —
+  it should not wait for a recurring session.**
+
+- **An ephemeral `coder/explore` worker, and whether to expose it to the model.** 8a's criterion
+  is in the `subagents.py` comment — "a `coder` run that spends its budget re-reading the repo
+  before it can run a failing test" — and six of fourteen 8a workers did exactly that. Deferred
+  to 8d "with the unattended measurement that would settle it"; 8d ran attended only, so the
+  measurement still does not exist.
+
+- **Eval runs still end up as durable beliefs, and the recorded fix does not work.** Promotion
+  patched off in the harness covers one writer; the daemon's consolidation loop is the other, and
+  it **re-derives** candidates from a run's `episodes` and `actions`, so clearing
+  `candidate_memories` before restarting it removes the backlog and not the source — measured
+  8d, clone path back in `facts` 90 seconds after the restart. Cheapest real fix is a
+  session-level `synthetic` flag the consolidator's episode scan skips; next is pointing the
+  suite at a throwaway database via `AGENT_DB__*`. **Blocking for Pass 9**, which is a retrieval
+  pass and will be measured against a store these rows pollute.
+
 - **Daemon health is invisible where it looks like it should be.** A provider 400 does not
   raise out of `run_turn` — it is journaled as `agent_finished status=failed` — so
   `repo_agenda.notify(title="Heartbeat failed")` has never once fired. 64 notifications
