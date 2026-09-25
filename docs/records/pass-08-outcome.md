@@ -581,8 +581,138 @@ not by the other 1000 tests.
 
 ## B14–B16 comparison
 
-*Placeholder. To be filled in by whoever runs the measurement — the rows, the method, and
-the before/after offered-set counts. Nothing in this section has been measured yet.*
+### the comparand is not `baseline-v2`, and that had to be re-measured
+
+`baseline-v2` grades B14–B16 **partial / partial / fail**, and those numbers are not usable as
+8b's before-side. At v2, B14's `subagent:researcher` turn **died in 93 ms with `llm_ms: 0`** on
+the `System message must be at the beginning` 400, and B16 ended at `steps 12/12` on the same
+bug. Both were fixed by **pre-8a fix 1** (`d02a559`), two commits before this session. Quoting
+a v2 → 8b delta would credit the researcher role with a delegation fix that landed earlier —
+the exact error `baseline-v2` §8 exists to warn about.
+
+So B14–B16 were **run twice**: once at 8a's head and once at 8b's, and the pre-8b run is the
+comparand. This is the same "both sides measured the same way" ruling 8a operated under.
+
+### method, which differs from 8a's in three ways and is better for it
+
+Both sides ran from **clones with their own venvs** — `~/Projects/agent-8a` at `e6a3b83` and
+`~/Projects/agent-8b` at `b012016` — with the frozen prompts read out of
+`evals/baseline-tasks.md` by a mechanical extractor rather than transcribed. The extractor was
+checked against 8a's hand-written `TASKS` dict first: all six prompts identical.
+
+1. **Nothing shared was modified.** 8a edited `~/.config/agent/config.toml` and owed a restore
+   at "step 8". `AGENT_PATHS__PROJECT`, `AGENT_TELEMETRY__PATH` and `AGENT_JOURNAL__PATH` are
+   all honoured as per-process env overrides (`config.py:640`), so these runs kept out of the
+   live journal and the live telemetry file entirely, and owe no restore.
+2. **Promotion was off**, per 8a's standing rule, patched on all three modules that import
+   `promote_scope` by name with an assert so a later importer fails the harness instead of
+   silently writing. Confirmed after the fact: `facts` took **0** rows. The workers still
+   proposed `candidate_memories`, which is correct — candidates are proposals, promotion is
+   what writes.
+3. **`agent tools sync` was not run**, and it turns out not to matter. `desc_sha256` is read
+   only by `sync_embeddings`; the one description that changed is `delegate`'s, and `delegate`
+   is `always_on`, so it is chosen before the similarity route runs. Leaving the table alone
+   also keeps both sides on identical embeddings, which syncing between them would not have.
+
+**Stated deviation:** the daemon heartbeat was left running rather than silenced in config, so
+both sides carry the same endpoint contention. And the harness approver approves and records,
+as in 8a — a stand-in for a person who says yes, not for one exercising judgement.
+
+### the rows
+
+| row | baseline-v2 | pre-8b (8a's head) | **8b** | latency | what changed |
+|---|---|---|---|---|---|
+| B14 | partial | **pass** 124.3 s | **pass** 120.3 s | −3% | already delegated at 8a; unchanged, and the boundary is now enforced rather than chosen |
+| B15 | partial | **partial** 70.2 s | **pass** 866.9 s | ×12.3 | the whole session in one row — see below |
+| B16 | fail | **partial** 1357.5 s | **pass** 689.4 s | **×0.51** | the only row that got *faster*, and by half |
+
+**partial / partial / fail → 3 pass.** Completion rate is not regressed.
+
+### B15 is the row 8b exists for, and the before-picture is unambiguous
+
+At 8a's head the orchestrator **did the searching itself**: four `web_search`/`web_fetch` calls
+in its own context, 20 tools offered, and an answer with four libraries, a recommendation and
+reasons but **no source of any kind** — partial on the rubric's "sources cited". Everything it
+said was also consistent with parametric knowledge, so the searching left no trace in the
+answer.
+
+At 8b's head it called `delegate` and nothing else. The answer came back with a comparison
+table carrying **version numbers and release dates**, and those are the evidence: this session
+checked four of them first-hand against PyPI and the GitHub API rather than grading the
+agent's own sentence.
+
+| claim in the answer | verified |
+|---|---|
+| `ical` 14.2.0, released 2026-09-11, Python ≥3.11 | 14.2.0, `2026-09-11T05:17:41`, `>=3.11` |
+| `icalendar` 7.3.0, released 2026-08-19, Python ≥3.10 | 7.3.0, `2026-08-19T15:10:19`, `>=3.10` |
+| issue #688, closed 2026-09-22, unbounded RRULE past year 9999 | *"Unbounded recurring events cause pathological iteration and a year>9999 crash"*, closed `2026-09-22T14:20:23Z` |
+
+Exact, and none of it is reachable from the model's parametric knowledge — the `ical` release
+is thirteen days old. **That is what "returns a compressed structured result rather than its
+search transcript" buys**, and it is why the row moved partial → pass.
+
+### the numbers that moved, from telemetry
+
+|  | pre-8b | 8b |
+|---|---|---|
+| **web calls made by the orchestrator** | **11** | **0** |
+| web calls in the run (worker + orchestrator) | 21 | 74 |
+| orchestrator steps used | 2, 3, 10 of 12 | **2, 3, 2** of 12 |
+| orchestrator context peak | 1 722 / 5 678 / **19 640** | 2 070 / 4 452 / **3 945** |
+| workers finished | 7 | 5 |
+| tools offered to the orchestrator | 18, 20, 20 | 17, 18, 20 |
+| total wall clock | 1 552 s | 1 677 s (+8%) |
+
+**Three things worth naming.**
+
+**The orchestrator made zero web calls and each row called only `delegate`.** Door 4 held in
+the field, not just in a test.
+
+**B16's orchestrator context peak fell 19 640 → 3 945, an 80% reduction, while the run made
+three and a half times as many web calls.** The searching did not shrink; it moved. That single
+pair of numbers is the clearest statement of what a durable role is for that this pass has
+produced, and it is the thing 8a could not show at all.
+
+**The offered count still barely moved — 19.3 → 18.3 mean — exactly as predicted.** At 22
+permitted, `Registry.select` does not short-circuit (`22 <= 20` is false), so the similarity
+route backfilled the vacated slots. 8b caps the offered set at 22; it does not reduce it.
+
+### one pre-8b behaviour that is a defect, and is now the strongest evidence for a deferred item
+
+In the **pre-8b** B16 run, two separate `subagent:researcher` turns completed at `steps 1/10`
+having made **zero tool calls**, and the orchestrator relayed it as *"The researcher couldn't
+fetch the docs (no web access from that context)"* — then answered the documentation half from
+parametric memory. **The same role, in the same run eight minutes earlier, made ten successful
+web calls for B14.** Nothing was wrong with its access.
+
+This is 8a's *"a worker's report contradicted its own transcript"* finding with the sign
+flipped and the stakes raised. There the false report was conservative and lost work that had
+been done; here it **changed the orchestrator's plan**, and the orchestrator believed a claim
+about tool availability that its own runtime would have contradicted. It is the strongest
+evidence yet for 8a's deferred Pass 10c item — the final report call as a second inference over
+`text[:20000]` of the transcript.
+
+### what was verified rather than believed
+
+- **B14.** `X-Poll-Interval` named; both cited URLs fetched by this session, **HTTP 200**.
+- **B15.** the three-row table above, against PyPI's JSON API and `api.github.com`.
+- **B16.** every line-level claim checked against `gcal.py` at the measured sha: 149 lines,
+  `MAX_RESULTS = 250` at line 31, `singleEvents` at 73, `showDeleted` at 75, the
+  `!= "cancelled"` filter at 87, and `nextPageToken` / `recurringEventId` / `originalStartTime`
+  absent from the file. All exact.
+- **Not verified, and said so rather than graded silently:** B16's claim that `timeMin` bounds
+  an event's *end* time and `timeMax` its *start* time. The reference page renders that section
+  client-side and a scrape did not reach it. The row passes on its other five disagreements.
+
+### what this comparison does not establish
+
+- **Nothing about the offered-set reduction**, again. That is 8c.
+- **Nothing about the unattended paths.** The recording approver approves; `agent ask`, the
+  watchers and the heartbeat still hold `QueueApprover`.
+- **Three rows is a small sample and two of the three were already delegating at 8a's head.**
+  The attributable change is B15, plus B16's halved latency and 80% context drop.
+- **Nothing about the interlock combined with a moved family** — no row here reads mail. That
+  gap is what 8c's open question and its new tests speak to.
 
 ---
 
