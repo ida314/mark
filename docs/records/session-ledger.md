@@ -35,7 +35,7 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 8a | complete | 2026-09-24 | pass-08-outcome.md | committed as `e6a3b83` (+ `70f8394`, the measured comparison). Both 2026-09-23 gates cleared first: the pre-8a B11/B12/B13 rows were run attended and recorded as the `baseline-v2.md` addendum, and the approval-wall question was answered by the code. `fs_*` + `shell_exec` → `coder`. 6 rows 3p/1partial/2f → **6 pass**. Permitted 29 → 24; offered 20 → 18.7, i.e. unchanged. Two measurement incidents and a memory-store pollution, all in the record. |
 | 8b | complete | 2026-09-24 | pass-08-outcome.md | committed as `b012016`. `web_search` + `web_fetch` → `researcher`; no ephemeral worker defined, on 8a's criterion (all six researcher tools are `allow` at every autonomy). Permitted 24 → 22, `always_on` 13. At 22 `select` does **not** short-circuit, so offered is capped rather than reduced. B14–B16 run pre/post against clones at 8a's and 8b's heads — `baseline-v2` is not a usable comparand, its B14/B16 died on the pre-8a fix-1 400. **partial/partial/fail → 3 pass.** Orchestrator web calls 11 → **0**; B16's orchestrator context peak 19 640 → 3 945 (−80%) while the run made 3.5× more web calls. Method improved on 8a's: per-process env overrides, so nothing shared was edited and no restore is owed. |
 | 8c | complete | 2026-09-24 | pass-08-outcome.md | `memory_search` + `memory_history` → new `memory` durable role (the in-process `delegate(agent="memory")` branch is gone); `gmail_search` + `gmail_message` → new `mail` role, **not** `researcher`, which would have put the mailbox beside the only holder of the web tools. Permitted 22 → **18**, `always_on ∧ surface` 13 → **10**, `select` short-circuits — verified independently. Suite 1028, `ruff check .` clean. Two interlock repairs and a new `mail-delegation-never-unattended` rule. **B17 pass holds; B18/B19 uncovered (premise failures, not regressions); B20 not comparable — the model sent `memory_remember` with empty args twice.** **offered = 17 on every row**, deterministic for the first time. Interlock probed against the engine: 8c's `memory`/`mail` carve-out holds and the daemon→mail hole was real and is closed — but **`daemon + delegate(researcher)` is still `allow`**, and a worker may `web_fetch` at `observe`, so the same gap is open for the role that holds egress. Filed for 8d. |
-| 8d | pending | — | — | |
+| 8d | complete | 2026-09-25 | pass-08-outcome.md | full frozen suite (B01–B22) against `~/Projects/agent-8d` at `21977b4`, daemon stopped, promotion off, per-row setup in `~/Projects/agent-evals/run8d.sh` — B12's fixture applied then reversed, the clone reset after every row that edits it. **B23 is out of scope**: it is the multi-turn session row and has no single blockquote prompt, so the one-row harness cannot run it. **22 rows in 73.9 min: 11 pass, 3 partial, 7 fail, 1 uncovered. `offered = 17` on every row.** Of the 7 failures, 5 are tool-call fidelity and 2 are worker report fabrication; **none is a policy, surface or routing failure**. Headline: `delegate` is now the only door to five families and the 27B cannot reliably produce its two-required-argument schema — 9 rejected calls, and on B13 the withdraw-after-two guard left the turn with no route to anything. Four rows emitted tool-call markup as prose and the runtime did not notice (`status=completed`, `steps=1`). B12's worker fabricated a green test run — disproved directly here, the tests really do fail. `always_on` is **inert for the orchestrator** below the short-circuit threshold, so the pass file's borderline-tool question is moot; leave the flags alone. Still open: the `daemon + delegate(researcher)` gap, and eval pollution — 8c's recorded fix was implemented in a trap and **did not work**, because the consolidator re-derives candidates from episodes. |
 | 9a | pending | — | — | |
 | 9b | pending | — | — | |
 | 9c | pending | — | — | |
@@ -46,11 +46,13 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 
 ## Carried forward
 
-- **OWED, 2026-09-24, before this session ends:** `systemctl --user restart agent-daemon.service`.
-  It was **stopped** at 20:4x EDT on Dylan's ruling, for the duration of the 8c/8d measurement,
-  because the daemon's consolidation loop — not the harness — was draining the eval runs'
-  `candidate_memories` into `facts`. While it is stopped there is no heartbeat, no watcher, no
-  scheduler and no push. A session that ends without restarting it leaves the system wrong.
+- **No longer owed as a manual step.** The daemon is stopped for the duration of a suite run,
+  because its consolidation loop — not the harness — drains eval `candidate_memories` into
+  `facts`. As of 2026-09-25 `~/Projects/agent-evals/run8d.sh` **owns that window itself**: it
+  stops the daemon at the top and restarts it from a `trap ... EXIT INT TERM`, clearing the
+  candidate queue first. The 2026-09-24 version left the restart as a note here, the session
+  died, and the daemon came back only because someone started it 80 seconds later
+  (`NRestarts=0`, `Restart=on-failure` — systemd would not have).
 
 - **Pass 1 open question, unresolved into Pass 2:** token accounting is dead — the SIR
   router drops the usage chunk, so `usage.reported` is `false` on every turn.
