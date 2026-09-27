@@ -24,8 +24,25 @@ from __future__ import annotations
 
 import json
 
+from ..agent.observations import RUNTIME_NOTE
 from .base import Tool, ToolContext, ToolResult, obj, required, tool
 from .effects import UNSAFE_WRITE
+
+# Session 9b. Written here, in full, and never assembled from anything the worker said. It is
+# appended to a result the runtime could not corroborate, and it names the three moves §21 of
+# the architecture already gives the orchestrator - the runtime does not pick one, because a
+# runtime that re-delegates on its own can loop on a false positive with nobody watching.
+#
+# Carries `RUNTIME_NOTE` rather than a marker of its own, so the one tuple that means "the
+# runtime wrote this, nobody said it" still covers it: `agent/handoff.py` refuses it into a
+# handoff and `memory/promotion.py` refuses it into a durable belief, both for free.
+INVALIDATED_BLOCK = f"""
+{RUNTIME_NOTE} This result is INVALIDATED. The runtime checked the report
+against what this worker actually did, from the run journal, and they contradict:
+{{flags}}
+Do not relay this answer and do not act on it. Choose one: delegate again with a narrower
+brief that names the exact file or command, ask the user, or say what is known and what is
+not."""
 
 
 @tool(
@@ -106,6 +123,11 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
     # read here rather than threaded through the worker so that the switch and the render sit
     # in one place. Off, the transcript stays in the archive.
     payload = result.for_orchestrator(debug=get_config().delegation.debug_transcripts)
+    content = json.dumps(payload, indent=2)
+    if result.validation == "invalidated":
+        content += INVALIDATED_BLOCK.format(
+            flags="\n".join(f"  - {f.detail}" for f in result.flags)
+        )
     # Session 8c. Read off the role, after the delegation succeeded and so after the role
     # name has been validated. `reads_private_data` derives it from what the role's tools
     # declare, so this is not a list of role names that has to be kept in step with one.
@@ -113,12 +135,18 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
 
     private = reads_private_data(delegation.role_spec(agent_name))
     return ToolResult(
-        content=json.dumps(payload, indent=2),
+        content=content,
         # Only `completed` is a tool call that did what it was asked. `blocked` and
         # `uncertain` are both `ok=False`, which the executor records as a failed effect -
         # and `agent/observations.py` reads a failed effect as *uncertain*, never as
         # blocked, so a delegation that may have changed files is never offered for a
         # silent retry.
+        #
+        # Session 9b, on Dylan's ruling: tool success and validation status are separate
+        # axes, so an `invalidated` result does **not** flip this. The worker ran and
+        # reported; what is refused is its claim, and that refusal travels in `validation`
+        # and in the block above. Collapsing the two would make "the delegation failed" and
+        # "the delegation lied" the same fact, and they call for different moves.
         ok=result.status == "completed",
         trust="untrusted" if result.tainted else "trusted",
         # `private` is what `agent/loop.py` reads to close the interlock on the *caller*.
@@ -126,6 +154,10 @@ async def delegate(args: dict, ctx: ToolContext) -> ToolResult:
         data={
             "status": result.status, "report_valid": result.report_valid,
             "private": private,
+            # Session 9b. The second axis, in the structured place, so anything downstream
+            # matches on a code rather than on the wording of the block above.
+            "validation": result.validation,
+            "flags": [f.code for f in result.flags],
         },
     )
 

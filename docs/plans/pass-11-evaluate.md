@@ -1,4 +1,9 @@
-# Pass 10 — Evaluate & Tune
+# Pass 11 — Evaluate & Tune
+
+> **Renumbered 2026-09-25.** This was Pass 10 until result verification was filed as the
+> new Pass 9 and discovery moved to Pass 10. Nothing in the content changed. A record
+> written before that date which says "Pass 10", "10a", "10b" or "10c" and means the
+> evaluate-and-tune loop means this file, under its old number.
 
 **Architecture reference:** Phases 10 and 11
 **Depends on:** every prior outcome record
@@ -7,12 +12,12 @@ question being asked. Not all of them at once.
 
 ## Goal
 
-Close the loop. This is recurring, not a one-time pass. Sessions 10a and 10b run once;
-10c repeats indefinitely.
+Close the loop. This is recurring, not a one-time pass. Sessions 11a and 11b run once;
+11c repeats indefinitely.
 
 ---
 
-## Session 10a — Replay harness
+## Session 11a — Replay harness
 
 **Scope.** Replay a recorded run from the journal with cached tool results and no live
 model calls. Because every model and tool call was already recorded, replay exercises the
@@ -26,7 +31,7 @@ sequence is reported rather than swallowed.
 
 ---
 
-## Session 10b — Full metric run
+## Session 11b — Full metric run
 
 **Scope.** Pass 1 suite against the Pass 1 baseline.
 
@@ -53,7 +58,7 @@ checkpoint overhead (latency and storage)
 
 ---
 
-## Session 10c — Tuning cycle (recurring)
+## Session 11c — Tuning cycle (recurring)
 
 Work one question per session. Each produces a small change and a dated record entry.
 
@@ -105,6 +110,13 @@ trace shows they are costing something.
   because the report is all the orchestrator ever sees. **On the 8d evidence this outranks the
   rest of this list.**
 
+  **Promoted 2026-09-25 to Pass 9a — `docs/plans/pass-09-verification.md`.** The marker stays
+  here because this is where the evidence was filed and where a later session will look for it.
+  What Pass 9 takes is the deterministic half: the runtime reads the worker's own journal back
+  and flags the contradiction without a model call. What is *not* taken, and is still this
+  list's question, is whether the final report call should exist at all in its present
+  shape — a second inference over `text[:20000]`.
+
 - **`daemon + delegate(researcher)` is `allow`, so a heartbeat can reach the open web
   unattended.** Carried out of 8c, filed for 8d, not fixed there. `delegate` is `risk="read"`,
   so `daemon-never-external` (which matches `risk: [external, destructive]`) cannot see it; and
@@ -129,8 +141,11 @@ trace shows they are costing something.
   `candidate_memories` before restarting it removes the backlog and not the source — measured
   8d, clone path back in `facts` 90 seconds after the restart. Cheapest real fix is a
   session-level `synthetic` flag the consolidator's episode scan skips; next is pointing the
-  suite at a throwaway database via `AGENT_DB__*`. **Blocking for Pass 9**, which is a retrieval
-  pass and will be measured against a store these rows pollute.
+  suite at a throwaway database via `AGENT_DB__*`. **Blocking for Pass 9** [written 2026-09-24,
+  when Pass 9 was the retrieval pass; that is **Pass 10** since the 2026-09-25 renumber — see the
+  note at the top of this file. Pass 9 is now verification, which measures nothing against the
+  memory store, so the block moved with the retrieval work rather than with the number], which is
+  a retrieval pass and will be measured against a store these rows pollute.
 
 - **Daemon health is invisible where it looks like it should be.** A provider 400 does not
   raise out of `run_turn` — it is journaled as `agent_finished status=failed` — so
@@ -139,6 +154,24 @@ trace shows they are costing something.
   catches everything except the failure mode that actually happens, so anyone checking the
   agenda for daemon health concludes it is fine. This one is a trace question with its answer
   already known.
+
+### Ranked below daily use, with the reasoning, so they are declined rather than forgotten
+
+*Added 2026-09-25, on Dylan's ranking, in the same message that made verification Pass 9.*
+
+- **A planning layer.** Adds a step to every short request and helps only the rare long one.
+  The cost lands on the common case and the benefit on the uncommon one, which is the wrong
+  way round for a runtime used daily. Revisit if a trace shows a long task failing for want
+  of a plan rather than for want of verified worker results.
+- **Parallel subagents.** Little speedup expected on a single local model endpoint — one
+  vLLM server, and two workers contend for the same GPU rather than overlapping. **Not
+  measured**, and that is precisely why it stays a tuning question rather than a decision:
+  the claim that there is no speedup is a prediction, and this list is for things a trace
+  settles.
+- **Delegation or "do it yourself" overrides.** An override that lets the orchestrator take
+  a moved tool back clashes with Pass 8's design, which is that the surface is a property of
+  the role and not of the turn. If delegation is too aggressive the answer is the existing
+  "is delegation too aggressive or too conservative" question above, not a bypass.
 
 ---
 

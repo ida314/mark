@@ -47,7 +47,11 @@ REUSED = "worker_result_reused"
 # is the identity of the *work*, and it must not move because the record of the work changed
 # shape. An entry written under other rules is skipped by the fold below - a miss, which
 # costs a worker, rather than a read of fields that may not mean what they say.
-ENTRY_VERSION = 1
+# 1 -> 2 at session 9a: an entry now carries the runtime's verification of the result as
+# well as the result. A v1 entry is skipped rather than read, which is the right miss - it
+# was written before anything checked it, and serving it as `valid` would be asserting a
+# check that never ran.
+ENTRY_VERSION = 2
 
 
 def cached_results_at(

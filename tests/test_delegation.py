@@ -334,3 +334,100 @@ async def test_the_delegate_tool_refuses_an_unknown_role_instead_of_starting_a_w
     result = await builtin_delegate.delegate.handler({"agent": "analyst", "task": "dig"}, ctx)
     assert not result.ok
     assert "analyst" in result.content
+
+
+# --- session 9b: what an invalidated result costs -----------------------------
+
+
+def _fabricating(target) -> FakeProvider:
+    """A worker that reads one file and then claims a test run it never made. The B12 shape,
+    scripted: the claim is in the report, and the journal behind it has no test command."""
+    return FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], "Fixed it and ran the tests."],
+        json_results=[WorkerReport(status="completed", answer="Fixed. All 19 tests pass.")],
+    )
+
+
+async def test_an_invalidated_result_reaches_the_orchestrator_as_a_successful_call(cfg):
+    """Dylan's ruling at the 9b boundary: tool success and validation status are separate
+    axes. The worker ran and reported, so the call did what it was asked; what is refused is
+    the claim, and that refusal travels in `validation` rather than by flipping `ok`.
+
+    Collapsing the two would make "the delegation failed" and "the delegation lied" the same
+    fact, and they call for different moves."""
+    from agentd.tools import builtin_delegate
+    from agentd.tools.base import ToolContext
+
+    target = cfg.paths.roots()[0] / "parser.py"
+    target.write_text("x")
+    set_provider(_fabricating(target))
+    session = await Session.create("test")
+    ctx = ToolContext(
+        session_id=session.id, turn_id=session.id, autonomy="act", run_id="run-invalid",
+        step_id="s1", extra={"approver": AutoApprover(True)},
+    )
+    result = await builtin_delegate.delegate.handler(
+        {"agent": "coder", "task": "fix the parser and run the tests"}, ctx
+    )
+    assert result.ok is True
+    assert result.data["validation"] == "invalidated"
+    assert result.data["flags"] == ["tests_not_run"]
+    assert result.data["status"] == "completed"
+
+
+async def test_an_invalidated_result_tells_the_orchestrator_what_to_do_instead(cfg):
+    """The three moves are §21's, written by the runtime. The runtime does not pick one: a
+    runtime that re-delegates on its own can loop on a false positive with nobody watching."""
+    from agentd.tools import builtin_delegate
+    from agentd.tools.base import ToolContext
+
+    target = cfg.paths.roots()[0] / "parser.py"
+    target.write_text("x")
+    set_provider(_fabricating(target))
+    session = await Session.create("test")
+    ctx = ToolContext(
+        session_id=session.id, turn_id=session.id, autonomy="act", run_id="run-invalid-2",
+        step_id="s1", extra={"approver": AutoApprover(True)},
+    )
+    result = await builtin_delegate.delegate.handler(
+        {"agent": "coder", "task": "fix the parser and run the tests"}, ctx
+    )
+    assert "INVALIDATED" in result.content
+    assert "no shell_exec call ran a test command" in result.content
+    assert "delegate again with a narrower" in result.content
+    assert "ask the user" in result.content
+    # and it carries the marker that keeps runtime prose out of a handoff and out of memory
+    from agentd.agent.observations import RUNTIME_MARKERS
+
+    assert any(marker in result.content for marker in RUNTIME_MARKERS)
+
+
+async def test_an_invalidated_worker_proposes_no_memories(cfg, journaled):
+    """`candidate_memories` is a durable-store path: the review gate decides, but the
+    daemon's consolidator re-derives from what is there. A proposal grounded in a report the
+    runtime just disproved is not a proposal."""
+    from agentd.agent.results import CandidateIn
+    from agentd.db import repo_memory
+
+    target = cfg.paths.roots()[0] / "parser.py"
+    target.write_text("x")
+    provider = FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], "Fixed it and ran the tests."],
+        json_results=[
+            WorkerReport(
+                status="completed",
+                answer="Fixed. All 19 tests pass.",
+                candidate_memories=[CandidateIn(statement="Dylan's parser has 19 tests")],
+            )
+        ],
+    )
+    session = await Session.create("test")
+    result = await run_subagent(
+        SubagentSpec(name="coder", prompt="be useful", tool_names=["fs_read"], max_steps=3),
+        TaskSpec("coder", "fix the parser and run the tests"),
+        parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="act",
+        approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
+    )
+    assert result.validation == "invalidated"
+    assert await repo_memory.pending_candidates() == []
+    assert journaled("worker_finished")[0].payload["candidates"] == 0

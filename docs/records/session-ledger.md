@@ -36,15 +36,32 @@ Status: `pending` | `awaiting-human` | `dispatched` | `complete` | `blocked`.
 | 8b | complete | 2026-09-24 | pass-08-outcome.md | committed as `b012016`. `web_search` + `web_fetch` → `researcher`; no ephemeral worker defined, on 8a's criterion (all six researcher tools are `allow` at every autonomy). Permitted 24 → 22, `always_on` 13. At 22 `select` does **not** short-circuit, so offered is capped rather than reduced. B14–B16 run pre/post against clones at 8a's and 8b's heads — `baseline-v2` is not a usable comparand, its B14/B16 died on the pre-8a fix-1 400. **partial/partial/fail → 3 pass.** Orchestrator web calls 11 → **0**; B16's orchestrator context peak 19 640 → 3 945 (−80%) while the run made 3.5× more web calls. Method improved on 8a's: per-process env overrides, so nothing shared was edited and no restore is owed. |
 | 8c | complete | 2026-09-24 | pass-08-outcome.md | `memory_search` + `memory_history` → new `memory` durable role (the in-process `delegate(agent="memory")` branch is gone); `gmail_search` + `gmail_message` → new `mail` role, **not** `researcher`, which would have put the mailbox beside the only holder of the web tools. Permitted 22 → **18**, `always_on ∧ surface` 13 → **10**, `select` short-circuits — verified independently. Suite 1028, `ruff check .` clean. Two interlock repairs and a new `mail-delegation-never-unattended` rule. **B17 pass holds; B18/B19 uncovered (premise failures, not regressions); B20 not comparable — the model sent `memory_remember` with empty args twice.** **offered = 17 on every row**, deterministic for the first time. Interlock probed against the engine: 8c's `memory`/`mail` carve-out holds and the daemon→mail hole was real and is closed — but **`daemon + delegate(researcher)` is still `allow`**, and a worker may `web_fetch` at `observe`, so the same gap is open for the role that holds egress. Filed for 8d. |
 | 8d | complete | 2026-09-25 | pass-08-outcome.md | full frozen suite (B01–B22) against `~/Projects/agent-8d` at `21977b4`, daemon stopped, promotion off, per-row setup in `~/Projects/agent-evals/run8d.sh` — B12's fixture applied then reversed, the clone reset after every row that edits it. **B23 is out of scope**: it is the multi-turn session row and has no single blockquote prompt, so the one-row harness cannot run it. **22 rows in 73.9 min: 11 pass, 3 partial, 7 fail, 1 uncovered. `offered = 17` on every row.** Of the 7 failures, 5 are tool-call fidelity and 2 are worker report fabrication; **none is a policy, surface or routing failure**. Headline: `delegate` is now the only door to five families and the 27B cannot reliably produce its two-required-argument schema — 9 rejected calls, and on B13 the withdraw-after-two guard left the turn with no route to anything. Four rows emitted tool-call markup as prose and the runtime did not notice (`status=completed`, `steps=1`). B12's worker fabricated a green test run — disproved directly here, the tests really do fail. `always_on` is **inert for the orchestrator** below the short-circuit threshold, so the pass file's borderline-tool question is moot; leave the flags alone. Still open: the `daemon + delegate(researcher)` gap, and eval pollution — 8c's recorded fix was implemented in a trap and **did not work**, because the consolidator re-derives candidates from episodes. |
-| 9a | pending | — | — | |
-| 9b | pending | — | — | |
-| 9c | pending | — | — | |
-| 9d | pending | — | — | |
-| 10a | pending | — | — | |
-| 10b | pending | — | — | |
-| 10c | pending | — | — | **hard stop — human runs this**, recurring; one question per session |
+| 9a | complete | 2026-09-25 | pass-09-outcome.md | `agent/verification.py`: the ledger folded out of the worker's own journal + six deterministic checks, no model call. `WorkerResult.validation`/`flags`; **vocabulary 24 → 25** (`worker_verified`), and `worker_finished` gained two required fields. Run in one sitting with 9b and 9c, on Dylan's instruction. |
+| 9b | complete | 2026-09-25 | pass-09-outcome.md | tool success and validation status are separate axes (Dylan's ruling): `delegate` keeps `ok = completed` and carries `validation` beside it. Invalidated = not an answer, not cached, no candidate memories. **Deviation:** `remember` refuses `invalidated` only, not everything short of `valid` — an `uncertain` result is cached *with its doubt*, `entry_version` 1 → 2. |
+| 9c | complete | 2026-09-25 | pass-09-outcome.md | one escape step (`delegate` only) before the tool-free summary step, on for every caller; `abandoned` is now `not ended_by_choice` rather than `steps >= max_steps`; a verbatim-repeated denial withdraws the tool with `DENIED_NUDGE`. 1067 tests green, ruff clean, **6 mutations all caught**. |
+| 9d | pending | — | — | verification: measured, per-flag false-positive rate. Runs against a clone, 8d method |
+| 10a | pending | — | — | discovery: registry and retrieval (was 9a) |
+| 10b | pending | — | — | discovery: recall evaluation (was 9b) |
+| 10c | pending | — | — | discovery: router (was 9c) |
+| 10d | pending | — | — | discovery: precision evaluation (was 9d) |
+| 11a | pending | — | — | evaluate: replay harness (was 10a) |
+| 11b | pending | — | — | evaluate: full metric run (was 10b) |
+| 11c | pending | — | — | **hard stop — human runs this**, recurring; one question per session (was 10c) |
 
 ## Carried forward
+
+- **Renumbering, 2026-09-25.** Result verification was filed ahead of discovery, on Dylan's
+  ranking, and took the number 9. The mapping, which every record written before this date
+  needs:
+
+  | says | means |
+  |---|---|
+  | Pass 9, 9a–9d | discovery & router — now Pass 10, `docs/plans/pass-10-discovery.md` |
+  | Pass 10, 10a–10c | evaluate & tune — now Pass 11, `docs/plans/pass-11-evaluate.md` |
+
+  The eight existing outcome records were **not** rewritten. A record describes what was true
+  when it was written, and editing its prose to match a later numbering would make it a worse
+  record, not a better one. Each moved plan file carries the same note at its top.
 
 - **No longer owed as a manual step.** The daemon is stopped for the duration of a suite run,
   because its consolidation loop — not the harness — drains eval `candidate_memories` into

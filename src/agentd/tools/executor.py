@@ -117,6 +117,12 @@ class ToolExecutor:
         # allowed to spend the whole step budget rediscovering it.
         self._rejected: dict[tuple[str, str], int] = {}
         self._rejected_turn: str | None = None
+        # Session 9c. The same accounting for policy refusals, in its own dict because the
+        # two are different facts about a call: one says the arguments do not fit the schema,
+        # the other says the rule does not permit the action. Keyed on the rule as well as
+        # the arguments - see `_count_denial`.
+        self._denied_counts: dict[tuple[str, str, str], int] = {}
+        self._denied_turn: str | None = None
 
     async def run(
         self, name: str, raw_args: dict[str, Any] | str, ctx: ToolContext, *, parent_id: UUID | None = None
@@ -395,10 +401,15 @@ class ToolExecutor:
                     ),
                 }
             )
+            attempt = 0
         else:
             body = json.dumps(
                 {"denied": True, "rule": decision.rule_id, "reason": decision.reason, "note": note}
             )
+            # Counted for a refusal only, never for a queued approval: a queued call was not
+            # refused, it is waiting for a person, and withdrawing the tool would take away
+            # the thing they are about to approve.
+            attempt = self._count_denial(ctx, tool.name, decision.rule_id, args)
         await repo_ops.write_action(
             ActionRecord(
                 id=action_id, parent_id=parent_id, actor=ctx.actor, kind="tool_call",
@@ -424,8 +435,36 @@ class ToolExecutor:
                 "denied": True,
                 "rule": decision.rule_id,
                 "queued_id": str(queued_id) if queued_id else None,
+                # Session 9c. The same field an invalid-argument rejection carries, so the
+                # withdrawal in `agent/loop.py` reads one number for both reasons a repeat
+                # provably cannot work, and the journal's `tool_failed.attempt` is filled on
+                # a denial where it used to be 0.
+                "attempt": attempt,
             },
         )
+
+    def _count_denial(
+        self, ctx: ToolContext, name: str, rule: str | None, args: dict[str, Any]
+    ) -> int:
+        """How many times this exact call has been refused by this rule this turn, now included.
+
+        Keyed on `(tool, rule, arguments)` and not on the tool alone, which is the whole
+        difference between a useful withdrawal and a harmful one. A policy rule may match on
+        an argument: `delegate` is denied for `agent="mail"` from the daemon and allowed for
+        the other four roles, so taking the tool away on the first refusal would take the
+        four with it. The same arguments against the same rule, on the other hand, are
+        deterministic - the engine has no discretion left to appeal to.
+
+        Same scoping as `_count_rejection`: per turn, and bounded, because one executor
+        outlives every turn in a session.
+        """
+        turn = str(ctx.turn_id)
+        if turn != self._denied_turn or len(self._denied_counts) > 64:
+            self._denied_counts.clear()
+            self._denied_turn = turn
+        key = (name, rule or "", _fingerprint(args))
+        self._denied_counts[key] = self._denied_counts.get(key, 0) + 1
+        return self._denied_counts[key]
 
     def _count_rejection(self, ctx: ToolContext, name: str, args: dict[str, Any]) -> int:
         """How many times these exact arguments have been rejected this turn, including now.

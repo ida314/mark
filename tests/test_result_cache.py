@@ -458,3 +458,58 @@ def test_a_cache_entry_is_read_by_key_with_nothing_filled_in() -> None:
     for field in ("answer", "tainted", "evidence", "worker_id"):
         with pytest.raises(KeyError):
             result_cache.result_from_entry({k: v for k, v in entry.items() if k != field})
+
+
+# --- session 9a: a result the runtime could not corroborate -------------------
+
+
+async def test_an_invalidated_result_is_never_cached(cfg, writer) -> None:
+    """The third refusal, next to `blocked` and `uncertain`. Caching a disproved claim would
+    serve it back for the rest of the run, free and with the verification stripped off - a
+    fabrication is not cheaper the second time, only faster."""
+    session = await Session.create("test")
+    target = cfg.paths.roots()[0] / "parser.py"
+    target.write_text("x")
+    spec = TaskSpec("coder", "fix the parser and run the tests")
+    provider = FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], "Fixed it and ran the tests."],
+        json_results=[WorkerReport(status="completed", answer="Fixed. All 19 tests pass.")],
+    )
+    result = await run_subagent(
+        SubagentSpec(name="coder", prompt="be useful", tool_names=["fs_read"], max_steps=3),
+        spec, parent_session_id=session.id, parent_turn_id=session.id, parent_autonomy="act",
+        approver=AutoApprover(True), registry=build_registry(), cfg=cfg, provider=provider,
+        parent_run_id=RUN, journal=writer,
+    )
+    assert result.validation == "invalidated"
+    assert "worker_result_cached" not in _types(writer)
+    assert result_cache.lookup(writer.store, RUN, spec) is None
+
+
+async def test_a_doubtful_result_is_cached_with_its_doubt_attached(cfg, writer) -> None:
+    """The other half, and the reason `remember` refuses `invalidated` rather than everything
+    that is not `valid`: re-running a worker on every hit to re-derive a doubt that is already
+    known costs a worker for nothing. What must not happen is the doubt being lost in the
+    copy, so `validation` travels in the entry exactly as `tainted` does."""
+    session = await Session.create("test")
+    spec = TaskSpec("researcher", "what is in the lease")
+    # No tool calls at all: 8d's shape, a soft flag, `uncertain` rather than `invalidated`.
+    result = await _delegate(cfg, writer, session, spec, _completes("Page four."))
+    assert result.validation == "uncertain"
+    assert [f.code for f in result.flags] == ["completed_without_tools"]
+
+    served = result_cache.lookup(writer.store, RUN, spec)
+    assert served is not None
+    assert served.validation == "uncertain"
+    assert [f.code for f in served.flags] == ["completed_without_tools"]
+    assert served.flags[0].detail  # the runtime's sentence survived the round trip
+
+
+def test_an_entry_written_under_the_old_rules_is_skipped_rather_than_read(writer) -> None:
+    """`entry_version` went 1 -> 2 when verification was added. A v1 entry was written before
+    anything checked it, and serving it as `valid` would assert a check that never ran."""
+    rj = RunJournal(writer, RUN)
+    spec = TaskSpec("researcher", "the old one")
+    entry = result_cache.entry_for(spec, WorkerResult(status="completed", answer="stale"))
+    rj.emit(wr.CACHED, {**entry, "entry_version": 1}, worker_id="w-old", sync=True)
+    assert result_cache.lookup(writer.store, RUN, spec) is None

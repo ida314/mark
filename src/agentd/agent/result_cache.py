@@ -32,6 +32,14 @@ An `uncertain` result is exactly the case where re-running may be the right answ
 serving one from a cache decides that question silently and for ever. `blocked` says the
 work did not happen, and nothing was earned. So only `completed` is written.
 
+Session 9a adds the third refusal and one carried field. A result the runtime **invalidated**
+is never written: caching it would serve the same disproved claim back for the rest of the
+run, free and with the verification stripped off, and a fabrication is not cheaper the second
+time - only faster. A result merely flagged `uncertain` *is* written, with its flags, because
+the alternative is re-running a worker on every hit to re-derive a doubt that is already
+known; what must not happen is the doubt being lost in the copy, which is why `validation`
+travels in the entry exactly as `tainted` does.
+
 Two things a result carries are deliberately not cached:
 
 * **the transcript.** 6b left this open - "if 6c starts persisting results, whether the
@@ -52,7 +60,8 @@ from ..journal.runtime import RunJournal
 from ..journal.store import JournalStore
 from ..journal.worker_results import CACHED, ENTRY_VERSION, REUSED, cached_result
 from .delegation import TaskSpec
-from .results import WorkerResult
+from .results import Flag, WorkerResult
+from .verification import HARD_FLAGS
 
 
 class ResultCacheError(RuntimeError):
@@ -82,6 +91,9 @@ def entry_for(spec: TaskSpec, result: WorkerResult) -> dict[str, object]:
         "actions_taken": list(result.actions_taken),
         "followups": list(result.followups),
         "notes": list(result.notes),
+        "validation": result.validation,
+        "flags": [f.code for f in result.flags],
+        "details": [f.detail for f in result.flags],
         "tainted": bool(result.tainted),
     }
 
@@ -108,6 +120,15 @@ def result_from_entry(entry: dict) -> WorkerResult:
         # proposed once, by the worker that earned this, and are not proposed again.
         report_valid=True,
         candidate_memories=(),
+        # Session 9a. Read back rather than defaulted, so a hit on an `uncertain` result is
+        # as uncertain the second time. `hard` is recomputed from the code instead of being
+        # stored, because which codes are hard is a property of this build's checks and not
+        # of the run that wrote the entry - a stored `hard` would be a stale ruling.
+        validation=entry["validation"],
+        flags=tuple(
+            Flag(code=code, detail=detail, hard=code in HARD_FLAGS)
+            for code, detail in zip(entry["flags"], entry["details"], strict=False)
+        ),
         reused_from=entry["worker_id"],
     )
 
@@ -120,6 +141,11 @@ def remember(
     False is the ordinary answer for a `blocked` or `uncertain` worker, and it is not a
     failure: those are the two statuses where re-running is a decision somebody may still
     want to make.
+
+    Session 9b adds the third refusal, and it is the one that matters most: a result the
+    runtime could not corroborate is not kept. Caching it would serve the same unchecked
+    claim back for the rest of the run, free and with the verification stripped off - a
+    fabrication is not cheaper the second time, it is only faster.
     """
     if not worker_id:
         raise ResultCacheError(
@@ -127,6 +153,8 @@ def remember(
             "cannot be traced back to the run that produced it"
         )
     if result.status != "completed" or not result.report_valid:
+        return False
+    if result.validation == "invalidated":
         return False
     # Synchronous (`writer.SYNC_TYPES`): a cache entry still sitting in a buffer is exactly
     # the entry a crash loses, and the crash is what the cache is for.

@@ -68,6 +68,15 @@ class AgentConfig(BaseModel):
     context_budget_tokens: int = 2000
     tool_result_max_chars: int = 8000
     autonomy: Autonomy = "assist"
+    # Session 9c. One extra step for a turn that has spent `max_steps`, in which the only
+    # tool offered is `delegate`, before the tool-free summary step it would have had anyway.
+    # It costs at most one model call per exhausted turn and nothing at all on a turn that
+    # ends early, which is almost all of them.
+    #
+    # On by default, and a flag rather than a constant so that 9d can measure both readings
+    # of the same suite without editing code. Off, the loop is exactly what it was: the last
+    # step is tool-free and a turn that used its budget ends `abandoned`.
+    escape_step: bool = True
 
 
 class DelegationConfig(BaseModel):

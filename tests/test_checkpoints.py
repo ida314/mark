@@ -235,6 +235,7 @@ def test_a_workers_turn_does_not_name_itself_the_orchestrator(on, tmp_path) -> N
             "answer_chars": 1, "report_valid": True, "tainted": False, "evidence": 0,
             "actions_taken": 0, "followups": 0, "candidates": 0, "tokens": 0,
             "duration_ms": 1,
+            "validation": "valid", "flags": [],
         },
     )
     cp = Checkpointer(writer).write("run-1", trigger="worker_finished")
@@ -276,6 +277,7 @@ def test_a_worker_in_flight_refuses_a_snapshot(on, tmp_path) -> None:
             "answer_chars": 1, "report_valid": True, "tainted": False, "evidence": 0,
             "actions_taken": 0, "followups": 0, "candidates": 0, "tokens": 0,
             "duration_ms": 1,
+            "validation": "valid", "flags": [],
         },
         worker_id="w-1",
     )

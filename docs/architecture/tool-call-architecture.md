@@ -743,6 +743,48 @@ auditing
 
 but should not become normal orchestration context.
 
+### Verification
+
+A worker's report is a claim about work, produced by a second inference over a truncated
+transcript. It is not the work, and it is not evidence of the work. The runtime holds the
+evidence already: the run journal records every tool the worker requested, with its
+arguments, and the outcome of every one of them.
+
+So when a worker returns, the runtime reads that worker's own journal back and attaches what
+it actually did:
+
+```text
+tool calls, with arguments
+failures and policy denials
+the last shell_exec exit code
+files and urls touched
+the worker's own turn status
+```
+
+It then checks the report against that ledger, deterministically and with no model call. A
+check that cannot name the journal event it read is a grader, not a verifier. Known
+contradictions:
+
+```text
+a test claimed to pass with no passing test run
+a file cited as evidence that was never read
+"could not access X" with no attempt recorded
+a completed report from a turn that failed
+a completion with no tool calls at all
+a change claimed in actions_taken with nothing written
+```
+
+The result therefore carries two independent axes, and collapsing them loses information:
+
+```text
+status              what the worker says happened      completed | blocked | uncertain
+validation_status   what the runtime can corroborate   valid | uncertain | invalidated
+```
+
+`invalidated` means a hard contradiction: the report is not usable as an answer, is not
+cached, and its proposed memories are dropped. It is not the same as a failed delegation —
+the worker ran, and what it did is on the record. What is refused is the claim.
+
 ### Result Persistence
 
 Completed worker results are persisted and content-addressed by a hash of the task specification.
@@ -1246,6 +1288,25 @@ This indicates that an action may or may not have taken effect, typically an orp
 
 `blocked` means the work did not happen. `uncertain` means it is not known whether the work happened. These call for different orchestrator behavior, which is why they are separate statuses.
 
+### Limits Should Offer a Choice, Not Only an Ending
+
+A step budget, a final-nudge and a stuck-tool withdrawal all end a turn today. Ending is the
+right floor, but it is the wrong ceiling: the same four options the orchestrator has when a
+worker reports `blocked` are available to a turn that has run out of room, and a runtime that
+only ends the turn throws them away.
+
+A turn that reaches its step budget should get one bounded escape: a single step in which the
+only thing it can do is delegate a narrower brief, followed by the summary step it would have
+had anyway. A turn that declines the escape and answers has ended by choice, and should not be
+recorded as abandoned — "abandoned" should mean the budget ran out with work still pending,
+not that the budget was fully used.
+
+A policy denial is the other case. A denial is final: it is a rule's answer about the action,
+not a complaint about the arguments, and a model that rephrases a denied call is spending its
+budget on an appeal that cannot succeed. A denial repeated with identical arguments should
+withdraw the tool for the rest of the turn and say why — while a differently-argued call to
+the same tool stays available, because a rule may match on an argument.
+
 ---
 
 ## 22. Rollout Plan
@@ -1387,6 +1448,19 @@ followups
 Do not inject raw worker transcripts into orchestrator context except in debugging modes.
 
 Persist results content-addressed by `result_key` so resume reuses completed work.
+
+### Phase 6B — Verify Worker Results
+
+Read each finished worker's own journal back and attach what it did to what it claims.
+
+Flag the contradictions deterministically, with no model call. Give the result a
+`validation_status` independent of its `status`, and make an invalidated result
+non-cacheable, memory-proposing-free, and unusable as an answer.
+
+Give a turn that hits a step limit or a repeated denial one bounded choice before it ends.
+
+Measure the false-positive rate per check. A check that fires on true reports costs a worker
+every time it does.
 
 ### Phase 7 — Add Tool Discovery
 

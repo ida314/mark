@@ -1,5 +1,11 @@
 # Pass 2 — Durable Run Journal — outcome
 
+> **Numbering note, added 2026-09-25.** This record is left exactly as it was written. It was
+> written before result verification was filed as the new Pass 9, so where it says "Pass 9" it
+> means what is now **Pass 10 — Tool Discovery & Router**, and where it says "Pass 10" (or
+> 10a/10b/10c) it means what is now **Pass 11 — Evaluate & Tune**. The mapping is in
+> `docs/records/session-ledger.md`.
+
 Sessions completed: **2a**, **2b**, **2c**. **The pass's exit criteria are met**: a frontend
 replays from the journal by last-seen id, the process was killed mid-run at three different
 points against a real turn and the journal is complete up to each, and there is one event path

@@ -46,13 +46,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..journal.events import WORKER_STATUSES
+from ..journal.events import VALIDATION_STATUSES, WORKER_STATUSES
 
 # The journal declares them; this module does not get a second opinion. The `Literal` on
 # `WorkerReport.status` below has to spell them out - a type annotation cannot read a tuple -
 # and `test_the_result_schema_and_the_journal_agree_about_a_worker_status` is what keeps the
 # two spellings the same.
 STATUSES: tuple[str, ...] = WORKER_STATUSES
+# Session 9a, and declared in the journal for the same reason the three statuses are: the
+# enum the journal enforces and the words the runtime can produce must not drift apart.
+VALIDATIONS: tuple[str, ...] = VALIDATION_STATUSES
 
 # Every note is written here, by the runtime, in full. None of them is assembled from model
 # output, which is what makes `notes` safe to put in front of the orchestrator while the
@@ -62,6 +65,23 @@ NOTE_UNREADABLE = (
 )
 NOTE_NO_ANSWER = "the worker returned the result schema with nothing in its answer"
 NOTE_BUDGET = "the worker ran out of steps before it finished, so this describes unfinished work"
+
+
+@dataclass(frozen=True)
+class Flag:
+    """One contradiction the runtime found between a report and the journal behind it.
+
+    `detail` is written by `agent/verification.py`, in full, quoting the journal - a tool
+    name, an exit code, a path. Nothing in it comes from the worker, which is what makes a
+    flag safe to render for the orchestrator while the transcript is not.
+
+    `hard` is the difference between "this is not true" and "this cannot be corroborated",
+    and it is a property of the check rather than of the run: see `verification.HARD_FLAGS`.
+    """
+
+    code: str
+    detail: str
+    hard: bool = False
 
 
 class CandidateIn(BaseModel):
@@ -117,6 +137,12 @@ class WorkerResult:
     # model's malformed output; `transcript` is the worker's prose in full.
     report_error: str = ""
     transcript: str = field(default="", repr=False)
+    # Session 9a. What the runtime could corroborate, which is a different axis from
+    # `status`: `status` is what the worker says happened, `validation` is what its own
+    # journal says about that claim. A `completed` result may be `invalidated`; the worker
+    # still ran, and what it did is still on the record - what is refused is the claim.
+    validation: str = "valid"
+    flags: tuple[Flag, ...] = ()
     # Session 6c. The worker whose run earned this result, when it was served from this
     # run's result cache instead of being re-run; "" when a worker produced it just now.
     # It exists so that an empty `transcript` on a reused result is explained rather than
@@ -128,6 +154,11 @@ class WorkerResult:
         if self.status not in STATUSES:
             raise ValueError(
                 f"{self.status!r} is not a worker status; this runtime has {', '.join(STATUSES)}"
+            )
+        if self.validation not in VALIDATIONS:
+            raise ValueError(
+                f"{self.validation!r} is not a validation status; this runtime has "
+                f"{', '.join(VALIDATIONS)}"
             )
 
     def for_orchestrator(self, *, debug: bool = False) -> dict[str, Any]:
@@ -146,6 +177,11 @@ class WorkerResult:
         }
         if self.notes:
             payload["notes"] = list(self.notes)
+        # Always present, even when it is "valid": a caller that has to infer a missing key
+        # as "nothing was checked" is the absent-means-null bug this codebase keeps having.
+        payload["validation"] = self.validation
+        if self.flags:
+            payload["validation_flags"] = [f.detail for f in self.flags]
         if debug:
             payload["report_valid"] = self.report_valid
             payload["report_error"] = self.report_error

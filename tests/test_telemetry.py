@@ -224,7 +224,10 @@ async def test_running_out_of_steps_is_abandoned_not_completed(cfg):
 
     row = _only(cfg)
     assert row["status"] == "abandoned"
-    assert row["steps"] == row["max_steps"] == 2
+    # `max_steps` is the *tool* budget, and it is still 2. The third step is 9c's escape
+    # step, which is not part of it: it exists exactly because the budget is gone.
+    assert row["max_steps"] == 2
+    assert row["steps"] == 3
 
 
 async def test_a_model_failure_is_recorded_as_failed_with_the_error(cfg):

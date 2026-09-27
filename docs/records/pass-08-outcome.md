@@ -1,5 +1,11 @@
 # Pass 8 — Tool Surface Reduction — outcome
 
+> **Numbering note, added 2026-09-25.** This record is left exactly as it was written. It was
+> written before result verification was filed as the new Pass 9, so where it says "Pass 9" it
+> means what is now **Pass 10 — Tool Discovery & Router**, and where it says "Pass 10" (or
+> 10a/10b/10c) it means what is now **Pass 11 — Evaluate & Tune**. The mapping is in
+> `docs/records/session-ledger.md`.
+
 Sessions completed: **8a**, **8b**, **8c**. 8d is untouched and appends to this file.
 
 The pass's own exit criteria — target surface reached, no regression against baseline, every
@@ -416,6 +422,9 @@ exists for. It has not been folded or resumed.
   not as a defect to fix.
 - **The final report call as a second inference over a truncated transcript.** It can lose work
   that was done, and after 8a it is on the critical path for every coding row. Pass 10c.
+  *[2026-09-25: promoted out of the tuning list. The deterministic half — the runtime reading
+  the worker's journal back and flagging the contradiction — became Pass 9a. Whether the report
+  call should exist in this shape at all is still the tuning question, now Pass 11c.]*
 
 ---
 

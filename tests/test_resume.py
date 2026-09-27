@@ -510,7 +510,7 @@ def test_a_process_killed_at_a_boundary_resumes_from_that_boundary(
                 "worker_id": "w-1", "name": "researcher", "status": "completed",
                 "answer_chars": 1, "report_valid": True, "tainted": False, "evidence": 0,
                 "actions_taken": 0, "followups": 0, "candidates": 0,
-                "tokens": 0, "duration_ms": 1,
+                "tokens": 0, "duration_ms": 1, "validation": "valid", "flags": [],
             },
             worker_id="w-1",
         )

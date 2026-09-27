@@ -1,5 +1,11 @@
 # Pass 5 — Context Handoff — outcome
 
+> **Numbering note, added 2026-09-25.** This record is left exactly as it was written. It was
+> written before result verification was filed as the new Pass 9, so where it says "Pass 9" it
+> means what is now **Pass 10 — Tool Discovery & Router**, and where it says "Pass 10" (or
+> 10a/10b/10c) it means what is now **Pass 11 — Evaluate & Tune**. The mapping is in
+> `docs/records/session-ledger.md`.
+
 Sessions completed: **5a, 5b**. 5c (cold resume) is not started, so the pass's exit criteria
 are not yet met. Each session's own exit is:
 

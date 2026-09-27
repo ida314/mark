@@ -494,6 +494,7 @@ def test_a_fork_point_inside_a_delegation_is_refused(writer) -> None:
             "answer_chars": 2, "report_valid": True, "tainted": False, "evidence": 0,
             "actions_taken": 0, "followups": 0, "candidates": 0, "tokens": 0,
             "duration_ms": 1,
+            "validation": "valid", "flags": [],
         },
     )
     with pytest.raises(F.MidWorkerFork):

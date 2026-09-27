@@ -1,25 +1,26 @@
 """The event vocabulary: every type the journal may carry, and the shape of its payload.
 
-These twenty-four types are the only vocabulary there is. Session 2c deleted the in-process
+These twenty-five types are the only vocabulary there is. Session 2c deleted the in-process
 `agent/events.py` stream that used to carry the same facts under different names, so a
 frontend that wants to know what a tool is doing reads them from here through
 `journal/feed.py`. `agent/stream.py` is what is left of that module and carries prose only.
 `state = fold(reduce, journal, initial)` folds over exactly these types and nothing else.
 
 Seventeen of them are pass 2's list. The `worker_result_*` pair is session 6c's, the
-`working_memory_*` pair is session 7b's and the three `promotion_*` types are session 7c's,
-and all of them are here for one reason: run-scoped state that is discarded with its run has
-to be foldable out of the journal, because the journal is the only durable record every run
-has - `[checkpoints] enabled` is off in the shipped config, so state that lived only in a
-checkpoint would be state that never existed on this machine.
+`working_memory_*` pair is session 7b's, the three `promotion_*` types are session 7c's and
+`worker_verified` is session 9a's, and all of them are here for one reason: run-scoped state
+that is discarded with its run has to be foldable out of the journal, because the journal is
+the only durable record every run has - `[checkpoints] enabled` is off in the shipped
+config, so state that lived only in a checkpoint would be state that never existed on this
+machine.
 
-**Twenty-three of the twenty-four are emitted today** - nine wired by session 2b, the two
+**Twenty-four of the twenty-five are emitted today** - nine wired by session 2b, the two
 `effect_*` types by session 3b's effect ledger, `checkpoint_written` by session 4a's
 checkpointer, `run_resumed` by session 4b's `journal/resume.py`, `run_forked` by session
 4d's `journal/fork.py`, the `handoff_*` pair by session 5b's `agent/handoff.py`, the
 `worker_result_*` pair by session 6c's `agent/result_cache.py`, the `working_memory_*`
-pair by session 7b's `agent/working_memory.py` and the three `promotion_*` types by session
-7c's `memory/promotion.py`. The one
+pair by session 7b's `agent/working_memory.py`, the three `promotion_*` types by session
+7c's `memory/promotion.py` and `worker_verified` by session 9a's `agent/verification.py`. The one
 left is `tool_progress`, which needs a progress channel the tool surface does not have. Each
 was specified before it had a producer so that the pass which needed it filled a slot instead
 of migrating a schema, and each has a test that writes one, so none of them is a shape nobody
@@ -111,6 +112,14 @@ RUN_STATUSES = ("completed", "abandoned", "failed", "cancelled")
 # effect vocabulary applied to a piece of work, and the reading is the same: `blocked` means
 # it did not happen, `uncertain` means nobody can say what happened.
 WORKER_STATUSES = ("completed", "blocked", "uncertain")
+
+# What the *runtime* could corroborate about a worker's report (session 9a), which is a
+# different axis from what the worker said. `status` is the worker's claim; this is the
+# journal's reading of that claim, and the two are kept apart on purpose: a `completed`
+# report from a worker that never called a tool is a completion and an invalidation at the
+# same time, and collapsing them would lose whichever half was written second.
+# `agent/results.py` imports this tuple rather than repeating it.
+VALIDATION_STATUSES = ("valid", "uncertain", "invalidated")
 
 # How a context reading was arrived at (session 5a). "estimate" is `ids.estimate_tokens`
 # over the assembled prompt, which is what every reading says today; "provider" is reserved
@@ -258,7 +267,47 @@ EVENTS: dict[str, dict[str, Field]] = {
         "candidates": req(int),
         "tokens": req(int),
         "duration_ms": req(int),
+        # Session 9a. What the runtime concluded about the report this finish carries, and
+        # the codes behind it. Required, the way 6b made `report_valid` required and for the
+        # same reason: a finish that does not say whether it was checked is indistinguishable
+        # from one that was checked and found clean, and this runtime's characteristic bug is
+        # exactly that absence read as a value.
+        "validation": req(str, enum=VALIDATION_STATUSES),
+        "flags": req(list),
         "answer_preview": opt(str),
+    },
+    # Session 9a. What the worker's own journal says it did, next to what its report claimed,
+    # and the contradictions between them. Written for every worker, including a clean one -
+    # "verified, nothing found" and "never verified" are different facts, and a type only
+    # written on failure could not tell them apart.
+    #
+    # Emitted *before* `worker_finished`, so no fold ever sees a finish whose verification is
+    # missing, and so a crash between the two leaves the evidence rather than the conclusion.
+    # It carries counts and codes rather than the ledger itself: the calls are already in this
+    # run's journal, a few hundred events back, and a second copy of them would make this the
+    # largest event type in the vocabulary for no new information.
+    "worker_verified": {
+        "worker_id": req(str),
+        "name": req(str),
+        "validation": req(str, enum=VALIDATION_STATUSES),
+        # The flag codes, and the runtime-written sentence behind each. Same order, same
+        # length; `details` is what a human reading `journal show` needs and `flags` is what
+        # anything downstream matches on.
+        "flags": req(list),
+        "details": req(list),
+        "entry_version": req(int),
+        "tool_calls": req(int),
+        "failures": req(int),
+        "denials": req(int),
+        "files_touched": req(int),
+        "urls_touched": req(int),
+        "shell_runs": req(int),
+        # Nullable rather than absent, and never 0 for "no shell command ran": a timed-out
+        # command has no exit code either, and reading an absent one as success is the bug
+        # this whole pass exists to catch.
+        "last_shell_exit": req(int, nullable=True),
+        "turn_status": req(str),
+        "report_valid": req(bool),
     },
     # Session 6c. One completed worker's result, in full, under the key it is cached at.
     # The only event type that carries a body rather than a preview of one, and the reason
@@ -283,6 +332,12 @@ EVENTS: dict[str, dict[str, Field]] = {
         "actions_taken": req(list),
         "followups": req(list),
         "notes": req(list),
+        # Session 9a, entry_version 2. Carried for the same reason `tainted` is: reuse must
+        # not launder it. A result the runtime could not corroborate is served back with the
+        # doubt still attached, and an `invalidated` one is never written at all.
+        "validation": req(str, enum=VALIDATION_STATUSES),
+        "flags": req(list),
+        "details": req(list),
         # Carried because reuse must not launder it: a result earned while the turn held the
         # user's private data is still untrusted the second time it is served.
         "tainted": req(bool),
@@ -542,7 +597,7 @@ EVENTS: dict[str, dict[str, Field]] = {
 
 EVENT_TYPES: frozenset[str] = frozenset(EVENTS)
 
-# The fourteen the runtime writes today. Kept as data so a test can assert the gap between
+# The twenty-four the runtime writes today. Kept as data so a test can assert the gap between
 # the vocabulary and what is actually reachable, instead of that gap living in prose.
 EMITTED_TYPES: frozenset[str] = frozenset(
     {
@@ -586,6 +641,11 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # result this machine never kept.
         "worker_result_cached",
         "worker_result_reused",
+        # Session 9a. Written by `agent/subagents.py` for every worker that ran, from the
+        # ledger `agent/verification.py` folds out of that worker's own events. Behind no
+        # flag: a verification that could be switched off is a verification nothing may
+        # depend on, and `worker_finished.validation` depends on it.
+        "worker_verified",
         # Session 7b. Written by `agent/working_memory.py`: `working_memory_noted` from the
         # `working_memory_note` tool, `working_memory_discarded` from the two places a task
         # scope ends - `agent/subagents.py` when a worker finishes and `agent/loop.py` when

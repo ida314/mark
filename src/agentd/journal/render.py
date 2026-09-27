@@ -100,6 +100,22 @@ def _worker_finished(payload: dict[str, Any]) -> Line:
     return Line(f"  {payload['name']}: {payload['status']}", "magenta")
 
 
+def _worker_verified(payload: dict[str, Any]) -> Line | None:
+    """Session 9a. Only when something was found.
+
+    A clean verification is journaled but not rendered: "nothing was wrong with this report"
+    on every delegation is a line a reader learns to skip, and the line that matters would be
+    skipped with it. The first flag's own sentence is shown rather than its code - the code is
+    for anything downstream, the sentence is what a person needs.
+    """
+    if not payload["flags"]:
+        return None
+    details = payload["details"] or payload["flags"]
+    more = f" (+{len(details) - 1} more)" if len(details) > 1 else ""
+    mark = "✗" if payload["validation"] == "invalidated" else "?"
+    return Line(f"  {mark} {payload['name']}: {details[0]}{more}", "red")
+
+
 def _worker_result_reused(payload: dict[str, Any]) -> Line:
     """A delegation nobody had to run. Rendered because the alternative is a silence: a
     cache hit writes no `worker_created`, so without this line the feed would show a
@@ -165,6 +181,7 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
     "tool_failed": _tool_failed,
     "worker_created": _worker_created,
     "worker_finished": _worker_finished,
+    "worker_verified": _worker_verified,
     "worker_result_reused": _worker_result_reused,
     "message_appended": _message_appended,
     "checkpoint_written": _checkpoint_written,

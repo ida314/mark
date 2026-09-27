@@ -68,6 +68,11 @@ PASS_VOCABULARY = {
     # reason the two above do - and the committed record is what stops the resume writing
     # the same fact a second time.
     "promotion_classified", "promotion_committed", "promotion_batch",
+    # Session 9a, the verification of a worker's report against its own journal. In the
+    # journal rather than only on the result, because `worker_finished.validation` is derived
+    # from it: a conclusion whose evidence was not recorded is a conclusion nothing can
+    # re-check, which is the shape this whole pass exists to refuse.
+    "worker_verified",
 }
 
 
@@ -179,7 +184,7 @@ def test_a_misspelled_field_does_not_ride_along_unvalidated(writer: JournalWrite
             {
                 "worker_id": "w1", "name": "researcher", "status": "completed",
                 "answer_chars": 3, "report_valid": True, "tainted": False, "evidence": 0,
-                "actions_taken": 0, "followups": 0,
+                "actions_taken": 0, "followups": 0, "validation": "valid", "flags": [],
                 "candidate": 0, "candidates": 0, "tokens": 0, "duration_ms": 1,
             },
         )
@@ -526,6 +531,10 @@ async def test_a_workers_events_belong_to_the_run_that_created_it(cfg, tmp_path)
         "message_appended",  # its own system block
         "message_appended",  # its answer
         "agent_finished",
+        # Session 9a: what the worker did, checked against what it said, before the finish
+        # that carries the conclusion - so a crash between the two leaves the evidence
+        # rather than the verdict.
+        "worker_verified",
         "worker_finished",
         # Session 6c: the result, cached for the rest of this run, tagged with the same
         # worker so the entry can be traced back to what earned it.

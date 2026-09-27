@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from agentd.agent.loop import FINAL_NUDGE, AgentLoop, Session
+from agentd.agent.loop import ESCAPE_NUDGE, FINAL_NUDGE, AgentLoop, Session
 from agentd.agent.stream import Answer, Delta
 from agentd.db import repo_ops
 from agentd.llm.fake import FakeProvider
@@ -155,7 +155,11 @@ async def test_the_step_budget_ends_with_a_summary(cfg, journaled):
     session = await Session.create("test")
     await _run(loop, session, "keep reading")
     ended = journaled("agent_finished")[0]
-    assert ended.payload["steps"] == 2
+    # Two tool steps and the escape step session 9c added between the budget and the
+    # summary. The escape offers `delegate` only, this registry does not hold it, so the
+    # step is tool-free - and the turn still ends `abandoned`, because the model was still
+    # calling tools when its budget ran out.
+    assert ended.payload["steps"] == 3
     assert ended.payload["status"] == "abandoned"
     # the last call had no tools and carried the nudge
     assert provider.calls[-1]["tools"] == []
@@ -596,3 +600,180 @@ async def test_a_tool_sees_the_approver_the_loop_was_built_with(cfg):
 
     assert seen, "the probe tool was never called"
     assert seen[0] is approver
+
+
+# --- session 9c: the escape hatch --------------------------------------------
+
+
+def _with_delegate(*names: str) -> Registry:
+    from agentd.tools import builtin_delegate
+
+    reg = _registry(*names)
+    reg.add(*builtin_delegate.TOOLS)
+    return reg
+
+
+def _small(cfg, max_steps: int = 2, **agent):
+    return cfg.model_copy(
+        update={"agent": cfg.agent.model_copy(update={"max_steps": max_steps, **agent})}
+    )
+
+
+async def test_a_spent_tool_budget_gets_one_step_offering_only_delegate(cfg):
+    """`max_steps`, `FINAL_NUDGE` and `STUCK_LIMIT` all used to have one ending between them.
+    A turn that has run out of room still has the moves §21 gives an orchestrator holding a
+    blocked worker, and `delegate` is the one of them that can still finish the work."""
+    target = cfg.paths.roots()[0] / "loop.txt"
+    target.write_text("x")
+    provider = FakeProvider(
+        turns=[
+            [("fs_read", {"path": str(target)})],
+            "I cannot finish this in the room I have left.",
+        ]
+    )
+    loop = AgentLoop(
+        cfg=_small(cfg), registry=_with_delegate("fs_read"),
+        tool_subset=["fs_read", "delegate"], engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "keep reading")
+
+    assert provider.calls[0]["tools"] == ["fs_read", "delegate"]
+    # ...and on the escape step, one tool and one only.
+    assert provider.calls[1]["tools"] == ["delegate"]
+    sent = provider.calls[1]["messages"]
+    assert sum(1 for m in sent if (m.get("content") or "") == ESCAPE_NUDGE) == 1
+
+
+async def test_a_turn_that_answers_on_its_escape_step_is_completed_not_abandoned(cfg, journaled):
+    """The old test was `steps >= max_steps`, which read the budget being *used up* as work
+    being unfinished. The daemon heartbeat runs at `max_steps = 4`, used all four on both of
+    its successful runs, and could therefore never report anything but `abandoned`."""
+    target = cfg.paths.roots()[0] / "loop.txt"
+    target.write_text("x")
+    provider = FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], "Here is what I found."]
+    )
+    loop = AgentLoop(
+        cfg=_small(cfg), registry=_with_delegate("fs_read"),
+        tool_subset=["fs_read", "delegate"], engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "keep reading")
+
+    ended = journaled("agent_finished")[0]
+    assert ended.payload["status"] == "completed"
+    assert ended.payload["steps"] == 2
+
+
+async def test_a_worker_gets_no_escape_step_because_no_role_holds_delegate(cfg):
+    """The narrowing is an intersection, not a name, so a surface without `delegate` gets an
+    empty set and the step behaves exactly as the tool-free one it always was."""
+    target = cfg.paths.roots()[0] / "loop.txt"
+    target.write_text("x")
+    provider = FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], "still going", "Summary."]
+    )
+    loop = AgentLoop(
+        cfg=_small(cfg), registry=_registry("fs_read"), tool_subset=["fs_read"],
+        engine=engine_from_config(cfg), approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "keep reading")
+    assert provider.calls[1]["tools"] == []
+
+
+async def test_the_escape_step_can_be_switched_off_and_the_loop_is_what_it_was(cfg, journaled):
+    """A flag rather than a constant, so 9d can measure both readings of the same suite
+    without editing code."""
+    target = cfg.paths.roots()[0] / "loop.txt"
+    target.write_text("x")
+    provider = FakeProvider(
+        turns=[[("fs_read", {"path": str(target)})], [("fs_read", {"path": str(target)})], "Summary."]
+    )
+    loop = AgentLoop(
+        cfg=_small(cfg, escape_step=False), registry=_with_delegate("fs_read"),
+        tool_subset=["fs_read", "delegate"], engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "keep reading")
+
+    ended = journaled("agent_finished")[0]
+    assert ended.payload["steps"] == 2 and ended.payload["status"] == "abandoned"
+    assert provider.calls[-1]["tools"] == []
+    assert not any(
+        (m.get("content") or "") == ESCAPE_NUDGE for call in provider.calls for m in call["messages"]
+    )
+
+
+async def test_a_one_step_budget_is_never_spent_on_the_escape(cfg):
+    """The escape sits one before the tool-free step, so granting it at `max_steps = 1` would
+    take the model's only working step away and offer it `delegate` instead."""
+    target = cfg.paths.roots()[0] / "loop.txt"
+    target.write_text("x")
+    provider = FakeProvider(turns=[[("fs_read", {"path": str(target)})], "Summary."])
+    loop = AgentLoop(
+        cfg=_small(cfg, max_steps=1), registry=_with_delegate("fs_read"),
+        tool_subset=["fs_read", "delegate"], engine=engine_from_config(cfg),
+        approver=AutoApprover(True), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "read it")
+    assert provider.calls[0]["tools"] == []
+
+
+# --- session 9c: a refusal is final ------------------------------------------
+
+
+async def test_a_denial_repeated_with_the_same_arguments_withdraws_the_tool(cfg, journaled):
+    """Nothing in the loop used to tell a model that a `deny` is the rule's answer about the
+    action rather than a complaint about its arguments. Measured on the daemon: a heartbeat
+    with `max_steps = 4` spent its whole turn retrying one call it was never going to be
+    allowed."""
+    target = cfg.paths.workspace / "out.txt"
+    call = ("fs_write", {"path": str(target), "content": "x", "reason": "because"})
+    provider = FakeProvider(turns=[[call], [call], [call], "Understood."])
+    loop = AgentLoop(
+        cfg=cfg, registry=_registry("fs_write"), tool_subset=["fs_write"],
+        engine=engine_from_config(cfg), approver=AutoApprover(approve=False), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "write the file", autonomy="assist")
+
+    failures = journaled("tool_failed")
+    assert [f.payload["attempt"] for f in failures][:2] == [1, 2]
+    # Withdrawn after the second: the third step is not offered the tool at all. (A scripted
+    # provider reaches for it regardless, which a model cannot do by accident - and the
+    # executor's subset gate is what catches it when one does.)
+    assert "fs_write" in provider.calls[1]["tools"]
+    assert "fs_write" not in provider.calls[2]["tools"]
+    # ...and the note says it was policy, not phrasing.
+    nudges = [
+        m
+        for c in provider.calls
+        for m in c["messages"]
+        if "refused by policy" in (m.get("content") or "")
+    ]
+    assert nudges and nudges[0]["role"] == "user"
+    assert provider.calls[-1]["tools"] == []
+
+
+async def test_a_denial_with_different_arguments_does_not_withdraw_the_tool(cfg, journaled):
+    """A rule may match on an argument - `delegate` is denied for `agent="mail"` from the
+    daemon and allowed for the other four roles - so the counter is keyed on the arguments as
+    well as the rule, and a different call is a different key."""
+    first = ("fs_write", {"path": str(cfg.paths.workspace / "a.txt"), "content": "x", "reason": "r"})
+    second = ("fs_write", {"path": str(cfg.paths.workspace / "b.txt"), "content": "x", "reason": "r"})
+    provider = FakeProvider(turns=[[first], [second], "Understood."])
+    loop = AgentLoop(
+        cfg=cfg, registry=_registry("fs_write"), tool_subset=["fs_write"],
+        engine=engine_from_config(cfg), approver=AutoApprover(approve=False), provider=provider,
+    )
+    session = await Session.create("test")
+    await _run(loop, session, "write both files", autonomy="assist")
+
+    assert [f.payload["attempt"] for f in journaled("tool_failed")] == [1, 1]
+    assert "fs_write" in provider.calls[1]["tools"]

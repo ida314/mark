@@ -69,6 +69,10 @@ history_tokens = 24000
 context_budget_tokens = 2000
 tool_result_max_chars = 8000
 autonomy = "assist"
+# Session 9c. One extra step for a turn that has spent `max_steps`, offering `delegate` and
+# nothing else, before the tool-free summary step. It costs at most one model call per
+# exhausted turn and nothing at all on a turn that ends early.
+escape_step = true
 
 # Pass 6. Off is the shipped mode: a worker's transcript is archived and stays in the
 # runtime. Turning this on puts it in the delegating model's context along with the result,

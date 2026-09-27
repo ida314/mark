@@ -1,4 +1,9 @@
-# Pass 9 — Tool Discovery & Router
+# Pass 10 — Tool Discovery & Router
+
+> **Renumbered 2026-09-25.** This was Pass 9 until result verification was filed ahead of
+> it as the new Pass 9. Nothing in the content changed. A record written before that date
+> which says "Pass 9" and means discovery, retrieval or the router means this file; a record
+> which says "Pass 10" and means the evaluate-and-tune loop means `pass-11-evaluate.md`.
 
 **Architecture reference:** §5, §6, §7, §18, §19, Phases 7 and 8
 **Depends on:** `docs/records/pass-01-outcome.md`, `docs/records/pass-03-outcome.md`, `docs/records/pass-08-outcome.md`
@@ -27,7 +32,7 @@ worker
 
 ---
 
-## Session 9a — Registry and retrieval
+## Session 10a — Registry and retrieval
 
 **Scope.** Every tool carries:
 
@@ -51,7 +56,7 @@ architecture must not assume every tool permanently fits in context.
 
 ---
 
-## Session 9b — Recall evaluation
+## Session 10b — Recall evaluation
 
 **Scope.** Build a labeled set: for each task in the Pass 1 suite, the tools a correct
 execution actually needs. Measure whether top-K contains them.
@@ -63,7 +68,7 @@ is correct — precision is the router's job.
 
 ---
 
-## Session 9c — Router
+## Session 10c — Router
 
 **Scope.** A reasoning-based router receiving:
 
@@ -86,7 +91,7 @@ and recomputing avoids restoring a stale tool set.
 
 ---
 
-## Session 9d — Precision evaluation
+## Session 10d — Precision evaluation
 
 **Scope.** Against the same labeled set: did the routed set contain what was needed, and
 how much did it contain that was not? Report alongside wrong-tool rate versus the Pass 1

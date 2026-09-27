@@ -3,6 +3,13 @@
 Sub-agents never write canonical memory. They return candidates with evidence, and the
 review gate decides. They also never exceed their caller's autonomy.
 
+Since 9a what comes back also carries the runtime's own reading of it. A worker's report is
+a second inference over a truncated transcript, and it was measured wrong four times in two
+days; `verification.py` folds this worker's own journal events into what it did and checks
+the report against them, with no model call. A `completed` report can therefore come back
+`invalidated`, which is a statement about the claim and not about the work - the worker ran,
+and everything it did is still in the run journal.
+
 What comes back is `results.WorkerResult` and never prose. The worker is asked for the
 result schema with no tools left to call, the answer is validated on return, and a worker
 that did not return the schema gets `uncertain` with `report_valid=False` - not a status of
@@ -21,7 +28,7 @@ spec names.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from ..config import Config, get_config
@@ -33,6 +40,7 @@ from ..journal import events as jevents
 from ..journal.checkpoints import checkpoint_at
 from ..journal.feed import JournalTail
 from ..journal.runtime import RunJournal, get_writer
+from ..journal.store import Event
 from ..journal.writer import JournalWriter
 from ..llm.roles import get_provider, params_for
 from ..memory.promotion import promote_scope
@@ -44,6 +52,8 @@ from .delegation import TaskSpec
 from .result_cache import remember, serve
 from .results import WorkerReport, WorkerResult, unreadable_report, validate_report
 from .stream import Answer, Delta
+from .verification import ENTRY_VERSION as VERIFICATION_VERSION
+from .verification import ledger_from_events, validation_of, verify
 from .working_memory import discard_for_turn
 
 
@@ -467,10 +477,16 @@ async def run_subagent(
         # each yield rather than on a timer so that a failure marker lands where it happened
         # in the transcript instead of wherever a poll woke up.
         tail = JournalTail.on(rj.writer, run_id=run_id, worker_id=worker_id)
+        # Session 9a. The same drained events, kept, instead of being looked at once and
+        # dropped. This is the whole cost of verification on the hot path: a list of the
+        # events this worker already wrote. Nothing is read back from the store, and nothing
+        # is read twice - the tail is already narrowed to this worker.
+        witnessed: list[Event] = []
 
         def absorb() -> None:
             nonlocal tokens, budget_exhausted
             for je in tail.drain():
+                witnessed.append(je)
                 if je.type == "tool_failed":
                     transcript.append(f"\n[tool {je.payload['name']} failed]\n")
                 elif je.type == "agent_finished":
@@ -532,6 +548,30 @@ async def run_subagent(
                 report, budget_exhausted=budget_exhausted, tainted=tainted, transcript=text
             )
 
+        # Session 9a. What the worker claimed, checked against what this run's journal says it
+        # did. No model call: `verify` is arithmetic over the events above, and the pass file
+        # makes that binding - a verifier that costs an inference is a second thing that can
+        # be wrong about the same truncated transcript.
+        ledger = ledger_from_events(witnessed, worker_id=worker_id)
+        flags = verify(result, ledger, brief=brief)
+        result = replace(result, flags=flags, validation=validation_of(flags))
+        rj.emit(
+            "worker_verified",
+            {
+                "worker_id": worker_id, "name": spec.name, "validation": result.validation,
+                "flags": [f.code for f in flags], "details": [f.detail for f in flags],
+                "entry_version": VERIFICATION_VERSION,
+                "tool_calls": len(ledger.calls), "failures": ledger.failures,
+                "denials": ledger.denials, "files_touched": len(ledger.files_touched),
+                "urls_touched": len(ledger.urls_touched),
+                "shell_runs": len(ledger.shell_runs),
+                "last_shell_exit": ledger.last_shell_exit,
+                "turn_status": ledger.turn_status,
+                "report_valid": result.report_valid,
+            },
+            worker_id=worker_id,
+        )
+
         await repo_archive.append_event(
             RawEvent(
                 kind="subagent_result", actor=f"subagent:{spec.name}",
@@ -545,6 +585,8 @@ async def run_subagent(
                     # Kept where the failure is diagnosable and out of every path that
                     # renders a result for a model: it quotes the malformed output back.
                     "report_error": result.report_error,
+                    "validation": result.validation,
+                    "flags": [f.code for f in result.flags],
                 },
             )
         )
@@ -553,7 +595,12 @@ async def run_subagent(
         # actor `subagent:<role>`, and `recent_messages` is what keeps those out of the
         # orchestrator's history. A third copy here would be the same text a third time in
         # every consolidation prompt.
-        for candidate in result.candidate_memories:
+        # Session 9b. A proposal grounded in a report the runtime just disproved is not a
+        # proposal. `candidate_memories` is a durable-store path - the review gate decides,
+        # but the daemon's consolidator re-derives from what is there - so an invalidated
+        # worker's beliefs are dropped here rather than filtered somewhere downstream.
+        proposals = () if result.validation == "invalidated" else result.candidate_memories
+        for candidate in proposals:
             await repo_memory.insert_candidate(
                 statement=candidate.statement,
                 proposed_by=f"subagent:{spec.name}",
@@ -574,11 +621,18 @@ async def run_subagent(
                 # `worker_finished` that does not say cannot tell an uncertain result from
                 # a worker whose report was never readable.
                 "report_valid": result.report_valid,
+                # Session 9a. Carried on the finish as well as on `worker_verified`, so a
+                # fold that reads finishes alone still knows which results were corroborated.
+                "validation": result.validation,
+                "flags": [f.code for f in result.flags],
                 "tainted": bool(result.tainted),
                 "evidence": len(result.evidence),
                 "actions_taken": len(result.actions_taken),
                 "followups": len(result.followups),
-                "candidates": len(result.candidate_memories),
+                # What was actually proposed, not what the worker offered: an invalidated
+                # worker's candidates are dropped above, and counting them here would record
+                # proposals this run never made.
+                "candidates": len(proposals),
                 "tokens": tokens,
                 "duration_ms": int((time.perf_counter() - started) * 1000),
             },

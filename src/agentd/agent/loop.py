@@ -74,6 +74,44 @@ STUCK_NUDGE = (
     "withdrawn for the rest of this turn. Do not look for another way to call it. Carry on "
     "without it, and tell the user plainly what you were unable to do."
 )
+# Session 9c. The same withdrawal, for the other reason a repeat provably cannot work. A
+# denial is a rule's answer about the action, not a complaint about the arguments, so a model
+# that rephrases a denied call is appealing to something that has no discretion - and nothing
+# in this loop used to tell it so. Measured on the daemon: a heartbeat with `max_steps = 4`
+# spent its whole turn retrying one `open_loop_close` it was never going to be allowed.
+#
+# The counter behind it is keyed on the arguments as well as the rule (`tools/executor.py`),
+# so this fires on a verbatim repeat only. A rule may match on an argument - `delegate` is
+# denied for `agent="mail"` at `observe` and allowed for the rest - and withdrawing the tool
+# on the first denial would take the other four roles away with it.
+DENIED_NUDGE = (
+    RUNTIME_NOTE + " `{name}` was refused by policy {attempts} times with the same arguments, "
+    "so it has been withdrawn for the rest of this turn. A refusal is the rule's answer about "
+    "the action, not a problem with how you phrased it: rewording will not change it. Carry on "
+    "without it, and tell the user plainly what you were not allowed to do."
+)
+
+# Session 9c. What a turn that has spent its budget may still do, and the note that offers it.
+#
+# `max_steps`, `FINAL_NUDGE` and `STUCK_LIMIT` all used to have exactly one ending between
+# them - stop. Ending is the right floor and the wrong ceiling: the four moves §21 gives an
+# orchestrator holding a `blocked` worker are just as available to a turn that has run out of
+# room, and a runtime that only ends the turn throws them away. So one bounded escape, offered
+# once, in which the only tool on the table is `delegate` - a narrower brief is the one move
+# that can still finish the work inside a turn with no budget left - followed by the tool-free
+# summary step the turn would have had anyway.
+#
+# `delegate` and nothing else, on purpose. A turn that could reach for any tool here has not
+# had its budget spent, it has had it raised, and the next limit would be argued with in the
+# same way. A worker gets no escape at all in practice: no role holds `delegate`, so the
+# intersection below is empty and its last step is the tool-free one, exactly as before.
+ESCAPE_TOOLS: frozenset[str] = frozenset({"delegate"})
+ESCAPE_NUDGE = (
+    f"{RUNTIME_NOTE} Your tool budget for this turn is spent and you have one move left. "
+    "You may call `delegate` once, with a brief narrow enough to be finished in one go - name "
+    "the exact file, command or question. Otherwise do not call a tool: answer with what you "
+    "have, and say plainly what is still missing and what you would need to get it."
+)
 
 
 @dataclass
@@ -573,25 +611,51 @@ class AgentLoop:
             # 4. Step until the model stops calling tools.
             final_text: list[str] = []
             steps = 0
-            for step in range(self.cfg.agent.max_steps):
+            # Session 9c. Whether this turn stopped because it chose to, rather than because
+            # the runtime took its tools away. Read at the bottom for the terminal status:
+            # "abandoned" should mean the budget ran out with work still pending, not that
+            # the budget was fully used. Only a step that was *offered* tools can set it -
+            # the forced tool-free step calls no tool by construction, and counting that as
+            # a choice would make every turn look deliberate.
+            ended_by_choice = False
+            # Never at `max_steps = 1`: the escape step sits one before the tool-free one, so
+            # granting it to a one-step budget would take the model's only working step away
+            # and offer it `delegate` instead. A budget that small is a caller saying "one
+            # call, then answer", and the escape has nothing to add to it.
+            escape = 1 if self.cfg.agent.escape_step and self.cfg.agent.max_steps >= 2 else 0
+            budget_steps = self.cfg.agent.max_steps + escape
+            for step in range(budget_steps):
                 steps = step + 1
                 sid = rj.step_id(steps)
                 # Mutated rather than rebuilt, exactly as `tainted` and `private` are: the
                 # context is shared with every tool call this step makes, and Pass 3 needs
                 # the step a call belonged to in order to key its idempotency hash.
                 tctx.step_id = sid
-                last_step = step == self.cfg.agent.max_steps - 1
-                step_tools = None if last_step else tool_schemas
+                last_step = step == budget_steps - 1
+                # The escape step: the model's tool budget is gone, and what is left is the
+                # one move that can still finish the work. Narrowed by intersection rather
+                # than by name, so a caller whose surface does not hold `delegate` - every
+                # worker - simply gets an empty set and the step behaves as a tool-free one.
+                escape_step = bool(escape) and step == budget_steps - 2
                 if last_step:
-                    messages.append({"role": "user", "content": FINAL_NUDGE})
+                    step_tools = None
+                elif escape_step:
+                    step_tools = [
+                        s for s in tool_schemas if s["function"]["name"] in ESCAPE_TOOLS
+                    ] or None
+                else:
+                    step_tools = tool_schemas
+                nudge = FINAL_NUDGE if last_step else (ESCAPE_NUDGE if escape_step else None)
+                if nudge is not None:
+                    messages.append({"role": "user", "content": nudge})
                     rj.emit(
                         "message_appended",
                         {
                             # The role that was sent, and the actor who wrote it. Both are
                             # needed to read this row correctly: `user` is what went on the
                             # wire, and `actor` is what says the user did not type it.
-                            "role": "user", "actor": self.actor, "chars": len(FINAL_NUDGE),
-                            "preview": jevents.preview(FINAL_NUDGE), "trust": "trusted",
+                            "role": "user", "actor": self.actor, "chars": len(nudge),
+                            "preview": jevents.preview(nudge), "trust": "trusted",
                         },
                         step_id=sid,
                     )
@@ -708,6 +772,9 @@ class AgentLoop:
                     )
 
                 if not calls:
+                    # Tools were on the table and the model did not reach for one. That is an
+                    # ending it chose, whether it happened at step 2 or on the escape step.
+                    ended_by_choice = step_tools is not None
                     final_text.append(assistant_text)
                     break
 
@@ -857,8 +924,14 @@ class AgentLoop:
                             for schema in tool_schemas
                             if schema["function"]["name"] != call.name
                         ]
+                        # Session 9c. One withdrawal, two reasons, and the note says which:
+                        # a rejected argument list is something the model can repair and a
+                        # policy refusal is not, so telling it "these arguments were refused"
+                        # would send it back to rephrase a call that has already been ruled
+                        # on. `denied` is the same flag read above.
+                        template = DENIED_NUDGE if denied else STUCK_NUDGE
                         stuck.append(
-                            STUCK_NUDGE.format(name=call.name, attempts=attempts)
+                            template.format(name=call.name, attempts=attempts)
                         )
 
                 # After the batch, never between an assistant's tool calls and their results.
@@ -898,7 +971,15 @@ class AgentLoop:
             # the last step is forced tool-free and carries FINAL_NUDGE, so what comes back
             # is a summary of unfinished work, not an answer. Same reading as a sub-agent's
             # `uncertain` with the runtime's note on it (`agent/results.py`).
-            status = "abandoned" if steps >= self.cfg.agent.max_steps else "completed"
+            #
+            # Session 9c replaced `steps >= max_steps` with this. The old test read the
+            # budget being *used up* as work being unfinished, which is not the same thing
+            # and was measurably wrong at the edge: the daemon heartbeat runs at
+            # `max_steps = 4`, used all four on both of its successful runs, and could
+            # therefore never report anything but `abandoned` - so the agenda filed its
+            # answers as summaries of unfinished work by construction. A turn that was
+            # offered tools and declined them has finished, at whatever step.
+            status = "completed" if ended_by_choice else "abandoned"
             tele.finish(
                 status=status, steps=steps, usage=usage_total, answer=answer,
                 trace_ids=trace_ids,

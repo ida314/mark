@@ -1,5 +1,11 @@
 # Pass 1 — Baseline & Instrumentation — outcome
 
+> **Numbering note, added 2026-09-25.** This record is left exactly as it was written. It was
+> written before result verification was filed as the new Pass 9, so where it says "Pass 9" it
+> means what is now **Pass 10 — Tool Discovery & Router**, and where it says "Pass 10" (or
+> 10a/10b/10c) it means what is now **Pass 11 — Evaluate & Tune**. The mapping is in
+> `docs/records/session-ledger.md`.
+
 Sessions completed: **1a**, **1b**, **1c**. The pass's exit criterion — a baseline table
 for the frozen task suite plus a written failure survey — is met by
 `docs/records/baseline.md`, **with one gap that is recorded rather than closed**: the five
