@@ -295,3 +295,219 @@ as two contradictions.
    itself be foldable?** It carries counts, not calls — the calls are already a few hundred
    events back in the same journal. A replay harness (11a) may want the fold rather than the
    summary.
+
+---
+
+# Session 9d — Measured verification — outcome
+
+Run 2026-09-27, 15:35:25 → 17:40:04 EDT (124.7 min), against `~/Projects/agent-9d`, a clone
+at **`c187a80`** — the commit that shipped 9a–9c. Daemon stopped for the window and restarted
+from the driver's trap, promotion off inside `runrow.py` and asserted, per-row reset for the
+four rows that write, B12's fixture applied then reversed. `~/Projects/agent-evals/run9d.sh`
+differs from `run8d.sh` only in paths, so a firing here is attributable against 8d's graded
+rows. `runrow.py` was **not** modified; every flag was read back out of `journal-9d.db`
+afterwards by `read9d.py`.
+
+Two rows hit the 2400 s timeout (`exit=124`): **B11** and **B21**. Their last worker has a
+`worker_created` and no `worker_finished`, so 32 workers ran and **30 were verified**.
+
+## The number this session exists for
+
+| flag | class | fired | true positive | false positive | FP rate |
+|---|---|---|---|---|---|
+| `tests_not_run` | hard | **0** | 0 | 0 | **unmeasured** — and it has a demonstrated false *negative* |
+| `file_not_read` | hard | **8** | **0** | **8** | **8/8** |
+| `status_conflict` | hard | **0** | 0 | 0 | **unmeasured** |
+| `no_attempt` | soft | 0 | 0 | 0 | unmeasured; correct on the nearest shape (below) |
+| `completed_without_tools` | soft | 0 | 0 | 0 | unmeasured, and it cannot fire on the shape it was built from |
+| `write_not_performed` | soft | **1** | **0** | **1** | **1/1** |
+
+**Nine firings across both axes. Nine false positives. No true positives.** Rows behind each
+firing: `file_not_read` on B13, B16, B21 live, plus five replayed; `write_not_performed` on
+B16.
+
+### Axis 1 — the live suite
+
+22 rows, 32 workers, 30 verified: **26 `valid`, 3 `invalidated`, 1 `uncertain`**. Worker
+report statuses: 9 `completed`, 17 `uncertain`, 4 `blocked`.
+
+### Axis 2 — the shipped verifier over reports recorded before it existed
+
+Not asked for by the pass file, and it is the half that produced the rate. `ledger_from_events`
+is documented as serving "a live worker, a replay, and a test", so `replay8d.py` folds a ledger
+out of an earlier pass's journal, rebuilds the `WorkerResult` from the stored entry and runs
+the **unmodified** `verify` over it. The truth of those reports is already written down by hand,
+which is what makes them gradeable without re-deriving anything.
+
+Ten such reports exist: **3 in `journal-8d.db`, 7 in the live journal.** Five drew
+`file_not_read`; all five are false positives. Two limits, both real:
+
+- **Only a `completed` worker can be replayed.** `worker_result_cached.status` is an enum of
+  one, so the sample is exactly the population the checks actually examine — which is the
+  right sample here, and a biased one for anything else.
+- **The brief comes from the `delegate` call's own arguments, not `task_preview`** (200 chars),
+  because a truncated brief can only manufacture a `file_not_read`. One of the five firings
+  fell back to the preview, and its flagged token is not a path at all, so no firing in this
+  table depends on the truncation.
+
+## `file_not_read` fires on four things, and none of them is a fabricated citation
+
+**1. Prose containing a slash.** `PATH_LIKE`'s first alternative is
+`[\w.-]+(?:/[\w.-]+)+`, which matches far more than a path. Measured firings:
+
+```
+9/29, 9/28                          assignment due dates a mail worker quoted from Brightspace
+failed/errors/skipped               inside "998 passed in 27.92s (0 failed/errors/skipped)"
+TOP_K/SIMILARITY_FLOOR, add/remove  two constants, and a pair of verbs
+external_id/version                 two field names
+_journal_committed/_store_finished  two function names
+```
+
+Reproducible against the shipped regex with no journal at all: `3/4` and `9/10` match too.
+
+**2. A path that arrives in a tool *result*.** The ledger reads declared `path_args`, so an
+`fs_search` records the directory it searched and never the files it found. 8d's coder cited
+`tests/test_telemetry.py:194 (only grep hit, a test name)` — accurate, honestly labelled, and
+invalidated, because the hit was in the result and not in an argument.
+
+**3. The sandbox mount rewrites every path a `shell_exec` worker touches.** The worker works
+at `/workspace/...` and correctly reports the host path, and the two cannot be matched. B13 is
+the demonstration, because it ran the *same true claim* twice:
+
+| B13 worker | cited | ran | verdict |
+|---|---|---|---|
+| 1 | `/home/dylan/Projects/agent-9d/pyproject.toml` | `cat /workspace/pyproject.toml` | **invalidated** |
+| 2 | the same host path | `ls /home/dylan/Projects/agent-9d 2>/dev/null` — which **failed, exit 2** | **valid** |
+
+Both claimed "1067 passed", which is true; this session measured 1067 on `c187a80`
+independently. The flag turned on whether the host path happened to appear in a command
+string, and the grounding command that saved worker 2 is one that did not work.
+
+**4. A worker with no filesystem tools at all is still checked this way.** The `mail` firing
+is on a role that holds `gmail_search` and `gmail_message`. Its report is the one 8d's own
+record grades *"found a new email (PS2 extended to 9/29) and **reported the change well**"* —
+written before this check existed.
+
+## `write_not_performed` fires on the sentence that denies a write
+
+The B16 firing, in full: `actions_taken = ["Read the file; no files were modified"]`.
+`CLAIMS_WROTE` matched **`modified`** inside *"no files were modified"*. The check has no
+negation handling, so a worker that correctly and explicitly reports changing nothing is
+flagged for claiming a change. The task was read-only. Soft, so it cost a doubt and not an
+answer — and `entry_version = 2` confirms 9b's cache carried that doubt as designed.
+
+## `tests_not_run` never fired, and B12 shows why it may not be able to
+
+B12's fixture was applied, 2 of 19 tests genuinely fail under it, and the worker's first call
+was `uv run pytest tests/test_telemetry.py 2>&1 | tail -60`. The journal recorded **`exit=0`**.
+Verified directly, on the clone, with the fixture applied:
+
+```
+uv run pytest tests/test_telemetry.py 2>&1 | tail -3   -> "2 failed, 17 passed", pipeline exit=0
+uv run pytest tests/test_telemetry.py 2>&1              -> "2 failed, 17 passed", exit=1
+```
+
+A pipeline's status is the last command's, so `| tail -N` — which the model writes on nearly
+every shell call in this suite — makes a failing test run `ok`. `green` is then non-empty and
+the check cannot fire. **The one check the module calls the most consequential thing a coder
+can claim has a structural false negative on exactly the shape it was built for.** Its
+false-positive rate is unmeasured; its false-negative mechanism is measured.
+
+## `completed_without_tools` is pointed at a population where its shape does not occur
+
+The check is credited to "8d's four `steps=1` prose rows". In `journal-8d.db`, **seven** turns
+have `steps=1`, zero tool calls and `completed`, and **all seven are MAIN turns. No worker
+matches the shape.** Verification runs only inside `run_subagent`; the orchestrator's own turn
+is never verified, so the check is implemented in the one place that cannot see what motivated
+it. And of those seven main turns, only three are the failure — the model emitting
+`<function_calls>`, `<tool_use>` or a counterfeit `<untrusted_content>` wrapper as prose. The
+other four are legitimate toolless answers (a concurrency explanation, a `merge_intervals`
+function, a tool table, and the date, which the prompt carries). Pointed at the orchestrator it
+would have fired on 4 of 7.
+
+## What nothing checks: a report that *understates* its work
+
+Twice in one suite, and this is the class 9a was built for:
+
+| row | the report | the ledger | verdict |
+|---|---|---|---|
+| B10 w1 | "I could not complete this task. **Every tool call I made failed**" | 15 calls, **10 ok**, including reading both files it was asked about | `valid`, no flags |
+| B12 w1 | "I **did not actually run the test suite or edit any files** in this session" | 13 calls, including a successful patch and a `pytest` run | `valid`, no flags |
+
+This is B11's original shape — *"No work was performed"* against 15 successful calls — and it
+is still uncovered, because **five of the six checks are gated on `status == "completed"`** and
+both of these reported `uncertain`. `results.validate_report` forces a budget-exhausted worker
+to `uncertain`, so the workers that struggled most, and are likeliest to misreport, are the
+ones the checks decline to examine.
+
+How much of the population that exempts:
+
+```
+this suite            13 of 30 verified workers were `completed`   43%
+journal-8d.db          3 of 14                                     21%
+the live journal       7 of 21                                     33%
+```
+
+The mitigation, stated so the gap is not overstated: `uncertain` already maps to `ok=False`, so
+such a report does not reach the user as a corroborated answer. What is lost is the difference
+between "genuinely blocked" and "did the work and denied it" — which is exactly the distinction
+9b's three moves need, since re-delegating the second one pays twice for work already done.
+
+## `no_attempt` was right about the shape it saw
+
+Predicted before the rows ran, because `agent doctor` showed `gmail-nyu` and `gcal-nyu` failing
+`invalid_grant`: if a mail worker said "cannot access" after zero calls, `no_attempt` would fire
+on a **true** claim. It did not happen. B17 called `gmail_search` twice and B18 once, all
+refused by the connector, both reported `blocked` honestly, and the check correctly stayed
+silent — it is keyed on zero calls, which needs no judgement about which tool was right. **B17
+and B18 are credential premise failures, not verification results**, and no number in this
+record depends on them.
+
+## The escape step, measured
+
+| | |
+|---|---|
+| escape steps granted | **16**, every one to a worker |
+| tools offered on them | **none** — `ESCAPE_TOOLS ∩ tool_schemas` is empty for a worker, as `loop.py` says itself |
+| outcome of all 16 | `abandoned` at `steps == max_steps` |
+| main turns that exhausted their budget | **0** — the deepest main turn used 6 of 12 |
+| other nudges | 1 `STUCK`, **0 `DENIED`** (B10's two denials carried different arguments) |
+
+So the escape step cost **16 extra model calls across 22 rows and bought nothing**, because the
+only role that holds `delegate` never ran out of steps and the 16 turns that did cannot use it.
+Open question 2 has an answer: **it has never been taken.**
+
+Open question 3, `ended_by_choice`: **no recorded status changed.** Every `steps == max` turn
+was `abandoned` anyway and every `completed` worker stopped early (2/15, 3/15, 12/15, 13/15).
+The arithmetic is right and this suite could not exercise it. The heartbeat claim stays
+unverified: `worker_verified` appears **0 times** in the live journal, so the running daemon has
+never executed this build.
+
+## Live data, stated rather than glossed
+
+Journal, telemetry and config were redirected per-process, so nothing shared was edited and no
+restore is owed. The teardown **cleared 43 queued candidates before restarting the daemon**, so
+none of this run's proposals reached `facts`. The suite wrote 6 `worker_result_cached` entries
+into `journal-9d.db`, all at `entry_version = 2`. `~/Documents/agent-db-dependency.md` was
+overwritten again by B21's worker (9842 chars) — it is outside the clone and outside the reset,
+the same as in 8d. The fixture probe above applied and reverted `b12-mutation.patch` in the
+clone; `git status` there is clean.
+
+## What this leaves for Dylan, and why it is not implemented here
+
+9d's scope is measurement, and the pass file's `Must not` — *"Keep a hard flag whose
+false-positive rate 9d has not measured"* — is now binding on all three hard flags at once, for
+two different reasons:
+
+1. **`file_not_read` is measured at 8/8 false positives and cannot stay hard.** Three of its
+   four mechanisms are structural, not regex tuning: paths in results, the sandbox mount, and
+   roles with no filesystem tools.
+2. **`tests_not_run` and `status_conflict` never fired**, so their rate is unmeasured. Under
+   the letter of the rule neither may stay hard either, and `tests_not_run` additionally has a
+   measured false-negative mechanism.
+
+The shape of a fix is not obvious enough to choose unilaterally — restricting the check to
+roles that hold filesystem tools, grounding against tool *results*, mapping the sandbox mount,
+requiring an unpiped exit code, and moving `completed_without_tools` to the orchestrator are
+five separate decisions with different costs — and the checks that would need to change are the
+ones a later pass depends on. Nothing in `verification.py` was modified by this session.
