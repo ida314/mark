@@ -169,6 +169,7 @@ class OpenAICompatProvider:
                     id=slot["id"] or f"call_{idx}",
                     name=slot["name"],
                     arguments=slot["arguments"] or "{}",
+                    arguments_missing=not slot["arguments"],
                 )
             )
             emitted += 1

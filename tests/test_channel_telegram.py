@@ -519,3 +519,225 @@ async def test_a_failing_status_edit_never_costs_the_answer(bot, monkeypatch):
         await tg.handle_message(
             bot, client, tg.Conversation(bot), {"chat": {"id": 4242}, "text": "hi"}
         )  # must not raise
+
+
+# --- approvals from the phone ------------------------------------------------
+#
+# Session 01a0e9f6 (2026-09-28). A Telegram turn was built with a `QueueApprover`: the
+# coder's `fs_write` was parked, the model was told "nobody is at the keyboard" while the
+# user was reading the reply on their phone, and the queued id never reached them. The person
+# is present. They have no keyboard. So the turn asks with buttons and waits.
+
+import asyncio  # noqa: E402
+from uuid import UUID  # noqa: E402
+
+from agentd.policy.approvals import ApprovalRequest  # noqa: E402
+from agentd.policy.engine import Decision  # noqa: E402
+
+
+def _request(origin: str = "telegram") -> ApprovalRequest:
+    return ApprovalRequest(
+        tool_name="fs_write", args={"path": "/tmp/agent-test.md", "content": "hello world"},
+        risk="write", decision=Decision(outcome="require_approval", rule_id="risk_matrix:write/assist"),
+        reason="the user asked for a test file",
+        preview="--- a/agent-test.md\n+++ b/agent-test.md\n+hello world",
+        origin=origin,
+    )
+
+
+async def _asked(wire: Wire) -> tuple[dict, UUID]:
+    """The approval message once it has been sent, and the id its buttons carry."""
+    for _ in range(200):
+        for method, args in wire.calls:
+            if method == "sendMessage" and "reply_markup" in args:
+                data = args["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+                return args, tg.parse_tap(data)[1]
+        await asyncio.sleep(0.005)
+    raise AssertionError("no approval message was sent")
+
+
+def _tap(approval_id: UUID, *, approve: bool, text: str = "") -> dict:
+    return {
+        "id": "q1", "data": f"{'approve' if approve else 'deny'}:{approval_id}",
+        "message": {"message_id": 5, "chat": {"id": 4242}, "text": text},
+    }
+
+
+async def test_a_turn_from_the_phone_is_built_with_the_phone_approver(bot, monkeypatch):
+    built: list[dict] = []
+
+    def build(**kw) -> JournalingLoop:
+        built.append(kw)
+        return JournalingLoop(answer="ok")
+
+    monkeypatch.setattr(tg, "AgentLoop", build)
+    wire = Wire()
+    async with wire.client() as client:
+        await tg.handle_message(bot, client, tg.Conversation(bot), {"chat": {"id": 4242}, "text": "hi"})
+    assert isinstance(built[0]["approver"], tg.TelegramApprover)
+
+
+async def test_an_approval_is_asked_with_buttons_and_a_tap_approves_it(bot):
+    wire = Wire(results={"sendMessage": {"message_id": 5}})
+    async with wire.client() as client:
+        conv = tg.Conversation(bot)
+        approver = tg.TelegramApprover(bot, client, 4242, conv.taps)
+        waiting = asyncio.create_task(approver.request(_request("subagent:coder")))
+        asked, approval_id = await _asked(wire)
+
+        assert "fs_write" in asked["text"] and "coder" in asked["text"]
+        assert "+hello world" in asked["text"], "the preview is what you are approving"
+        assert str(approval_id) in asked["text"]
+        assert [b["text"] for b in asked["reply_markup"]["inline_keyboard"][0]] == ["Approve", "Deny"]
+        # Queued before it was asked: durable whatever happens to the wait.
+        assert (await repo_ops.get_approval(approval_id))["status"] == "pending"
+
+        await tg.handle_tap(bot, client, conv, _tap(approval_id, approve=True, text=asked["text"]))
+        result = await asyncio.wait_for(waiting, 2)
+
+    assert result.approved is True and result.decided_by == "user"
+    assert (await repo_ops.get_approval(approval_id))["status"] == "approved"
+    acks = [a for m, a in wire.calls if m == "answerCallbackQuery"]
+    assert acks and acks[0]["callback_query_id"] == "q1"
+    edits = [a for m, a in wire.calls if m == "editMessageText"]
+    assert edits and "carrying on" in edits[-1]["text"]
+
+
+async def test_a_deny_tap_is_a_denial_the_model_is_told_about(bot):
+    wire = Wire(results={"sendMessage": {"message_id": 5}})
+    async with wire.client() as client:
+        conv = tg.Conversation(bot)
+        approver = tg.TelegramApprover(bot, client, 4242, conv.taps)
+        waiting = asyncio.create_task(approver.request(_request()))
+        _, approval_id = await _asked(wire)
+        await tg.handle_tap(bot, client, conv, _tap(approval_id, approve=False))
+        result = await asyncio.wait_for(waiting, 2)
+
+    assert result.approved is False and result.queued_id is None
+    assert "denied" in (result.note or "").lower()
+    assert (await repo_ops.get_approval(approval_id))["status"] == "denied"
+
+
+async def test_no_tap_in_time_leaves_it_queued_and_says_so_rather_than_nobody_is_here(bot):
+    bot.telegram.approval_timeout_s = 0.05
+    wire = Wire(results={"sendMessage": {"message_id": 5}})
+    async with wire.client() as client:
+        approver = tg.TelegramApprover(bot, client, 4242, tg.Conversation(bot).taps)
+        result = await asyncio.wait_for(approver.request(_request()), 2)
+
+    assert result.approved is False and result.decided_by == "queued"
+    assert result.queued_id is not None
+    assert "did not answer" in result.note and str(result.queued_id) in result.note
+    assert "keyboard" not in result.note
+    assert (await repo_ops.get_approval(result.queued_id))["status"] == "pending"
+    edits = [a for m, a in wire.calls if m == "editMessageText"]
+    assert edits and "still queued" in edits[-1]["text"]
+
+
+async def test_the_executor_relays_the_approvers_account_not_the_keyboard_line(bot):
+    """What the model reads back is the sentence the approver wrote."""
+    import json
+
+    from agentd.policy.engine import engine_from_config
+    from agentd.tools.base import ToolContext
+    from agentd.tools.executor import ToolExecutor
+    from agentd.tools.registry import get_registry
+
+    bot.telegram.approval_timeout_s = 0.05
+    wire = Wire(results={"sendMessage": {"message_id": 5}})
+    async with wire.client() as client:
+        approver = tg.TelegramApprover(bot, client, 4242, tg.Conversation(bot).taps)
+        executor = ToolExecutor(get_registry().tools, engine_from_config(bot), approver)
+        target = bot.paths.workspace / "agent-test.md"
+        result = await executor.run(
+            "fs_write", {"path": str(target), "content": "hello world", "reason": "test"},
+            ToolContext(actor="main", origin="telegram", autonomy="assist", tool_subset=None),
+        )
+    body = json.loads(result.content)
+    assert body["queued_for_approval"]
+    assert "did not answer" in body["message"] and "/approve" in body["message"]
+    assert "keyboard" not in body["message"]
+    assert not target.exists()
+
+
+async def test_a_tap_after_the_wait_is_over_still_works_on_the_queued_row(bot):
+    """The daemon restarted, or the timeout passed: the buttons on the phone are still there
+    and pressing one must still mean something."""
+    approval_id = await repo_ops.queue_approval(
+        tool_name="fs_write", args={"path": "/tmp/x", "content": "hi"}, risk="write",
+        policy_rule="risk_matrix:write/assist", reason="because", origin="telegram",
+    )
+    wire = Wire()
+    async with wire.client() as client:
+        conv = tg.Conversation(bot)  # nothing waiting in it
+        await tg.handle_tap(bot, client, conv, _tap(approval_id, approve=False, text="Approval needed"))
+
+    assert (await repo_ops.get_approval(approval_id))["status"] == "denied"
+    edits = [a for m, a in wire.calls if m == "editMessageText"]
+    assert edits and edits[-1]["text"].startswith("Approval needed")
+    assert "Denied" in edits[-1]["text"]
+
+
+async def test_typing_approve_while_a_turn_waits_is_the_tap_and_runs_it_once(bot):
+    wire = Wire(results={"sendMessage": {"message_id": 5}})
+    async with wire.client() as client:
+        conv = tg.Conversation(bot)
+        approver = tg.TelegramApprover(bot, client, 4242, conv.taps)
+        waiting = asyncio.create_task(approver.request(_request()))
+        _, approval_id = await _asked(wire)
+        await tg.handle_command(bot, client, conv, 4242, f"/approve {approval_id}")
+        result = await asyncio.wait_for(waiting, 2)
+
+    assert result.approved is True
+    assert "carrying on" in wire.said()[-1]
+    # The row says approved, not executed: the live turn is the one that runs it.
+    assert (await repo_ops.get_approval(approval_id))["status"] == "approved"
+
+
+async def test_a_bot_that_cannot_send_falls_back_to_the_queue_honestly(bot):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "description": "chat not found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        approver = tg.TelegramApprover(bot, client, 4242, tg.Conversation(bot).taps)
+        result = await approver.request(_request())
+
+    assert result.approved is False and result.queued_id is not None
+    assert "Could not reach you" in result.note
+    assert (await repo_ops.get_approval(result.queued_id))["status"] == "pending"
+
+
+def test_only_my_buttons_parse():
+    assert tg.parse_tap("approve:not-a-uuid") is None
+    assert tg.parse_tap("launch:01a0e9f9-8ad2-726a-b15f-c4bbd6b063ac") is None
+    assert tg.parse_tap("") is None
+    assert tg.parse_tap("deny:01a0e9f9-8ad2-726a-b15f-c4bbd6b063ac") == (
+        False, UUID("01a0e9f9-8ad2-726a-b15f-c4bbd6b063ac")
+    )
+
+
+async def test_a_command_does_not_wait_behind_the_turn_it_would_release(bot, monkeypatch):
+    """`attend` takes the per-chat lock for a turn and skips it for a command. Otherwise
+    `/approve <id>` typed during a wait would queue behind the very turn waiting on it."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingLoop(JournalingLoop):
+        async def run_turn(self, session, text, *, run_id=None, **kwargs):
+            started.set()
+            await release.wait()
+            yield Answer(turn_id=str(uuid7()), text="finally")
+
+    monkeypatch.setattr(tg, "AgentLoop", lambda **kw: BlockingLoop())
+    wire = Wire()
+    async with wire.client() as client:
+        conv = tg.Conversation(bot)
+        turn = asyncio.create_task(tg.attend(bot, client, conv, {"chat": {"id": 4242}, "text": "slow"}))
+        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(
+            tg.attend(bot, client, conv, {"chat": {"id": 4242}, "text": "/whoami"}), 2
+        )
+        assert "4242" in wire.said()[-1], "the command answered while the turn was still running"
+        release.set()
+        await asyncio.wait_for(turn, 2)
+    assert wire.said()[-1] == "finally"

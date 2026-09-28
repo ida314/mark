@@ -554,7 +554,10 @@ async def run_subagent(
         # be wrong about the same truncated transcript.
         ledger = ledger_from_events(witnessed, worker_id=worker_id)
         flags = verify(result, ledger, brief=brief)
-        result = replace(result, flags=flags, validation=validation_of(flags))
+        result = replace(
+            result, flags=flags, validation=validation_of(flags),
+            queued_approvals=ledger.queued_approvals,
+        )
         rj.emit(
             "worker_verified",
             {

@@ -63,8 +63,12 @@ async def fs_list(args: dict, ctx: ToolContext) -> ToolResult:
 )
 async def fs_read(args: dict, ctx: ToolContext) -> ToolResult:
     path = _p(args["path"])
+    # Two different facts, and a model reading "Not a file" for a path that does not exist
+    # went looking for what kind of thing it was instead (session 01a0e9f6).
+    if not path.exists():
+        return ToolResult(content=f"No such file: {path}", ok=False)
     if not path.is_file():
-        return ToolResult(content=f"Not a file: {path}", ok=False)
+        return ToolResult(content=f"Not a file (it is a directory): {path}", ok=False)
     if path.stat().st_size > MAX_READ_BYTES:
         return ToolResult(content=f"File too large ({path.stat().st_size} bytes)", ok=False)
     try:

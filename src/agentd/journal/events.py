@@ -190,6 +190,11 @@ EVENTS: dict[str, dict[str, Field]] = {
         # reached for blind stays visible as such in the journal.
         "visible": req(bool),
         "known": req(bool),
+        # Present, and true, only when the stream delivered the tool name with no argument
+        # bytes at all and the provider filled in `{}`. Separates a model that omitted its
+        # arguments from a server-side parser that dropped them; both reach the executor as
+        # the same `'x' is a required property`.
+        "args_empty_stream": opt(bool),
     },
     "tool_started": {
         "call_id": req(str),
@@ -593,6 +598,19 @@ EVENTS: dict[str, dict[str, Field]] = {
         "error": opt(str, nullable=True),
         "successor_run_id": opt(str, nullable=True),
     },
+    # 2026-09-28. The runtime's own judgement on a turn's final answer, written by
+    # `agent/loop.py` when the answer claims an action the turn provably did not take -
+    # today one reason, `action_claimed_without_tools`: tools were offered, none was called,
+    # and the prose says "done". The note the runtime appended to the answer is the user's
+    # copy of this; the event is the measurable one, so 9d-style counts of how often the
+    # model narrates work it never did are a query and not a reading of transcripts.
+    "answer_flagged": {
+        "reason": req(str, enum=("action_claimed_without_tools",)),
+        # The matched text, so a false positive can be read off the journal and the pattern
+        # narrowed, rather than the rule being argued about in prose.
+        "phrase": req(str),
+        "steps": req(int),
+    },
 }
 
 EVENT_TYPES: frozenset[str] = frozenset(EVENTS)
@@ -653,6 +671,9 @@ EMITTED_TYPES: frozenset[str] = frozenset(
         # existed when checkpoints were on would be a bucket this machine has never had.
         "working_memory_noted",
         "working_memory_discarded",
+        # 2026-09-28. Written by `agent/loop.py` at the end of a turn whose answer claims
+        # work over zero tool calls. Behind no flag.
+        "answer_flagged",
         # Session 7c. Written by `memory/promotion.py` at a task or run boundary:
         # `promotion_batch` once per boundary that saw a note, `promotion_classified` per
         # note kept, `promotion_committed` per durable write. Same reasoning again - a

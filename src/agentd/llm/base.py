@@ -23,6 +23,9 @@ class ToolCall:
     id: str
     name: str
     arguments: str  # raw JSON text as produced by the model
+    # True when the stream carried a name and not one byte of arguments, and `arguments` is
+    # the `{}` the provider put there. The executor rejects it either way; this says why.
+    arguments_missing: bool = False
 
 
 @dataclass

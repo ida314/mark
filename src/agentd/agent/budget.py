@@ -134,21 +134,33 @@ def read_messages(messages: list[dict[str, Any]], *, cfg: Config | None = None) 
 
 
 # The roles whose text carries into the next turn. `context.history_messages` rebuilds a
-# conversation from the archive's `user_message` and `assistant_message` rows and nothing
-# else: a tool result is not replayed, a system block is rebuilt from scratch every turn, and
-# the runtime's own mid-turn notes are never archived at all. So these two roles are exactly
-# what `agent.history_tokens` is spent on, and a reading over them is the only one comparable
-# to that ceiling.
-CARRIED_ROLES = ("user", "assistant")
+# conversation from the archive's `user_message`, `assistant_message` and `tool_result`
+# rows: since 2026-09-28 a turn's tool calls are replayed (clipped) before its answer, so a
+# `tool` message and an assistant message that holds only `tool_calls` both carry. A system
+# block is rebuilt from scratch every turn and the runtime's own mid-turn notes are never
+# archived at all, so those still do not. What is listed here is exactly what
+# `agent.history_tokens` is spent on, and a reading over it is the only one comparable to
+# that ceiling.
+CARRIED_ROLES = ("user", "assistant", "tool")
 
 
 def carried_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The subset of a message list that will still exist on the next turn."""
-    return [
-        m
-        for m in messages
-        if m.get("role") in CARRIED_ROLES and (m.get("content") or "").strip()
-    ]
+    """The subset of a message list that will still exist on the next turn, at the size it
+    will exist at: a tool result is replayed clipped to `HISTORY_TOOL_RESULT_CHARS`, so a
+    64KB listing in this turn's prompt carries as a few hundred characters, not as 64KB."""
+    from .context import HISTORY_TOOL_RESULT_CHARS
+
+    kept: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") not in CARRIED_ROLES:
+            continue
+        content = m.get("content") or ""
+        if not (content.strip() or m.get("tool_calls")):
+            continue
+        if m.get("role") == "tool" and len(content) > HISTORY_TOOL_RESULT_CHARS:
+            m = {**m, "content": content[:HISTORY_TOOL_RESULT_CHARS]}
+        kept.append(m)
+    return kept
 
 
 def carried(messages: Sequence[dict[str, Any]], *, cfg: Config | None = None) -> ContextReading:

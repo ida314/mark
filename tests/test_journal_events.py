@@ -73,6 +73,10 @@ PASS_VOCABULARY = {
     # from it: a conclusion whose evidence was not recorded is a conclusion nothing can
     # re-check, which is the shape this whole pass exists to refuse.
     "worker_verified",
+    # 2026-09-28, the no-action guard. The runtime's judgement that a final answer claims
+    # work over zero tool calls. In the journal so that how often the model narrates work it
+    # never did is a count over events and not a reading of transcripts.
+    "answer_flagged",
 }
 
 

@@ -132,6 +132,9 @@ class ToolCall:
     ok: bool | None = None
     error: str = ""
     exit_code: int | None = None
+    # The approval this call was parked under, from `tool_failed.queued_id`; "" when it was
+    # not queued. A queued call is a failed one with a person's decision pending on it.
+    queued_id: str = ""
 
     @property
     def command(self) -> str:
@@ -160,6 +163,15 @@ class WorkerLedger:
     @property
     def denials(self) -> int:
         return sum(1 for c in self.calls if c.ok is False and c.args.get("__denied__"))
+
+    @property
+    def queued_approvals(self) -> tuple[str, ...]:
+        """Approval ids this worker's calls are waiting under, in call order, once each."""
+        seen: list[str] = []
+        for call in self.calls:
+            if call.queued_id and call.queued_id not in seen:
+                seen.append(call.queued_id)
+        return tuple(seen)
 
     @property
     def shell_runs(self) -> tuple[ToolCall, ...]:
@@ -269,6 +281,7 @@ def ledger_from_events(
                 ok=False,
                 error=error,
                 exit_code=_exit_code(error) if call.name == SHELL else None,
+                queued_id=str(payload.get("queued_id") or ""),
             )
         elif event.type == "agent_finished":
             turn_status = payload.get("status", "")

@@ -174,7 +174,12 @@ def _agent_finished(payload: dict[str, Any]) -> Line | None:
     return None
 
 
+def _answer_flagged(payload: dict[str, Any]) -> Line:
+    return Line(f"  ⚠ answer flagged: {payload['reason']} ({payload['phrase']!r})", "yellow")
+
+
 _RENDERERS: dict[str, Callable[[dict[str, Any]], Line | None]] = {
+    "answer_flagged": _answer_flagged,
     "tool_requested": _tool_requested,
     "tool_progress": _tool_progress,
     "tool_finished": _tool_finished,

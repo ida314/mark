@@ -392,10 +392,15 @@ class ToolExecutor:
         queued_id: UUID | None = None, note: str | None = None,
     ) -> ToolResult:
         if queued_id:
+            # The approver's own account of why it queued, when it gave one: "you were asked
+            # on Telegram and did not answer" is a different fact from "nobody is here", and
+            # the model telling the user the wrong one is how a person holding the phone was
+            # told nobody was at the keyboard (session 01a0e9f6).
             body = json.dumps(
                 {
                     "queued_for_approval": str(queued_id),
-                    "message": (
+                    "message": note
+                    or (
                         "This needs the user's approval and nobody is at the keyboard. "
                         "It is queued; continue with something else."
                     ),

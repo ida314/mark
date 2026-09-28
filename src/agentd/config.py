@@ -393,6 +393,11 @@ class TelegramConfig(BaseModel):
     # produces answers with no visible account of where they came from. `/tools` toggles it
     # per chat.
     show_tools: bool = True
+    # How long a turn waits for you to tap Approve or Deny on the phone before it gives up
+    # on the tap, leaves the request in the queue (`/approve <id>` still runs it) and
+    # carries on. The turn is blocked while it waits, and so is anything else you send to
+    # that chat, which is why this is minutes and not an hour.
+    approval_timeout_s: float = 180.0
 
 
 class GithubConnectorConfig(BaseModel):

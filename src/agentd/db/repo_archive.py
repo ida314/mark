@@ -208,6 +208,39 @@ async def recent_messages(
     return list(reversed(rows))
 
 
+async def recent_tool_results(
+    session_id: UUID, turn_ids: list[UUID], *, after_id: int | None = None
+) -> list[dict]:
+    """The `tool_result` rows of the named turns, oldest first, for replaying into history.
+
+    Session 01a0e9f6 (2026-09-28): the next turn's prompt was rebuilt from prose alone, so a
+    model that had made two `delegate` calls read its own reply, found no call behind it,
+    and confessed to a fabrication it had not committed - then, in the same breath, claimed
+    a success it had not achieved either. What it did is in this table; nothing put it back
+    in front of the model. `context.history_messages` now does.
+
+    Keyed on the *orchestrator's* turn ids rather than on the session, and that is the
+    whole worker exclusion: a worker's tool calls are archived under the worker's own
+    `turn_id`, which is never one of the turns `recent_messages` returned, so a coder's
+    `shell_exec` rows stay out of its caller's history while the `delegate` result that
+    reported them is replayed. Same rule as `recent_messages`, enforced by the join rather
+    than by the actor column - `tool_result` rows carry `actor='tool:<name>'` for both.
+    """
+    if not turn_ids:
+        return []
+    rows = await fetch_all(
+        """
+        SELECT * FROM raw_events
+        WHERE session_id = %s AND kind = 'tool_result'
+          AND turn_id = ANY(%s)
+          AND (%s::bigint IS NULL OR id > %s::bigint)
+        ORDER BY id ASC
+        """,
+        (session_id, list(turn_ids), after_id, after_id),
+    )
+    return list(rows)
+
+
 async def recent_message_sizes(session_id: UUID, limit: int = 200) -> list[tuple[int, int]]:
     """`(id, characters)` for this session's messages, newest first.
 

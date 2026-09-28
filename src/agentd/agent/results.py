@@ -143,6 +143,10 @@ class WorkerResult:
     # still ran, and what it did is still on the record - what is refused is the claim.
     validation: str = "valid"
     flags: tuple[Flag, ...] = ()
+    # 2026-09-28. Approval ids the worker's calls were parked under, read off its ledger and
+    # not its prose. A coder that hit the approval wall twice used to come back saying "it
+    # is in your queue" with no id anyone could approve; the ids are the actionable part.
+    queued_approvals: tuple[str, ...] = ()
     # Session 6c. The worker whose run earned this result, when it was served from this
     # run's result cache instead of being re-run; "" when a worker produced it just now.
     # It exists so that an empty `transcript` on a reused result is explained rather than
@@ -182,6 +186,8 @@ class WorkerResult:
         payload["validation"] = self.validation
         if self.flags:
             payload["validation_flags"] = [f.detail for f in self.flags]
+        if self.queued_approvals:
+            payload["queued_approvals"] = list(self.queued_approvals)
         if debug:
             payload["report_valid"] = self.report_valid
             payload["report_error"] = self.report_error

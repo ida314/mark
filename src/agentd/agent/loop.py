@@ -9,6 +9,7 @@ the second copy that used to be yielded alongside.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
@@ -112,6 +113,40 @@ ESCAPE_NUDGE = (
     "the exact file, command or question. Otherwise do not call a tool: answer with what you "
     "have, and say plainly what is still missing and what you would need to get it."
 )
+
+# The no-action guard (2026-09-28). What a final answer may not say over a turn that called
+# nothing. The shapes are first-person claims of a completed effect - "I've created", "has
+# been written", "Done." - and deliberately not every past-tense verb: "the file was created
+# yesterday" is a report, and a model relaying a previous turn's real work makes no call in
+# this one. The note added is therefore worded to be true either way: it says what *this
+# turn* did, which is nothing.
+_ACTION_VERBS = (
+    "created|written|wrote|saved|ran|run|executed|deleted|removed|sent|updated|installed|"
+    "committed|pushed|renamed|moved|applied|edited|modified|added|fixed|patched|appended"
+)
+_ACTION_CLAIMS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:^|\n)\s*(?:\*\*)?done(?:\*\*)?[.!:]",
+        rf"\bI(?:'ve| have|'d| just|)\s+(?:now\s+|just\s+|successfully\s+)?(?:{_ACTION_VERBS})\b",
+        rf"\b(?:has|have|was|were)\s+(?:now\s+|just\s+|successfully\s+)?been\s+(?:{_ACTION_VERBS})\b",
+        r"\b(?:the\s+)?file\s+(?:is\s+now|was|has\s+been)\s+(?:created|written|saved)\b",
+        r"\b(?:the\s+)?(?:command|test|tests|script)\s+(?:was|were|has\s+been|have\s+been)\s+(?:run|executed)\b",
+    )
+)
+NO_ACTION_NOTE = (
+    f"{RUNTIME_NOTE} This reply made no tool calls, so nothing was created, written, run or "
+    "sent during this turn."
+)
+
+
+def claims_action(answer: str) -> str | None:
+    """The first phrase in `answer` that claims a completed action, or None."""
+    for pattern in _ACTION_CLAIMS:
+        match = pattern.search(answer)
+        if match:
+            return match.group(0).strip()
+    return None
 
 
 @dataclass
@@ -611,6 +646,9 @@ class AgentLoop:
             # 4. Step until the model stops calling tools.
             final_text: list[str] = []
             steps = 0
+            # Every tool call this turn requested, whatever became of it. Read at the end by
+            # the no-action guard: an answer that says "done" over zero calls did nothing.
+            calls_made = 0
             # Session 9c. Whether this turn stopped because it chose to, rather than because
             # the runtime took its tools away. Read at the bottom for the terminal status:
             # "abandoned" should mean the budget ran out with work still pending, not that
@@ -807,9 +845,16 @@ class AgentLoop:
                         {
                             "call_id": call.id, "name": call.name, "args": args_preview,
                             "visible": was_visible, "known": known,
+                            # Only when true. The stream carried a tool name and no
+                            # argument bytes at all, and the provider substituted `{}`;
+                            # without this flag a model that omitted its arguments and a
+                            # server-side parser that dropped them are the same
+                            # `'agent' is a required property` in the journal.
+                            **({"args_empty_stream": True} if call.arguments_missing else {}),
                         },
                         step_id=sid,
                     )
+                    calls_made += 1
                     call_started = time.perf_counter()
                     # Door 4, kept on purpose. `select` is an embedding lookup and it
                     # misses; a model naming a tool it is entitled to use is recovering
@@ -905,6 +950,9 @@ class AgentLoop:
                             session_id=session.id, turn_id=turn_id,
                             payload={
                                 "args": args_preview, "ok": result.ok,
+                                # So `context.replay_tool_calls` can rebuild the same
+                                # assistant/tool pairing the model saw live.
+                                "call_id": call.id,
                                 # What `Session.resume` reads back.
                                 **({"private": True} if private_call else {}),
                             },
@@ -956,6 +1004,25 @@ class AgentLoop:
                 tele.tools_revealed(revealed)
 
             answer = "\n".join(t for t in final_text if t).strip()
+            # The no-action guard (2026-09-28). A turn that was offered tools, called none,
+            # and then wrote "Done - the file contains `hello world`" is the failure session
+            # 01a0e9f6 produced twice in a row, and to a reader it is indistinguishable from
+            # a turn that did the work. The runtime knows the difference - `calls_made` is
+            # its own count, not the model's - so it says so, in the answer, where both the
+            # user and the model's next turn will read it. Appended rather than replacing
+            # the answer: the sentence added is true whether or not the match was a false
+            # positive ("as I said earlier, the file was created" makes no call either).
+            claimed = claims_action(answer) if calls_made == 0 and tool_schemas else None
+            if claimed:
+                rj.emit(
+                    "answer_flagged",
+                    {
+                        "reason": "action_claimed_without_tools",
+                        "phrase": claimed,
+                        "steps": steps,
+                    },
+                )
+                answer = f"{answer}\n\n{NO_ACTION_NOTE}"
             if answer:
                 await repo_archive.append_event(
                     RawEvent(

@@ -388,8 +388,15 @@ async def test_a_second_handoff_is_told_to_carry_the_first_one_forward(cfg) -> N
 
 
 def test_the_two_readings_answer_different_questions(cfg) -> None:
-    """5a's open question 1, decided here. The prompt reading counts a tool result that is
-    gone by the next turn; the carried reading counts what the archive will replay."""
+    """5a's open question 1, decided here. The prompt reading counts a tool result at the
+    size it has in this turn's prompt; the carried reading counts what the archive will
+    replay. Since 2026-09-28 that is not nothing: a tool result carries, clipped to
+    `HISTORY_TOOL_RESULT_CHARS`, so the 64KB listing costs a few hundred tokens next turn
+    rather than the twenty thousand it costs now - and the two readings still answer
+    different questions."""
+    from agentd.agent.context import HISTORY_TOOL_RESULT_CHARS
+    from agentd.ids import estimate_tokens
+
     messages = [
         {"role": "system", "content": "s" * 3_200},
         {"role": "user", "content": "u" * 3_200},
@@ -398,7 +405,9 @@ def test_the_two_readings_answer_different_questions(cfg) -> None:
     ]
 
     assert budget.read_messages(messages, cfg=cfg).used_tokens == 23_000
-    assert budget.carried(messages, cfg=cfg).used_tokens == 2_000
+    clipped = estimate_tokens("t" * HISTORY_TOOL_RESULT_CHARS)
+    assert budget.carried(messages, cfg=cfg).used_tokens == 2_000 + clipped
+    assert clipped < 500
     assert budget.read_messages(messages, cfg=cfg).crossed is True
     assert budget.carried(messages, cfg=cfg).crossed is False
 
