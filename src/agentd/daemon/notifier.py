@@ -20,6 +20,7 @@ Three things this has to get right, none of them obvious:
 from __future__ import annotations
 
 import asyncio
+import base64
 
 import httpx
 
@@ -122,13 +123,28 @@ def why_held(level: str, cfg: Config) -> str | None:
     return None
 
 
+def _header_safe(value: str) -> str:
+    """A header value httpx will send. HTTP headers are ASCII; a title with an em-dash or a
+    curly quote made httpx raise `'ascii' codec can't encode` before the request left the
+    process, and the notification died after six attempts with nothing but an `actions` row
+    to show for it (12 of them on 2026-09-20). ntfy decodes RFC 2047, so a non-ASCII title
+    goes as `=?UTF-8?B?...?=` and arrives on the phone as written."""
+    try:
+        value.encode("ascii")
+        return value
+    except UnicodeEncodeError:
+        return "=?UTF-8?B?" + base64.b64encode(value.encode("utf-8")).decode("ascii") + "?="
+
+
 def _headers(row: dict, cfg: Config) -> dict[str, str]:
     level = row.get("level", "info")
     headers = {
         # Redacted and flattened like the body. It was neither: `_redact` only ever saw
         # `body`, so a credential in a title left the box intact - and a newline in an HTTP
         # header value is header injection rather than a cosmetic problem.
-        "Title": _redact(" ".join(str(row.get("title") or "agent").split()))[:200] or "agent",
+        "Title": _header_safe(
+            _redact(" ".join(str(row.get("title") or "agent").split()))[:200] or "agent"
+        ),
         "Priority": str(PRIORITY.get(level, 3)),
         "Tags": TAGS.get(level, "information_source"),
         "Markdown": "yes",

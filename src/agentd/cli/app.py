@@ -160,6 +160,40 @@ async def _doctor() -> None:
     else:
         row("docker", False, "not installed: sandboxed shell disabled")
 
+    # Push. Two rows, because the two failures look different and both happened: the ntfy
+    # container sat "Up" with no network for eight days (2026-09-20 → 28) and nothing
+    # listened on 8088, and the notifier - which by design cannot notify about its own
+    # failure - abandoned 257 rows after six attempts each with only `actions` rows to show
+    # for it. Reachability says whether the next push can land; the abandoned count says
+    # whether recent ones did.
+    if cfg.ntfy.enabled:
+        import httpx as _httpx
+
+        health_url = f"{cfg.ntfy.base_url.rstrip('/')}/v1/health"
+        try:
+            async with _httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(health_url)
+            row("ntfy", response.status_code < 300, f"{health_url} -> {response.status_code}")
+        except Exception as exc:
+            row("ntfy", False, f"{health_url}: {type(exc).__name__} - is the container on its network?")
+        if db_ok:
+            from ..daemon.notifier import MAX_ATTEMPTS
+
+            dead = await fetch_one(
+                "SELECT count(*) AS n FROM notifications WHERE pushed_at IS NULL "
+                "AND push_attempts >= %s AND created_at > now() - interval '24 hours'",
+                (MAX_ATTEMPTS,),
+            )
+            n = int(dead["n"]) if dead else 0
+            row(
+                "push delivery", n == 0 or None,
+                "nothing abandoned in 24h" if n == 0
+                else f"{n} notification(s) gave up after {MAX_ATTEMPTS} attempts in 24h; "
+                "see `agent actions` for kind=push errors",
+            )
+    else:
+        row("ntfy", None, "push is off (ntfy.enabled = false)")
+
     # The review queue. `agent doctor` already reports whether the daemon is running, but a
     # yellow "not running" beside an otherwise green table reads as benign — on 2026-09-18 it
     # was sitting next to five candidates that would never be adjudicated. What was missing is

@@ -282,3 +282,28 @@ async def test_a_credential_in_a_title_does_not_leave_the_box(cfg):
 
 async def test_an_empty_title_still_says_something(cfg):
     assert notifier._headers({"title": "", "level": "info"}, cfg)["Title"] == "agent"
+
+
+async def test_a_unicode_title_reaches_ntfy_instead_of_dying_in_the_client(cfg):
+    """HTTP header values are ASCII. A title with an em-dash made httpx raise before the
+    request left the process, and the row burned its six attempts on the same exception
+    (twelve times on 2026-09-20). ntfy decodes RFC 2047, so the title travels encoded."""
+    import base64
+
+    headers = notifier._headers({"title": "Overdue — coursework", "level": "warn"}, cfg)
+    title = headers["Title"]
+    title.encode("ascii")  # httpx can send it
+    assert title.startswith("=?UTF-8?B?") and title.endswith("?=")
+    assert base64.b64decode(title[len("=?UTF-8?B?"):-2]).decode() == "Overdue — coursework"
+    # And a plain title is left exactly as it was.
+    assert notifier._headers({"title": "Suggestion", "level": "info"}, cfg)["Title"] == "Suggestion"
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["title"] = request.headers["Title"]
+        return httpx.Response(200, json={"id": "x"})
+
+    async with _client(handler) as client:
+        assert await notifier.push(await _row(title="Overdue — coursework"), cfg, client)
+    assert seen["title"].startswith("=?UTF-8?B?")

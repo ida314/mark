@@ -68,6 +68,21 @@ Suite 1033 → **1104**, `ruff check .` clean. One existing test rewritten
 (`test_the_two_readings_answer_different_questions`: tool results now carry, clipped) and
 the vocabulary pin updated. Daemon restarted 2026-09-28 after the change.
 
+## Also found: push had been dead for eight days
+
+Dylan's second question in the same session ("my notifications are also not sending
+timely") was not a latency problem. `notifications` held 303 rows all-time, 35 ever pushed,
+none since 2026-09-20 15:54 UTC; 257 of the last seven days' rows had `push_attempts = 6`
+and `pushed_at IS NULL`. `actions` held 1 608 `push/ntfy` errors, all `All connection
+attempts failed`. Cause: `agentd-ntfy-1` was `Up 3 days` with `NetworkSettings.Networks = {}`
+and no published ports — a container restored across the 2026-09-24 reboots without its
+endpoint — so nothing listened on 8088. `docker compose up -d ntfy` recreated it; health
+200, the `everyone agent rw` grant intact in the volume, a test push accepted. The backlog
+is not replayed (`_unpushed` skips rows at the cap), which is the right default and means
+those 257 stay unread in `agent inbox`. Twelve further errors on 09-20 were
+`'ascii' codec can't encode character '—'`: a Unicode title cannot cross the `Title`
+header.
+
 ## Still open
 
 - `01a0e9f6`'s two approvals are still `pending` (expire 2026-09-29 21:43 UTC); the
