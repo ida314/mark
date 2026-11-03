@@ -3,7 +3,7 @@
 
 [mcp.servers.filesystem]
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/dylan/Projects"]
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/dylan/code/projects"]
 enabled = false
 risk_default = "read"
 trust_output = false
